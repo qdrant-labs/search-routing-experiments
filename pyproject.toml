@@ -1,0 +1,17 @@
+[project]
+name = "hybrid-search-rrf-dataset"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "andrei.cristea",email = "andrei.cristea@qdrant.com"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "ir-datasets (>=0.6.1,<0.7.0)",
+    "pandas (>=3.0.3,<4.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
