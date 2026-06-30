@@ -1,2 +1,4 @@
 .claude
 .venv 
+src/data
+__pycache__
