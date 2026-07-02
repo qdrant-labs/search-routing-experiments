@@ -9,22 +9,24 @@ from typing import ClassVar, Generic, TypeVar
 import numpy as np
 import pandas as pd
 import requests
-from fastembed import SparseTextEmbedding, TextEmbedding
 from pydantic import BaseModel
-from qdrant_client import QdrantClient
-from qdrant_client.models import SparseVector
 from ranx import Qrels, Run, evaluate
 from tqdm.auto import tqdm
 
-from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
+from hybrid_search_rrf_dataset.fusion import (
+    FusionStrategy,
+    StrategyName,
+    WeightedFusionStrategy,
+)
 from hybrid_search_rrf_dataset.retrieval import RetrievalDataset
 
 
 class FusionRow(BaseModel):
     """Shared row schema for any hybrid-fusion result.
 
-    Concrete row types (GoldenDataset, LLMFusionDataset) inherit without
-    adding fields — the class identity marks how `alpha` was chosen.
+    Concrete row types (GoldenDataset, LLMFusionDataset, BaselineDataset)
+    inherit without adding fields — the class identity marks how `alpha`
+    was chosen. `strategy_name` marks which fusion algorithm produced the ranking.
     """
 
     id: int
@@ -36,6 +38,7 @@ class FusionRow(BaseModel):
     metric: float
     metric_name: str
     alpha: float
+    strategy_name: StrategyName
 
 
 class GoldenDataset(FusionRow):
@@ -46,32 +49,11 @@ class LLMFusionDataset(FusionRow):
     """Alpha predicted by an external LLM scorer."""
 
 
+class BaselineDataset(FusionRow):
+    """No alpha selection — strategy evaluated at fixed weights."""
+
+
 T = TypeVar("T", bound=FusionRow)
-
-
-def dbsf_normalize(scores: list[float]) -> list[float]:
-    """3-sigma DBSF: z-score, clip to [-3, 3], shift to [0, 1]."""
-    if not scores:
-        return []
-    arr = np.asarray(scores, dtype=np.float64)
-    if arr.std() == 0:
-        return [0.5] * len(scores)
-    z = np.clip((arr - arr.mean()) / arr.std(), -3.0, 3.0)
-    return ((z + 3.0) / 6.0).tolist()
-
-
-def weighted_combine(
-    dense: dict[str, float],
-    sparse: dict[str, float],
-    alpha: float,
-) -> dict[str, float]:
-    """final = (1-alpha)*dense + alpha*sparse. alpha->0: semantic, alpha->1: sparse."""
-    merged: dict[str, float] = {}
-    for doc_id, score in dense.items():
-        merged[doc_id] = (1.0 - alpha) * score
-    for doc_id, score in sparse.items():
-        merged[doc_id] = merged.get(doc_id, 0.0) + alpha * score
-    return merged
 
 
 def ndcg_score(
@@ -91,71 +73,16 @@ def top_k_ids(merged: dict[str, float], k: int) -> list[str]:
 class FusionBuilder(ABC, Generic[T]):
     """Base for hybrid-fusion row builders.
 
-    Owns Qdrant search + embedding + DBSF machinery. Subclasses decide how
-    alpha is chosen per query (grid sweep vs external predictor) and which
-    concrete row type they emit.
+    Delegates all Qdrant + embedding + fusion math to the injected
+    `FusionStrategy`. Subclasses decide only how alpha (weight split) is chosen.
     """
 
     row_type: ClassVar[type[FusionRow]]
     default_dir: ClassVar[Path] = Path("data/fusion")
 
-    def __init__(
-        self,
-        client: QdrantClient,
-        collection_name: str,
-        dense_cfg: EmbeddingConfig,
-        sparse_cfg: EmbeddingConfig,
-        top_k: int = 10,
-        fetch_limit: int = 1000,
-    ) -> None:
-        self.client = client
-        self.collection_name = collection_name
-        self.dense_cfg = dense_cfg
-        self.sparse_cfg = sparse_cfg
+    def __init__(self, strategy: FusionStrategy, top_k: int = 10) -> None:
+        self.strategy = strategy
         self.top_k = top_k
-        self.fetch_limit = fetch_limit
-        self._dense_model: TextEmbedding | None = None
-        self._sparse_model: SparseTextEmbedding | None = None
-
-    def _dense(self, text: str) -> list[float]:
-        if self._dense_model is None:
-            self._dense_model = TextEmbedding(
-                self.dense_cfg.model_id, providers=self.dense_cfg.providers
-            )
-        return next(iter(self._dense_model.embed([text]))).tolist()
-
-    def _sparse(self, text: str) -> SparseVector:
-        if self._sparse_model is None:
-            self._sparse_model = SparseTextEmbedding(
-                self.sparse_cfg.model_id, providers=self.sparse_cfg.providers
-            )
-        s = next(iter(self._sparse_model.embed([text])))
-        return SparseVector(indices=s.indices.tolist(), values=s.values.tolist())
-
-    def _fetch(self, query: str) -> tuple[dict[str, float], dict[str, float]]:
-        dense_hits = self.client.query_points(
-            collection_name=self.collection_name,
-            query=self._dense(query),
-            using=self.dense_cfg.name,
-            limit=self.fetch_limit,
-            with_payload=True,
-        ).points
-        sparse_hits = self.client.query_points(
-            collection_name=self.collection_name,
-            query=self._sparse(query),
-            using=self.sparse_cfg.name,
-            limit=self.fetch_limit,
-            with_payload=True,
-        ).points
-
-        dense_ids = [h.payload["doc_id"] for h in dense_hits if h.payload]
-        sparse_ids = [h.payload["doc_id"] for h in sparse_hits if h.payload]
-        dense_scores = dbsf_normalize([h.score for h in dense_hits])
-        sparse_scores = dbsf_normalize([h.score for h in sparse_hits])
-        return (
-            dict(zip(dense_ids, dense_scores, strict=True)),
-            dict(zip(sparse_ids, sparse_scores, strict=True)),
-        )
 
     def _iter_queries(
         self, dataset: RetrievalDataset, start_id: int
@@ -219,7 +146,6 @@ class FusionBuilder(ABC, Generic[T]):
         path: Path | str | None = None,
         start_id: int = 0,
     ) -> list[T]:
-        """Load if the parquet exists, otherwise build and save."""
         file = Path(path or self.default_dir) / "rows.parquet"
         if file.exists():
             return type(self).load(path)
@@ -236,17 +162,11 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
 
     def __init__(
         self,
-        client: QdrantClient,
-        collection_name: str,
-        dense_cfg: EmbeddingConfig,
-        sparse_cfg: EmbeddingConfig,
+        strategy: WeightedFusionStrategy,
         alpha_step: float = 0.1,
         top_k: int = 10,
-        fetch_limit: int = 1000,
     ) -> None:
-        super().__init__(
-            client, collection_name, dense_cfg, sparse_cfg, top_k, fetch_limit
-        )
+        super().__init__(strategy, top_k)
         self.alpha_step = alpha_step
 
     def build_row(
@@ -257,10 +177,9 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
         gold_qrel: dict[str, int],
         dataset_name: str,
     ) -> GoldenDataset:
-        dense, sparse = self._fetch(query)
         best_alpha, best_ndcg, best_ranking = 0.0, -1.0, []
         for alpha in np.arange(0.0, 1.0 + self.alpha_step / 2, self.alpha_step):
-            merged = weighted_combine(dense, sparse, float(alpha))
+            merged = self.strategy.rank(query, 1.0 - float(alpha), float(alpha))
             score = ndcg_score(merged, gold_qrel, self.top_k)
             if score > best_ndcg:
                 best_ndcg = score
@@ -277,6 +196,7 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
             metric=best_ndcg,
             metric_name=f"NDCG@{self.top_k}",
             alpha=best_alpha,
+            strategy_name=self.strategy.name,
         )
 
 
@@ -290,19 +210,13 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
 
     def __init__(
         self,
-        client: QdrantClient,
-        collection_name: str,
-        dense_cfg: EmbeddingConfig,
-        sparse_cfg: EmbeddingConfig,
+        strategy: WeightedFusionStrategy,
         api_url: str | None = None,
         api_key: str | None = None,
         top_k: int = 10,
-        fetch_limit: int = 1000,
         request_timeout: float = 30.0,
     ) -> None:
-        super().__init__(
-            client, collection_name, dense_cfg, sparse_cfg, top_k, fetch_limit
-        )
+        super().__init__(strategy, top_k)
         url = api_url or os.getenv("QDRANT_LLM_FUSION_URL")
         key = api_key or os.getenv("QDRANT_LLM_FUSION_KEY")
         if not url or not key:
@@ -334,8 +248,7 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
         dataset_name: str,
     ) -> LLMFusionDataset:
         alpha = self._predict_alpha(query)
-        dense, sparse = self._fetch(query)
-        merged = weighted_combine(dense, sparse, alpha)
+        merged = self.strategy.rank(query, 1.0 - alpha, alpha)
         metric = ndcg_score(merged, gold_qrel, self.top_k)
         ranking = top_k_ids(merged, self.top_k)
 
@@ -349,4 +262,52 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
             metric=metric,
             metric_name=f"NDCG@{self.top_k}",
             alpha=alpha,
+            strategy_name=self.strategy.name,
+        )
+
+
+class BaselineBuilder(FusionBuilder[BaselineDataset]):
+    """No alpha selection — run the strategy at fixed weights.
+
+    For PureRRFStrategy the weights are ignored, giving the true baseline.
+    For weighted strategies this is "no alpha tuning, equal weights".
+    """
+
+    row_type: ClassVar[type[FusionRow]] = BaselineDataset
+    default_dir: ClassVar[Path] = Path("data/baseline")
+
+    def __init__(
+        self,
+        strategy: FusionStrategy,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+        top_k: int = 10,
+    ) -> None:
+        super().__init__(strategy, top_k)
+        self.dense_weight = dense_weight
+        self.sparse_weight = sparse_weight
+
+    def build_row(
+        self,
+        row_id: int,
+        query_id: str,
+        query: str,
+        gold_qrel: dict[str, int],
+        dataset_name: str,
+    ) -> BaselineDataset:
+        merged = self.strategy.rank(query, self.dense_weight, self.sparse_weight)
+        metric = ndcg_score(merged, gold_qrel, self.top_k)
+        ranking = top_k_ids(merged, self.top_k)
+
+        return BaselineDataset(
+            id=row_id,
+            query_id=query_id,
+            dataset_name=dataset_name,
+            query=query,
+            qdrant_answer=ranking,
+            gold_qrel=gold_qrel,
+            metric=metric,
+            metric_name=f"NDCG@{self.top_k}",
+            alpha=self.sparse_weight,
+            strategy_name=self.strategy.name,
         )

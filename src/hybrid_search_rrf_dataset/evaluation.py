@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -13,32 +14,55 @@ if TYPE_CHECKING:
 
 
 class ComparisonSummary(BaseModel):
-    """Head-to-head numbers for a candidate fusion strategy vs a golden reference."""
+    """Head-to-head numbers for a candidate fusion strategy vs a golden reference.
+
+    Metric-agnostic: `metric_name` carries whatever the rows were scored with
+    (e.g. NDCG@10, MRR@20) and every regret number is in that metric's units.
+    Alpha-space agreement is deliberately excluded: the golden alpha is
+    non-unique (the metric plateaus over alpha), so distance-to-oracle-alpha
+    is not evidence of quality.
+    """
 
     n_queries: int
+    metric_name: str
 
-    alpha_mae: float
-    """mean absolute error between LLM alpha and golden alpha (lower is better)"""
-    
-    alpha_pearson: float
-    """linear correlation (1.0 = perfect linear agreement, 0 = no relationship, negative = LLM predicts opposite direction)"""
-
-    alpha_within_tolerance_pct: float
-    """% of queries where LLM's alpha is within 0.1 of golden"""
-    
     mean_metric_golden: float
+    """average oracle metric — the attainable ceiling for this strategy"""
+
     mean_metric_candidate: float
 
     mean_regret: float
-    """ average NDCG lost by trusting LLM over golden. This is the killer metric. Close to 0 = LLM is nearly as good as knowing the optimum. Large = LLM is picking bad alphas."""
-    max_regret: float
+    """average metric lost vs the oracle. The killer metric: ~0 = candidate is
+    nearly as good as knowing the per-query optimum."""
+
+    median_regret: float
+    """robust central tendency — unlike the mean, not dragged by a few
+    catastrophic queries"""
+
+    p90_regret: float
+    """how bad the worst decile of queries gets"""
+
+    oracle_hit_rate_pct: float
+    """% of queries where the candidate reaches the golden metric (within
+    epsilon). Outcome-space replacement for alpha-tolerance: a different alpha
+    on the same metric plateau counts as a hit, as it should."""
+
+
+def _single_metric_name(rows: Iterable[FusionRow]) -> str:
+    names = {r.metric_name for r in rows}
+    if len(names) != 1:
+        raise ValueError(
+            f"Rows must share a single metric to be comparable, got {sorted(names)}."
+        )
+    return names.pop()
 
 
 def _joined(
     golden: list[FusionRow], candidate: list[FusionRow]
 ) -> pd.DataFrame:
-    ref = pd.DataFrame([r.model_dump() for r in golden]).set_index("query_id")
-    cand = pd.DataFrame([r.model_dump() for r in candidate]).set_index("query_id")
+    keys = ["dataset_name", "query_id"]
+    ref = pd.DataFrame([r.model_dump() for r in golden]).set_index(keys)
+    cand = pd.DataFrame([r.model_dump() for r in candidate]).set_index(keys)
     return ref[["alpha", "metric", "query"]].join(
         cand[["alpha", "metric"]], lsuffix="_golden", rsuffix="_candidate", how="inner"
     )
@@ -47,30 +71,30 @@ def _joined(
 def compare(
     golden: list[FusionRow],
     candidate: list[FusionRow],
-    alpha_tolerance: float = 0.1,
+    regret_epsilon: float = 1e-6,
 ) -> ComparisonSummary:
     """Compare a candidate builder's rows against the golden (optimal) rows.
 
-    Regret = golden.metric - candidate.metric. Positive means the candidate
-    left NDCG on the table by picking a worse alpha.
+    Regret = golden.metric - candidate.metric, in units of the rows' shared
+    metric. Positive means the candidate left quality on the table. Slightly
+    negative regret is possible when the candidate's alpha falls between the
+    golden sweep's grid points.
     """
+    metric_name = _single_metric_name([*golden, *candidate])
     df = _joined(golden, candidate)
     if df.empty:
-        raise ValueError("No overlapping query_ids between golden and candidate.")
+        raise ValueError("No overlapping (dataset_name, query_id) between golden and candidate.")
 
-    alpha_delta = (df["alpha_candidate"] - df["alpha_golden"]).abs()
     regret = df["metric_golden"] - df["metric_candidate"]
     return ComparisonSummary(
         n_queries=len(df),
-        alpha_mae=float(alpha_delta.mean()),
-        alpha_pearson=float(df["alpha_golden"].corr(df["alpha_candidate"])),
-        alpha_within_tolerance_pct=float(
-            (alpha_delta <= alpha_tolerance).mean() * 100
-        ),
+        metric_name=metric_name,
         mean_metric_golden=float(df["metric_golden"].mean()),
         mean_metric_candidate=float(df["metric_candidate"].mean()),
         mean_regret=float(regret.mean()),
-        max_regret=float(regret.max()),
+        median_regret=float(regret.median()),
+        p90_regret=float(regret.quantile(0.9)),
+        oracle_hit_rate_pct=float((regret <= regret_epsilon).mean() * 100),
     )
 
 
@@ -80,9 +104,10 @@ def plot_comparison(
     candidate_label: str = "candidate",
 ) -> Figure:
     """Four-panel plot: alpha scatter, metric scatter, alpha delta, regret."""
+    metric_name = _single_metric_name([*golden, *candidate])
     df = _joined(golden, candidate)
     if df.empty:
-        raise ValueError("No overlapping query_ids between golden and candidate.")
+        raise ValueError("No overlapping (dataset_name, query_id) between golden and candidate.")
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
@@ -100,11 +125,11 @@ def plot_comparison(
     ax.scatter(df["metric_golden"], df["metric_candidate"], alpha=0.6)
     lim = max(df["metric_golden"].max(), df["metric_candidate"].max()) * 1.05
     ax.plot([0, lim], [0, lim], "k--", alpha=0.4, label="y=x")
-    ax.set_xlabel("golden NDCG@10 (best possible)")
-    ax.set_ylabel(f"{candidate_label} NDCG@10")
+    ax.set_xlabel(f"golden {metric_name} (best possible)")
+    ax.set_ylabel(f"{candidate_label} {metric_name}")
     ax.set_xlim(0, lim)
     ax.set_ylim(0, lim)
-    ax.set_title("NDCG agreement")
+    ax.set_title(f"{metric_name} agreement")
     ax.legend()
 
     ax = axes[1, 0]
@@ -119,9 +144,9 @@ def plot_comparison(
     regret = df["metric_golden"] - df["metric_candidate"]
     ax.hist(regret, bins=20, edgecolor="black")
     ax.axvline(0, color="k", linestyle="--", alpha=0.6)
-    ax.set_xlabel(f"NDCG regret (golden - {candidate_label})")
+    ax.set_xlabel(f"{metric_name} regret (golden - {candidate_label})")
     ax.set_ylabel("queries")
-    ax.set_title(f"NDCG regret (mean = {regret.mean():.3f})")
+    ax.set_title(f"{metric_name} regret (mean = {regret.mean():.3f})")
 
     fig.tight_layout()
     return fig
