@@ -53,7 +53,65 @@ class BaselineDataset(FusionRow):
     """No alpha selection — strategy evaluated at fixed weights."""
 
 
+class HybridRoutingDataset(FusionRow):
+    """LLM classifier score routes each query to Dense-only, Hybrid (RRF), or Sparse-only.
+
+    `strategy_name` records the actual retriever picked per query (dense_only /
+    pure_rrf / sparse_only). `alpha` is the *effective* alpha of that route
+    (0.0 / 0.5 / 1.0) so the alpha diagnostic plots remain interpretable.
+    """
+
+
+class GoldenRoutingDataset(FusionRow):
+    """Best of the three routing endpoints per query — oracle counterpart to
+    HybridRoutingDataset on the same discrete decision surface.
+
+    Same alpha convention as HybridRoutingDataset: Dense→0.0, Hybrid→0.5,
+    Sparse→1.0 — a continuous golden alpha of, say, 0.2 falls in the Dense
+    bucket and the row stores 0.0.
+    """
+
+
 T = TypeVar("T", bound=FusionRow)
+
+
+class LLMScoreClient:
+    """Client for the query-classification LLM API returning an integer score in [0, 9].
+
+    Same endpoint that Qdrant page-search production hits (`fusion.qdrant.tech/v1/classify`,
+    per rust_search/skills/fusion.rs). Shared by builders that consume the score
+    in different ways: LLMFusionBuilder normalizes to alpha, HybridRoutingBuilder
+    routes on the raw integer.
+    """
+
+    SCORE_MAX = 9
+
+    def __init__(
+        self,
+        api_url: str | None = None,
+        api_key: str | None = None,
+        request_timeout: float = 30.0,
+    ) -> None:
+        url = api_url or os.getenv("QDRANT_LLM_FUSION_URL")
+        key = api_key or os.getenv("QDRANT_LLM_FUSION_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "LLMScoreClient needs api_url + api_key (or "
+                "QDRANT_LLM_FUSION_URL + QDRANT_LLM_FUSION_KEY env vars)."
+            )
+        self._api_url = url
+        self._api_key = key
+        self._timeout = request_timeout
+
+    def score(self, query: str) -> int:
+        response = requests.post(
+            self._api_url,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json={"text": query},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return int(response.json()["score"])
 
 
 def ndcg_score(
@@ -138,7 +196,16 @@ class FusionBuilder(ABC, Generic[T]):
     def load(cls, path: Path | str | None = None) -> list[T]:
         file = Path(path or cls.default_dir) / "rows.parquet"
         df = pd.read_parquet(file)
-        return [cls.row_type(**row) for row in df.to_dict("records")]
+        rows: list[T] = []
+        for rec in df.to_dict("records"):
+            # Parquet stores dict columns as STRUCT, unifying keys across all rows
+            # and filling missing entries with None (ints also come back as floats).
+            # Strip that padding so gold_qrel matches its dict[str, int] contract.
+            gq = rec.get("gold_qrel")
+            if isinstance(gq, dict):
+                rec["gold_qrel"] = {k: int(v) for k, v in gq.items() if v is not None}
+            rows.append(cls.row_type(**rec))
+        return rows
 
     def build_or_load(
         self,
@@ -206,38 +273,14 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
     row_type: ClassVar[type[FusionRow]] = LLMFusionDataset
     default_dir: ClassVar[Path] = Path("data/llm_fusion")
 
-    _LLM_SCORE_MAX = 9
-
     def __init__(
         self,
         strategy: WeightedFusionStrategy,
-        api_url: str | None = None,
-        api_key: str | None = None,
+        client: LLMScoreClient | None = None,
         top_k: int = 10,
-        request_timeout: float = 30.0,
     ) -> None:
         super().__init__(strategy, top_k)
-        url = api_url or os.getenv("QDRANT_LLM_FUSION_URL")
-        key = api_key or os.getenv("QDRANT_LLM_FUSION_KEY")
-        if not url or not key:
-            raise RuntimeError(
-                "LLMFusionBuilder needs api_url + api_key (or "
-                "QDRANT_LLM_FUSION_URL + QDRANT_LLM_FUSION_KEY env vars)."
-            )
-        self._api_url = url
-        self._api_key = key
-        self._timeout = request_timeout
-
-    def _predict_alpha(self, query: str) -> float:
-        response = requests.post(
-            self._api_url,
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"text": query},
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        score = int(response.json()["score"])
-        return score / self._LLM_SCORE_MAX
+        self._client = client or LLMScoreClient()
 
     def build_row(
         self,
@@ -247,7 +290,7 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
         gold_qrel: dict[str, int],
         dataset_name: str,
     ) -> LLMFusionDataset:
-        alpha = self._predict_alpha(query)
+        alpha = self._client.score(query) / LLMScoreClient.SCORE_MAX
         merged = self.strategy.rank(query, 1.0 - alpha, alpha)
         metric = ndcg_score(merged, gold_qrel, self.top_k)
         ranking = top_k_ids(merged, self.top_k)
@@ -310,4 +353,146 @@ class BaselineBuilder(FusionBuilder[BaselineDataset]):
             metric_name=f"NDCG@{self.top_k}",
             alpha=self.sparse_weight,
             strategy_name=self.strategy.name,
+        )
+
+
+class GoldenRoutingBuilder(FusionBuilder[GoldenRoutingDataset]):
+    """Sweep the three routing endpoints per query and pick the metric-maximizing one.
+
+    Direct analog of GoldenSetBuilder: same sweep-then-pick loop, but the sweep
+    space is the router's finite decision surface {Dense, Hybrid, Sparse} rather
+    than the continuous alpha grid. Regret of HybridRoutingBuilder against this
+    oracle isolates classifier quality from the coarseness of the routing surface
+    itself.
+
+    The Hybrid endpoint should be `PureRRFStrategy` to match production and
+    HybridRoutingBuilder — pass anything else only for ablation experiments.
+    """
+
+    row_type: ClassVar[type[FusionRow]] = GoldenRoutingDataset
+    default_dir: ClassVar[Path] = Path("data/golden_routing")
+
+    def __init__(
+        self,
+        dense_strategy: FusionStrategy,
+        hybrid_strategy: FusionStrategy,
+        sparse_strategy: FusionStrategy,
+        top_k: int = 10,
+    ) -> None:
+        # Base needs *a* strategy; hybrid is the natural default and self.strategy
+        # is not read by this builder (build_row picks per-route below).
+        super().__init__(hybrid_strategy, top_k)
+        self._routes: list[tuple[FusionStrategy, float]] = [
+            (dense_strategy, 0.0),
+            (hybrid_strategy, 0.5),
+            (sparse_strategy, 1.0),
+        ]
+
+    def build_row(
+        self,
+        row_id: int,
+        query_id: str,
+        query: str,
+        gold_qrel: dict[str, int],
+        dataset_name: str,
+    ) -> GoldenRoutingDataset:
+        best_strategy, best_alpha = self._routes[0]
+        best_ndcg, best_ranking = -1.0, []
+        for strategy, effective_alpha in self._routes:
+            merged = strategy.rank(query, 0.0, 0.0)  # routing endpoints ignore weights
+            score = ndcg_score(merged, gold_qrel, self.top_k)
+            if score > best_ndcg:
+                best_ndcg = score
+                best_strategy = strategy
+                best_alpha = effective_alpha
+                best_ranking = top_k_ids(merged, self.top_k)
+
+        return GoldenRoutingDataset(
+            id=row_id,
+            query_id=query_id,
+            dataset_name=dataset_name,
+            query=query,
+            qdrant_answer=best_ranking,
+            gold_qrel=gold_qrel,
+            metric=best_ndcg,
+            metric_name=f"NDCG@{self.top_k}",
+            alpha=best_alpha,
+            strategy_name=best_strategy.name,
+        )
+
+
+class HybridRoutingBuilder(FusionBuilder[HybridRoutingDataset]):
+    """Route each query to Dense / Hybrid / Sparse based on the LLM classifier score.
+
+    Matches Qdrant page-search production (rust_search/src/skills/fusion.rs):
+    integer score → { 0..dense_max: Dense, dense_max+1..hybrid_max: Hybrid, else: Sparse }.
+    Any score outside [0, hybrid_max] falls through to Sparse — mirrors the Rust
+    `_ => Bm25` catch-all, which handles both the 7..=9 tail and out-of-range values.
+    Defaults (2, 6) reproduce production thresholds.
+
+    Hybrid should be `PureRRFStrategy` to match production (`Fusion::Rrf`); pass a
+    different strategy only for ablation experiments.
+    """
+
+    row_type: ClassVar[type[FusionRow]] = HybridRoutingDataset
+    default_dir: ClassVar[Path] = Path("data/hybrid_routing")
+
+    def __init__(
+        self,
+        dense_strategy: FusionStrategy,
+        hybrid_strategy: FusionStrategy,
+        sparse_strategy: FusionStrategy,
+        dense_max: int = 2,
+        hybrid_max: int = 6,
+        client: LLMScoreClient | None = None,
+        top_k: int = 10,
+    ) -> None:
+        if not 0 <= dense_max < hybrid_max <= LLMScoreClient.SCORE_MAX:
+            raise ValueError(
+                f"Thresholds must satisfy 0 <= dense_max < hybrid_max <= {LLMScoreClient.SCORE_MAX}, "
+                f"got dense_max={dense_max}, hybrid_max={hybrid_max}."
+            )
+        # The base needs *a* strategy; hybrid is the natural default and self.strategy
+        # is not read by this builder (routing picks per-query below).
+        super().__init__(hybrid_strategy, top_k)
+        self._dense = dense_strategy
+        self._hybrid = hybrid_strategy
+        self._sparse = sparse_strategy
+        self._dense_max = dense_max
+        self._hybrid_max = hybrid_max
+        self._client = client or LLMScoreClient()
+
+    def _route(self, score: int) -> tuple[FusionStrategy, float]:
+        """Return (strategy, effective alpha) for a given classifier score."""
+        if 0 <= score <= self._dense_max:
+            return self._dense, 0.0
+        if self._dense_max < score <= self._hybrid_max:
+            return self._hybrid, 0.5
+        return self._sparse, 1.0
+
+    def build_row(
+        self,
+        row_id: int,
+        query_id: str,
+        query: str,
+        gold_qrel: dict[str, int],
+        dataset_name: str,
+    ) -> HybridRoutingDataset:
+        score = self._client.score(query)
+        strategy, alpha = self._route(score)
+        merged = strategy.rank(query, 0.0, 0.0)  # all routed strategies ignore weights
+        metric = ndcg_score(merged, gold_qrel, self.top_k)
+        ranking = top_k_ids(merged, self.top_k)
+
+        return HybridRoutingDataset(
+            id=row_id,
+            query_id=query_id,
+            dataset_name=dataset_name,
+            query=query,
+            qdrant_answer=ranking,
+            gold_qrel=gold_qrel,
+            metric=metric,
+            metric_name=f"NDCG@{self.top_k}",
+            alpha=alpha,
+            strategy_name=strategy.name,
         )

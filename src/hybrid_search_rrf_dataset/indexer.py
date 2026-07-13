@@ -2,16 +2,17 @@ import logging
 import pickle
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, TypeVar
 
 import numpy as np
 from fastembed import SparseTextEmbedding, TextEmbedding
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
+    Document,
     PointStruct,
     SparseVector,
     SparseVectorParams,
@@ -200,6 +201,96 @@ class BaseIndexer(ABC, Generic[T]):
                 f"expected >={len(points)} points, got {actual}."
             )
 
+    def upload_points_iter(
+        self,
+        items: Iterable[T | dict[str, Any]],
+        batch_size: int = 64,
+        parallel: int = 1,
+        max_retries: int = 3,
+    ) -> None:
+        """Stream items into Qdrant via `client.upload_points`.
+
+        Uses qdrant-client's built-in bulk uploader: parallel worker pool
+        for network I/O, built-in retries, and its own tqdm bar via
+        `show_progress=True`. Best for very large corpora where upsert
+        latency dominates.
+
+        `batch_size` controls both embedding chunk size and upsert chunk size.
+        `parallel` sets the number of worker threads inside qdrant-client.
+
+        Note: bypasses `EmbeddingCache` — the qdrant-client streaming path
+        doesn't compose with the (id -> vector) cache. For repeated runs on
+        the same items with local models, use `upload_iter`.
+        """
+        self.client.upload_points(
+            collection_name=self.collection_name,
+            points=self._points_iter(items, batch_size),
+            batch_size=batch_size,
+            parallel=parallel,
+            max_retries=max_retries,
+            show_progress=True,
+        )
+
+    def _points_iter(
+        self,
+        items: Iterable[T | dict[str, Any]],
+        batch_size: int,
+    ) -> Iterator[PointStruct]:
+        """Yield PointStructs lazily, embedding one batch at a time."""
+        batch: list[T] = []
+        for item in items:
+            if isinstance(item, dict):
+                item = self.item_type.model_validate(item)
+            batch.append(item)  # type: ignore[arg-type]
+            if len(batch) >= batch_size:
+                yield from self._batch_to_points(batch, batch_size)
+                batch = []
+        if batch:
+            yield from self._batch_to_points(batch, batch_size)
+
+    def _batch_to_points(
+        self,
+        batch: list[T],
+        batch_size: int,
+    ) -> Iterator[PointStruct]:
+        texts = [self.item_text(i) for i in batch]
+        ids = [self.item_id(i) for i in batch]
+        payloads = [self.item_payload(i) for i in batch]
+        vectors: list[dict[str, Any]] = [{} for _ in batch]
+        for cfg in self.embeddings:
+            for i, vec in enumerate(self._embed(cfg, texts, batch_size)):
+                vectors[i][cfg.name] = vec
+        for i in range(len(batch)):
+            yield PointStruct(id=ids[i], vector=vectors[i], payload=payloads[i])
+
+    def upload_iter(
+        self,
+        items: Iterable[T | dict[str, Any]],
+        batch_size: int = 64,
+        total: int | None = None,
+    ) -> None:
+        """Stream `items` into Qdrant one batch at a time.
+
+        Untyped dicts are validated into `item_type` per-batch via pydantic,
+        so sources that don't fit in memory (HF datasets, JSONL iterators)
+        work directly. Each batch flows through the same `upload()` path,
+        so caching and embedding behavior stay identical.
+
+        Pass `total` when the source has a known length (e.g. `len(dataset)`)
+        so the progress bar shows an ETA; omit it for open-ended streams.
+        """
+        batch: list[T] = []
+        progress = tqdm(items, total=total, desc=f"upload:{self.collection_name}")
+        for item in progress:
+            if isinstance(item, dict):
+                item = self.item_type.model_validate(item)
+            batch.append(item)  # type: ignore[arg-type]
+            if len(batch) >= batch_size:
+                self.upload(batch, batch_size=batch_size)
+                batch = []
+        if batch:
+            self.upload(batch, batch_size=batch_size)
+
     def _vectors_for(
         self,
         cfg: EmbeddingConfig,
@@ -208,7 +299,7 @@ class BaseIndexer(ABC, Generic[T]):
         batch_size: int,
     ) -> list[Any]:
         """Return vectors aligned with `ids`/`texts`, hitting cache where possible."""
-        if self.cache is None:
+        if self.cache is None or self.client.cloud_inference:
             return self._embed(cfg, texts, batch_size)
 
         store = self.cache
@@ -228,6 +319,7 @@ class BaseIndexer(ABC, Generic[T]):
                 store.save(cfg.model_id, cfg.kind)
 
         return [cache[str(id_)] for id_ in ids]
+    
 
     def _embed(
         self,
@@ -235,6 +327,9 @@ class BaseIndexer(ABC, Generic[T]):
         texts: list[str],
         batch_size: int,
     ) -> list[Any]:
+        if self.client.cloud_inference:
+            return [Document(text=text, model=cfg.model_id) for text in texts]
+
         if cfg.kind == "dense":
             model = self._dense(cfg)
             stream = tqdm(
@@ -283,6 +378,8 @@ class CorpusDocument(BaseModel):
     doc_id: str
     title: str
     text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Extra payload preserved alongside the canonical fields — not embedded."""
 
 
 class CorpusIndexer(BaseIndexer[CorpusDocument]):
@@ -302,4 +399,10 @@ class CorpusIndexer(BaseIndexer[CorpusDocument]):
         return f"{item.title} {item.text}".strip()
 
     def item_payload(self, item: CorpusDocument) -> dict[str, Any]:
-        return {"doc_id": item.doc_id, "title": item.title, "text": item.text}
+        # Canonical fields win over metadata on key collision.
+        return {
+            **item.metadata,
+            "doc_id": item.doc_id,
+            "title": item.title,
+            "text": item.text,
+        }

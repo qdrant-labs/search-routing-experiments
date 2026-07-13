@@ -24,6 +24,8 @@ class StrategyName(StrEnum):
     PURE_RRF = "pure_rrf"
     WEIGHTED_RRF = "weighted_rrf"
     WEIGHTED_DBSF = "weighted_dbsf"
+    DENSE_ONLY = "dense_only"
+    SPARSE_ONLY = "sparse_only"
 
 
 def dbsf_normalize(scores: list[float]) -> list[float]:
@@ -153,6 +155,32 @@ class WeightedRRFStrategy(WeightedFusionStrategy):
             with_payload=True,
         ).points
         return {h.payload["doc_id"]: h.score for h in hits if h.payload}
+
+
+class DenseOnlyStrategy(FusionStrategy):
+    """Route endpoint: dense retrieval only, raw cosine similarity preserved.
+
+    Weight arguments are ignored — routing builders pick this strategy per query
+    and score magnitude is the whole point (unlike RRF, which discards it).
+    """
+
+    name: ClassVar[StrategyName] = StrategyName.DENSE_ONLY
+
+    def rank(
+        self, query: str, dense_weight: float, sparse_weight: float
+    ) -> dict[str, float]:
+        return {h.payload["doc_id"]: h.score for h in self._dense_hits(query) if h.payload}
+
+
+class SparseOnlyStrategy(FusionStrategy):
+    """Route endpoint: sparse (BM25) retrieval only, raw BM25 score preserved."""
+
+    name: ClassVar[StrategyName] = StrategyName.SPARSE_ONLY
+
+    def rank(
+        self, query: str, dense_weight: float, sparse_weight: float
+    ) -> dict[str, float]:
+        return {h.payload["doc_id"]: h.score for h in self._sparse_hits(query) if h.payload}
 
 
 class WeightedDBSFStrategy(WeightedFusionStrategy):
