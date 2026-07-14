@@ -4,7 +4,7 @@ from functools import cached_property
 
 from pydantic import BaseModel, ConfigDict, computed_field
 
-from query_taxonomy.regex_bank import (
+from query_taxonomy.banks import (
     BANKS,
     IdentifierMatch,
     RegexBank,
