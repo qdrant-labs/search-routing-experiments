@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from enum import StrEnum
-from typing import override
+from enum import IntEnum, StrEnum
+from typing import NamedTuple, override
 
 from edify import RegexBuilder
 import re
@@ -103,9 +103,32 @@ class StructuralIdentifier(StrEnum):
     """Carrier shipment tracking codes — e.g. 1Z999AA10123456784"""
 
 
-class RegexBank(ABC):
-    """One regex bank per StructuralIdentifier."""
+def surface_form_pattern(value: str) -> re.Pattern[str]:
+    """
+    Exact-match pattern for one surface form, boundary-guarded so
+    `42` does not match inside `426`
+    """
+    return re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")
 
+
+class IdentifierMatch(NamedTuple):
+    text: str
+    start: int
+    end: int
+    
+class AmbiguityTier(IntEnum):
+    """Regex precision tier: lower value = higher claim priority during resolution."""
+    RIGID = 0
+    MODERATE = 1
+    AMBIGUOUS = 2
+
+
+class RegexBank(ABC):
+    """
+    One regex bank per StructuralIdentifier.
+    Simple, dumb class that just does SRP - gives places where text has a certain pattern
+    """
+    
     def __init__(self) -> None:
         super().__init__()
         # edify builders are immutable — every call returns a clone, so
@@ -118,6 +141,15 @@ class RegexBank(ABC):
         """
         Name of the current bank
         """
+        
+    @property
+    @abstractmethod
+    def ambiguity(self) -> AmbiguityTier:
+        """Ambiguity of the current regex bank
+
+        Returns:
+            AmbiguityTier: Number that represents ambiguity 
+        """
 
     @abstractmethod
     def define(self, builder: RegexBuilder) -> RegexBuilder:
@@ -126,53 +158,15 @@ class RegexBank(ABC):
         Quantifiers come before their element: `.exactly(4).digit()` -> \\d{4}
         """
 
-    def matches(self, string: str) -> list[str]:
+    def matches(self, string: str) -> list[IdentifierMatch]:
         """
         Matched surface forms, left to right, non-overlapping
+        Generates dict[selected text, (start, end)]
         """
-        return [m.group(0) for m in self._regex.finditer(string)]
-
-    def spans(self, string: str) -> list[tuple[int, int]]:
-        """
-        (start, end) character spans of matches
-        """
-        return [m.span() for m in self._regex.finditer(string)]
-
-    def number_for_line(self, string: str) -> int:
-        return sum(1 for _ in self._regex.finditer(string))
-
-    def coverage(self, string: str) -> float:
-        """
-        Fraction of characters covered by identifier matches, in [0, 1]
-        """
-        if not string:
-            return 0.0
-        return sum(end - start for start, end in self.spans(string)) / len(string)
-
-    def df(self, docs: list[str]) -> int:
-        """
-        The document frequency for the current structural identifier:
-        number of docs containing at least one match
-        """
-        return sum(1 for doc in docs if self._regex.search(doc))
-
-    def value_df(self, value: str, docs: list[str]) -> int:
-        """
-        Document frequency of one exact surface form (e.g. a specific UUID),
-        boundary-guarded so `42` does not count `426`
-        """
-        pattern = re.compile(rf"(?<!\w){re.escape(value)}(?!\w)")
-        return sum(1 for doc in docs if pattern.search(doc))
-
-    def generate_diversity(self, docs: list[str]) -> int:
-        """
-        Give how much a list of documents is diverse for the current structural
-        identifier: the number of distinct surface forms across all docs
-        """
-        unique: set[str] = set()
-        for doc in docs:
-            unique.update(self.matches(doc))
-        return len(unique)
+        return [
+            IdentifierMatch(m.group(0), *m.span()) 
+            for m in self._regex.finditer(string)
+        ]
 
 
 # Reusable char classes for subexpression() — edify's any_of fuses
@@ -182,6 +176,7 @@ _UPPER_OR_UNDERSCORE = RegexBuilder().any_of().range("A", "Z").char("_").end()
 _ALNUM_OR_DOT = (
     RegexBuilder().any_of().range("0", "9").range("a", "z").range("A", "Z").char(".").end()
 )
+_HTTP_SEP_CHAR = RegexBuilder().any_of().any_of_chars("-/.").whitespace_char().end()
 
 
 class CVEBank(RegexBank):
@@ -194,34 +189,10 @@ class CVEBank(RegexBank):
     def define(self, builder: RegexBuilder) -> RegexBuilder:
         return builder.string("CVE-").exactly(4).digit().char("-").at_least(4).digit()
     
-
-
-class UUIDBank(RegexBank):
-    """Canonical 8-4-4-4-12 UUIDs, or bare 32-64 char hex digests (MD5/SHA-1/SHA-256)."""
-
     @property
     @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.UUID
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .word_boundary()
-            .any_of()
-                .group()
-                    .exactly(8).subexpression(_HEX_DIGIT).char("-")
-                    .exactly(4).subexpression(_HEX_DIGIT).char("-")
-                    .exactly(4).subexpression(_HEX_DIGIT).char("-")
-                    .exactly(4).subexpression(_HEX_DIGIT).char("-")
-                    .exactly(12).subexpression(_HEX_DIGIT)
-                .end()
-                .group().between(32, 64).subexpression(_HEX_DIGIT).end()
-            .end()
-            .word_boundary()
-        )
-
+    def ambiguity(self) -> AmbiguityTier:
+        return AmbiguityTier.RIGID
 
 class NumberBank(RegexBank):
     """Standalone integers, decimals and scientific notation."""
@@ -245,6 +216,11 @@ class NumberBank(RegexBank):
             .end()
             .word_boundary()
         )
+    @property
+    @override
+    def ambiguity(self) -> AmbiguityTier:
+        return AmbiguityTier.AMBIGUOUS
+
 
 
 class VersionStringBank(RegexBank):
@@ -268,80 +244,15 @@ class VersionStringBank(RegexBank):
             .optional().group().char("-").one_or_more().subexpression(_ALNUM_OR_DOT).end()
             .word_boundary()
         )
-
-
-class ErrorCodeBank(RegexBank):
-    """Node ERR_* symbols and POSIX errno names. Known FP: the bare word ERROR."""
-
+    
     @property
     @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.ERROR_CODE
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .word_boundary()
-            .any_of()
-                .group().string("ERR_").one_or_more().subexpression(_UPPER_OR_UNDERSCORE).end()
-                .group().char("E").between(3, 9).range("A", "Z").end()
-            .end()
-            .word_boundary()
-        )
-
-
-class URIBank(RegexBank):
-    """scheme://... URIs (http, s3, file, ...)."""
-
-    @property
-    @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.URI
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .word_boundary()
-            .range("a", "z")
-            .zero_or_more().any_of()
-                .range("a", "z").range("0", "9").char("+").char(".").char("-")
-            .end()
-            .string("://")
-            .one_or_more().non_whitespace_char()
-        )
-
-
-class EnvVarBank(RegexBank):
-    """$UPPER_SNAKE env vars and --long-flags."""
-
-    @property
-    @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.ENV_VAR
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .any_of()
-                .group()
-                    .char("$")
-                    .subexpression(_UPPER_OR_UNDERSCORE)
-                    .zero_or_more().any_of().range("A", "Z").range("0", "9").char("_").end()
-                .end()
-                .group()
-                    .string("--")
-                    .range("a", "z")
-                    .zero_or_more().any_of().range("a", "z").range("0", "9").char("-").end()
-                .end()
-            .end()
-        )
-
+    def ambiguity(self) -> AmbiguityTier:
+        return AmbiguityTier.MODERATE
+    
 
 class HTTPStatusCodeBank(RegexBank):
-    """1xx-5xx codes in context: 'HTTP 429', 'error 503', 'status 200'."""
+    """HTTP status codes in both directions: '200 OK', 'error 500', 'HTTP/1.1 201'."""
 
     @property
     @override
@@ -352,14 +263,43 @@ class HTTPStatusCodeBank(RegexBank):
     def define(self, builder: RegexBuilder) -> RegexBuilder:
         return (
             builder
-            .ignore_case()
-            .word_boundary()
-            .any_of().string("HTTP").string("error").string("status").string("code").end()
-            .one_or_more().whitespace_char()
-            .range("1", "5")
-            .exactly(2).digit()
-            .word_boundary()
+            .any_of()
+                # HTTP <sep> <code>: HTTP/1.1 201, HTTP - 200, HTTP 200
+                .group()
+                    .string("HTTP")
+                    .any_of()
+                        .group().one_or_more().non_whitespace_char().one_or_more().whitespace_char().end()
+                        .group().zero_or_more().whitespace_char().zero_or_more().subexpression(_HTTP_SEP_CHAR).end()
+                    .end()
+                    .range("1", "5").exactly(2).digit()
+                    .word_boundary()
+                .end()
+                # keyword before code: error 500, status 200
+                .group()
+                    .any_of().string("error").string("status").string("code").end()
+                    .word_boundary()
+                    .one_or_more().whitespace_char()
+                    .range("1", "5").exactly(2).digit()
+                    .word_boundary()
+                .end()
+                # code then reason word: 200 OK, 500 error
+                .group()
+                    .assert_not_behind().digit().end()
+                    .range("1", "5").exactly(2).digit()
+                    .one_or_more().whitespace_char()
+                    .any_of()
+                        .group().range("A", "Z").zero_or_more().any_of().range("A", "Z").range("a", "z").end().end()
+                        .group().string("error").end()
+                    .end()
+                    .word_boundary()
+                .end()
+            .end()
         )
+        
+    @property
+    @override
+    def ambiguity(self) -> AmbiguityTier:
+        return AmbiguityTier.MODERATE
 
 
 class DateTimeBank(RegexBank):
@@ -401,58 +341,16 @@ class DateTimeBank(RegexBank):
             .end()
             .word_boundary()
         )
-
-
-class HexColorBank(RegexBank):
-    """#RRGGBB and #RGB CSS colors."""
-
+        
     @property
     @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.HEX_COLOR
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .char("#")
-            .any_of()
-                .group().exactly(6).subexpression(_HEX_DIGIT).end()
-                .group().exactly(3).subexpression(_HEX_DIGIT).end()
-            .end()
-            .word_boundary()
-        )
-
-
-class SocialHandleBank(RegexBank):
-    """@handles and #hashtags; lookbehind rejects emails. Known FP: hex colors."""
-
-    @property
-    @override
-    def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.SOCIAL_HANDLE
-
-    @override
-    def define(self, builder: RegexBuilder) -> RegexBuilder:
-        return (
-            builder
-            .assert_not_behind().word().end()
-            .any_of_chars("@#")
-            .any_of().range("a", "z").range("A", "Z").char("_").end()
-            .zero_or_more().word()
-        )
-
+    def ambiguity(self) -> AmbiguityTier:
+        return AmbiguityTier.RIGID
 
 BANKS: tuple[type[RegexBank], ...] = (
     CVEBank,
-    UUIDBank,
     NumberBank,
     VersionStringBank,
-    ErrorCodeBank,
-    URIBank,
-    EnvVarBank,
     HTTPStatusCodeBank,
     DateTimeBank,
-    HexColorBank,
-    SocialHandleBank,
 )
