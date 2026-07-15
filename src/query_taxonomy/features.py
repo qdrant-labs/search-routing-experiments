@@ -1,15 +1,21 @@
 import math
-from collections.abc import Iterable, Sequence
-from functools import cached_property
+from collections.abc import Iterable
+from functools import cache, cached_property
 
 from pydantic import BaseModel, ConfigDict, computed_field
 
 from query_taxonomy.banks import (
     BANKS,
+    Domain,
     IdentifierMatch,
     RegexBank,
     StructuralIdentifier,
 )
+
+
+@cache
+def _domain_by_type() -> dict[StructuralIdentifier, Domain]:
+    return {bank.name: bank.domain for bank in (cls() for cls in BANKS)}
 
 def normalized_idf(df: int, n_docs: int) -> float:
     """
@@ -71,6 +77,46 @@ class CorpusIdentifiers(BaseModel):
     queries: list[QueryIdentifiers]
     """One entry per input query, in input order."""
 
+    def summary(self) -> str:
+        """Domain-grouped identifier report. The per-domain view doubles as
+        the FP smell-test: hits from an off-topic domain (finance types on
+        a QA corpus) are a priori suspect."""
+        tagged_total = sum(1 for query in self.queries if query.spans)
+        total = len(self.queries)
+        share = 100 * tagged_total / total if total else 0.0
+        lines = [f"queries: {total} tagged: {tagged_total} ({share:.1f}%)"]
+
+        by_domain: dict[Domain, list[DocumentIdentifier]] = {}
+        for doc in self.documents.values():
+            by_domain.setdefault(_domain_by_type()[doc.type], []).append(doc)
+
+        def tagged(docs: list[DocumentIdentifier]) -> int:
+            return len({query_id for doc in docs for query_id in doc.spans})
+
+        pad = max(
+            (len(doc.type.value) for doc in self.documents.values()), default=0
+        )
+        for domain, docs in sorted(
+            by_domain.items(), key=lambda item: -tagged(item[1])
+        ):
+            lines.append("")
+            lines.append(
+                f"-- {domain.value} ({len(docs)} types, {tagged(docs)} tagged)"
+            )
+            for doc in sorted(docs, key=lambda doc: -len(doc.spans)):
+                matches = sum(len(spans) for spans in doc.spans.values())
+                lines.append(
+                    f"{doc.type.value:<{pad}}  queries={len(doc.spans):3d} "
+                    f"matches={matches:3d} diversity={doc.diversity:3d}"
+                )
+                top = sorted(doc.dfs.items(), key=lambda item: -item[1])[:3]
+                forms = ", ".join(f"{text} ({df})" for text, df in top)
+                lines.append(f"{'':<{pad}}  top: {forms}")
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.summary()
+
 
 class CorpusIdentifierExtractor:
     """
@@ -100,7 +146,7 @@ class CorpusIdentifierExtractor:
                 by_type.setdefault(bank.name, []).append(match)
         return by_type
 
-    def extract(self, queries: Sequence[str]) -> CorpusIdentifiers:
+    def extract(self, queries: Iterable[str]) -> CorpusIdentifiers:
         """Single pass: fills DocumentIdentifier per type and QueryIdentifiers per query."""
         doc_spans: dict[StructuralIdentifier, dict[str, list[IdentifierMatch]]] = {}
         query_models: list[QueryIdentifiers] = []
