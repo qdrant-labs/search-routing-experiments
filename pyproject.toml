@@ -28,6 +28,7 @@ dependencies = [
 packages = [
     {include = "hybrid_search_rrf_dataset", from = "src"},
     {include = "query_taxonomy", from = "src"},
+    {include = "dataset_registry", from = "src"},
 ]
 
 [tool.pytest.ini_options]
