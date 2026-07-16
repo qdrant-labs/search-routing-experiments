@@ -1,11 +1,11 @@
+from functools import cache
+
 from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    IdentifierMatch,
-    RegexBank,
-    StructuralIdentifier,
+    IdentifierBank,
     surface_form_pattern,
 )
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 from query_taxonomy.banks.finance import (
     BettingOddsBank,
     BICBank,
@@ -115,7 +115,7 @@ from query_taxonomy.banks.tech import (
 #   - LEIBank/IBANBank before BICBank/StockTickerBank: long codes claim first
 #   - BICBank before StockTickerBank: 8/11-cap BIC beats 2-5-cap bare ticker
 #   - MarketCodeBank before NumberBank: 9-digit ABA beats plain number
-BANKS: tuple[type[RegexBank], ...] = (
+BANKS: tuple[type[IdentifierBank], ...] = (
     # RIGID
     CVEBank,
     DateTimeBank,
@@ -200,12 +200,18 @@ BANKS: tuple[type[RegexBank], ...] = (
     NumberBank,
 )
 
+@cache
+def domain_by_type() -> dict[str, Domain]:
+    """Domain lookup for identifier types — the banks' own metadata."""
+    return {str(bank.name): bank.domain for bank in (cls() for cls in BANKS)}
+
+
 __all__ = [
     "BANKS",
+    "domain_by_type",
     "AmbiguityTier",
     "Domain",
-    "IdentifierMatch",
-    "RegexBank",
+    "IdentifierBank",
     "StructuralIdentifier",
     "surface_form_pattern",
     "AcademicIdentifierBank",

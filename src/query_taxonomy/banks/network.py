@@ -6,11 +6,10 @@ from query_taxonomy.banks.core import (
     ALNUM,
     HEX_DIGIT,
     IPV4_OCTET,
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
+    IdentifierBank,
 )
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _HTTP_SEP_CHAR = RegexBuilder().any_of().any_of_chars("-/.").whitespace_char().end()
 
@@ -21,7 +20,7 @@ _IPV6_BOUNDARY_CHAR = (
 )
 
 
-class HTTPStatusCodeBank(RegexBank):
+class HTTPStatusCodeBank(IdentifierBank):
     """HTTP status codes in both directions: '200 OK', 'error 500', 'HTTP/1.1 201'."""
 
     @property
@@ -77,7 +76,7 @@ class HTTPStatusCodeBank(RegexBank):
         )
 
 
-class CIDRBank(RegexBank):
+class CIDRBank(IdentifierBank):
     """IPv4 CIDR ranges; ordered before IPAddressBank so the /nn is claimed whole."""
 
     @property
@@ -108,7 +107,7 @@ class CIDRBank(RegexBank):
         )
 
 
-class IPAddressBank(RegexBank):
+class IPAddressBank(IdentifierBank):
     """IPv4 with strict octets (rejects 999.x), plus pragmatic IPv6
     (full 8-group and ::-compressed forms — not the complete RFC 4291 grammar)."""
 
@@ -169,7 +168,7 @@ class IPAddressBank(RegexBank):
         )
 
 
-class MACAddressBank(RegexBank):
+class MACAddressBank(IdentifierBank):
     """Colon- or dash-separated 6-group MAC addresses."""
 
     @property
@@ -201,7 +200,7 @@ class MACAddressBank(RegexBank):
         )
 
 
-class EmailBank(RegexBank):
+class EmailBank(IdentifierBank):
     """RFC-5322-ish pragmatic emails: local@domain.tld."""
 
     @property
@@ -237,7 +236,7 @@ class EmailBank(RegexBank):
         )
 
 
-class HostPortBank(RegexBank):
+class HostPortBank(IdentifierBank):
     """host:port, plus bare domains gated on a common-TLD whitelist.
     Until URIBank lands (batch 2), full URLs get partial bare-domain claims."""
 
@@ -293,7 +292,7 @@ class HostPortBank(RegexBank):
         )
 
 
-class APIKeyBank(RegexBank):
+class APIKeyBank(IdentifierBank):
     """Well-known secret prefixes: sk- (OpenAI), AKIA (AWS), ghp_ (GitHub), eyJ (JWT)."""
 
     @property

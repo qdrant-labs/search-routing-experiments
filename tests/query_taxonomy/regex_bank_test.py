@@ -1,5 +1,6 @@
 import pytest
-from query_taxonomy.banks import HTTPStatusCodeBank, IdentifierMatch
+from query_taxonomy.banks import HTTPStatusCodeBank
+from query_taxonomy.core import FeatureSpan
 
 
 @pytest.fixture
@@ -7,7 +8,7 @@ def status_code_bank():
     return HTTPStatusCodeBank()
 
 
-def texts(matches: list[IdentifierMatch]) -> list[str]:
+def texts(matches: list[FeatureSpan]) -> list[str]:
     return [m.text for m in matches]
 
 

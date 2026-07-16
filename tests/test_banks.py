@@ -3,15 +3,28 @@
 Deliberately not exhaustive — these pin the core of each regex, not its edges.
 """
 
+from enum import StrEnum
+
 import pytest
 
+from query_taxonomy import FEATURE_BANKS
 from query_taxonomy.banks import BANKS, StructuralIdentifier
-from query_taxonomy.features import CorpusIdentifierExtractor
+from query_taxonomy.features import FeatureExtractor
+from query_taxonomy.taxonomy import FeatureGroup, SentenceMarker
 
-_BANKS = {cls().name: cls() for cls in BANKS}
+# every registered bank of every group is subject to the case discipline
+_BANKS = {
+    cls().name: cls()
+    for group_banks in FEATURE_BANKS.values()
+    for cls in group_banks
+}
 
 # name -> (positives, negatives)
-CASES: dict[StructuralIdentifier, tuple[list[str], list[str]]] = {
+CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
+    SentenceMarker.NEGATION: (
+        ["laptops without touchscreen", "NOT the Nokia one"],
+        ["nothing knots canned", "annotated notation"],
+    ),
     StructuralIdentifier.CVE: (
         ["CVE-2024-3094", "see CVE-2023-12345 advisory"],
         ["CVE-24-1", "cve"],
@@ -344,12 +357,12 @@ def _params(index: int):
 
 @pytest.mark.parametrize(("name", "text"), _params(0))
 def test_positive(name: StructuralIdentifier, text: str) -> None:
-    assert _BANKS[name].matches(text), f"{name} should match {text!r}"
+    assert _BANKS[name].compute(text), f"{name} should match {text!r}"
 
 
 @pytest.mark.parametrize(("name", "text"), _params(1))
 def test_negative(name: StructuralIdentifier, text: str) -> None:
-    assert not _BANKS[name].matches(text), f"{name} should not match {text!r}"
+    assert not _BANKS[name].compute(text), f"{name} should not match {text!r}"
 
 
 def test_every_bank_has_cases() -> None:
@@ -365,8 +378,8 @@ def test_module_placement_matches_domain() -> None:
 
 
 def test_registry_tier_priority() -> None:
-    extractor = CorpusIdentifierExtractor()
-    by_type = extractor.resolve("scan 192.168.0.0/16 for v1.0.0 now")
+    extractor = FeatureExtractor()
+    by_type = extractor.resolve("scan 192.168.0.0/16 for v1.0.0 now").spans[FeatureGroup.STRUCTURED_IDENTIFIERS]
 
     assert [m.text for m in by_type[StructuralIdentifier.CIDR]] == ["192.168.0.0/16"]
     assert StructuralIdentifier.IP_ADDRESS not in by_type
@@ -375,8 +388,8 @@ def test_registry_tier_priority() -> None:
 
 
 def test_uri_claims_full_url_before_host_port() -> None:
-    extractor = CorpusIdentifierExtractor()
-    by_type = extractor.resolve("see https://qdrant.tech/docs and qdrant.tech")
+    extractor = FeatureExtractor()
+    by_type = extractor.resolve("see https://qdrant.tech/docs and qdrant.tech").spans[FeatureGroup.STRUCTURED_IDENTIFIERS]
 
     assert [m.text for m in by_type[StructuralIdentifier.URI]] == [
         "https://qdrant.tech/docs"
@@ -385,9 +398,9 @@ def test_uri_claims_full_url_before_host_port() -> None:
 
 
 def test_finance_claim_order() -> None:
-    extractor = CorpusIdentifierExtractor()
+    extractor = FeatureExtractor()
 
-    by_type = extractor.resolve("buy $AAPL, set $JAVA_HOME, fix CVE-2024-3094")
+    by_type = extractor.resolve("buy $AAPL, set $JAVA_HOME, fix CVE-2024-3094").spans[FeatureGroup.STRUCTURED_IDENTIFIERS]
     assert [m.text for m in by_type[StructuralIdentifier.STOCK_TICKER]] == ["$AAPL"]
     assert [m.text for m in by_type[StructuralIdentifier.ENV_VAR]] == ["$JAVA_HOME"]
     assert [m.text for m in by_type[StructuralIdentifier.CVE]] == ["CVE-2024-3094"]

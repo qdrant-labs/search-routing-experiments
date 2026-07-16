@@ -2,17 +2,14 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _UPPER_ALNUM = RegexBuilder().any_of().range("A", "Z").range("0", "9").end()
 
 
-class MedicalCodeBank(RegexBank):
+class MedicalCodeBank(IdentifierBank):
     """ICD-10 with decimal (J45.909 — bare J45 excluded as too generic),
     CAS numbers (50-00-0), SNP ids (rs429358)."""
 
@@ -59,7 +56,7 @@ class MedicalCodeBank(RegexBank):
         )
 
 
-class ClinicalCodingBank(RegexBank):
+class ClinicalCodingBank(IdentifierBank):
     """Keyword-gated CPT / HCPCS / SNOMED / LOINC / DRG codes."""
 
     @property
@@ -93,7 +90,7 @@ class ClinicalCodingBank(RegexBank):
         )
 
 
-class DrugIdBank(RegexBank):
+class DrugIdBank(IdentifierBank):
     """Keyword-gated NDC and ATC drug identifiers. Bare ATC codes (A10BA02)
     without the keyword are excluded — the shape alone FPs on serials."""
 
@@ -140,7 +137,7 @@ class DrugIdBank(RegexBank):
         )
 
 
-class GenomicAccessionBank(RegexBank):
+class GenomicAccessionBank(IdentifierBank):
     """UniProt, Ensembl, RefSeq, PDB accessions. PDB (1ABC) requires at least
     one letter so plain 4-digit numbers/years stay out; ordered after
     ValueWithUnitBank so 16GB is not read as a PDB id."""
@@ -202,7 +199,7 @@ class GenomicAccessionBank(RegexBank):
         )
 
 
-class HGVSVariantBank(RegexBank):
+class HGVSVariantBank(IdentifierBank):
     """HGVS variant notation: c.76A>T, p.Lys76Asn."""
 
     @property
@@ -258,7 +255,7 @@ class HGVSVariantBank(RegexBank):
         )
 
 
-class ChemicalIdBank(RegexBank):
+class ChemicalIdBank(IdentifierBank):
     """InChIKey, keyword-gated PubChem CID, ChEMBL ids. SMILES excluded —
     it is a grammar, not a token format (see StructuralIdentifier.CHEMICAL_ID)."""
 
@@ -304,7 +301,7 @@ class ChemicalIdBank(RegexBank):
         )
 
 
-class ClinicalTrialIdBank(RegexBank):
+class ClinicalTrialIdBank(IdentifierBank):
     """NCT trial ids, PMIDs, ORCID ids."""
 
     @property
@@ -347,7 +344,7 @@ class ClinicalTrialIdBank(RegexBank):
         )
 
 
-class HealthcareProviderIdBank(RegexBank):
+class HealthcareProviderIdBank(IdentifierBank):
     """Keyword-gated NPI and DEA provider identifiers."""
 
     @property

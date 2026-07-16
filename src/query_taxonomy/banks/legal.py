@@ -2,17 +2,14 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _UPPER_ALNUM = RegexBuilder().any_of().range("A", "Z").range("0", "9").end()
 
 
-class LegalCitationBank(RegexBank):
+class LegalCitationBank(IdentifierBank):
     """U.S.C. sections and F./S.Ct. reporters. Bare 'nn U.S. nn' reporter
     excluded — it FPs on prose like '1945 U.S. 200,000'."""
 
@@ -70,7 +67,7 @@ class LegalCitationBank(RegexBank):
         )
 
 
-class CourtDocketBank(RegexBank):
+class CourtDocketBank(IdentifierBank):
     """US federal docket numbers: 1:21-cv-02547."""
 
     @property
@@ -104,7 +101,7 @@ class CourtDocketBank(RegexBank):
         )
 
 
-class NeutralCitationBank(RegexBank):
+class NeutralCitationBank(IdentifierBank):
     """ECLI identifiers and UK neutral citations ([2019] UKSC 41)."""
 
     @property
@@ -153,7 +150,7 @@ class NeutralCitationBank(RegexBank):
         )
 
 
-class CELEXBank(RegexBank):
+class CELEXBank(IdentifierBank):
     """CELEX ids: sector digit + year + type letter + 4-digit number (32016R0679)."""
 
     @property
@@ -185,7 +182,7 @@ class CELEXBank(RegexBank):
         )
 
 
-class LegislativeCitationBank(RegexBank):
+class LegislativeCitationBank(IdentifierBank):
     """Pub. L. 117-58, 88 FR 12345, 100 Stat. 200."""
 
     @property
@@ -238,7 +235,7 @@ class LegislativeCitationBank(RegexBank):
         )
 
 
-class EURegulatoryCitationBank(RegexBank):
+class EURegulatoryCitationBank(IdentifierBank):
     """Regulation (EU) 2016/679 and Art. 6(1)(a) GDPR-style citations."""
 
     @property
@@ -293,7 +290,7 @@ class EURegulatoryCitationBank(RegexBank):
         )
 
 
-class PatentNumberBank(RegexBank):
+class PatentNumberBank(IdentifierBank):
     """Country prefix + digits + REQUIRED kind code (US10123456B2). The kind
     code disambiguates from VAT shapes — DE123456789 stays with TAX_ID."""
 
@@ -329,7 +326,7 @@ class PatentNumberBank(RegexBank):
         )
 
 
-class NationalIdBank(RegexBank):
+class NationalIdBank(IdentifierBank):
     """SSN (123-45-6789) and UK NINO (QQ123456C) shapes."""
 
     @property

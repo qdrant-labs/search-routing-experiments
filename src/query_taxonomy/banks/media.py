@@ -2,19 +2,16 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _FEN_CHAR = (
     RegexBuilder().any_of().any_of_chars("rnbqkpRNBQKP").range("1", "8").end()
 )
 
 
-class ISOCodeBank(RegexBank):
+class ISOCodeBank(IdentifierBank):
     """BCP-47 locale forms (en-US). Bare currency/country codes (EUR, DE) are
     ceded to StockTickerBank — bare 2-3 caps are format-identical. Known FP:
     prose like 'ex-US'."""
@@ -46,7 +43,7 @@ class ISOCodeBank(RegexBank):
         )
 
 
-class SocialHandleBank(RegexBank):
+class SocialHandleBank(IdentifierBank):
     """@handles and #hashtags; lookbehind rejects emails. Ordered after
     PackageCoordinateBank so @scope/name is not split."""
 
@@ -76,7 +73,7 @@ class SocialHandleBank(RegexBank):
         )
 
 
-class AcademicIdentifierBank(RegexBank):
+class AcademicIdentifierBank(IdentifierBank):
     """DOIs (10.xxxx/...), arXiv ids (2104.08663), keyword-gated ISBNs.
     The arXiv shape can FP on 4.4-digit decimals — rare in practice."""
 
@@ -126,7 +123,7 @@ class AcademicIdentifierBank(RegexBank):
         )
 
 
-class ISSNBank(RegexBank):
+class ISSNBank(IdentifierBank):
     """ISSNs: 4 digits - 3 digits + check char. Year-guarded: the shape is
     identical to year ranges (1939-1945), so a second group that looks like
     a year (19xx/20xx) is rejected — costs a few real ISSNs, kills the
@@ -165,7 +162,7 @@ class ISSNBank(RegexBank):
         )
 
 
-class MusicWorkCodeBank(RegexBank):
+class MusicWorkCodeBank(IdentifierBank):
     """ISRC (USRC17607839) and ISWC (T-034.524.680-1) work codes."""
 
     @property
@@ -210,7 +207,7 @@ class MusicWorkCodeBank(RegexBank):
         )
 
 
-class MediaDbIdBank(RegexBank):
+class MediaDbIdBank(IdentifierBank):
     """IMDb ids: tt/nm/co/ev + 7-8 digits."""
 
     @property
@@ -239,7 +236,7 @@ class MediaDbIdBank(RegexBank):
         )
 
 
-class LibraryClassificationBank(RegexBank):
+class LibraryClassificationBank(IdentifierBank):
     """LCC call numbers (QA76.73.C15) and leading-zero Dewey (005.74).
     General Dewey (nnn.nn) excluded — it would shadow every 3-digit decimal."""
 
@@ -284,7 +281,7 @@ class LibraryClassificationBank(RegexBank):
         )
 
 
-class AstronomicalDesignationBank(RegexBank):
+class AstronomicalDesignationBank(IdentifierBank):
     """NGC/IC/HD/HR catalogs, Messier (M31), Kepler planets.
     Known FP: M-branch collides with motorways (M25) and rifles (M16)."""
 
@@ -328,7 +325,7 @@ class AstronomicalDesignationBank(RegexBank):
         )
 
 
-class GameNotationBank(RegexBank):
+class GameNotationBank(IdentifierBank):
     """Chess SAN piece moves (Nf3), castling (O-O), FEN position strings.
     Bare pawn moves (e4) excluded — two chars of pure cell reference."""
 

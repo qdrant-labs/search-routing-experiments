@@ -7,10 +7,10 @@ from pydantic import BaseModel, ConfigDict, computed_field
 from query_taxonomy.banks import (
     BANKS,
     Domain,
-    IdentifierMatch,
-    RegexBank,
+    IdentifierBank,
     StructuralIdentifier,
 )
+from query_taxonomy.core import FeatureSpan
 
 
 @cache
@@ -33,7 +33,7 @@ class DocumentIdentifier(BaseModel):
 
     type: StructuralIdentifier
     # doc_ids -> list of identified matches
-    spans: dict[str, list[IdentifierMatch]]
+    spans: dict[str, list[FeatureSpan]]
 
     @computed_field
     @cached_property
@@ -61,7 +61,7 @@ class QueryIdentifiers(BaseModel):
 
     query_text: str
 
-    spans: dict[StructuralIdentifier, list[IdentifierMatch]]
+    spans: dict[StructuralIdentifier, list[FeatureSpan]]
 
     @computed_field
     @property
@@ -128,16 +128,16 @@ class CorpusIdentifierExtractor:
     longest-match-wins resolution with tier-priority-wins.
     """
 
-    def __init__(self, banks: Iterable[type[RegexBank]] = BANKS) -> None:
+    def __init__(self, banks: Iterable[type[IdentifierBank]] = BANKS) -> None:
         # stable sort -> BANKS order breaks ties within a tier
-        self._banks: list[RegexBank] = sorted(
+        self._banks: list[IdentifierBank] = sorted(
             (bank() for bank in banks), key=lambda bank: bank.ambiguity
         )
 
-    def resolve(self, text: str) -> dict[StructuralIdentifier, list[IdentifierMatch]]:
+    def resolve(self, text: str) -> dict[StructuralIdentifier, list[FeatureSpan]]:
         """Registry-resolved matches for one text, grouped by type."""
-        registry: list[IdentifierMatch] = []
-        by_type: dict[StructuralIdentifier, list[IdentifierMatch]] = {}
+        registry: list[FeatureSpan] = []
+        by_type: dict[StructuralIdentifier, list[FeatureSpan]] = {}
         for bank in self._banks:
             for match in bank.matches(text):
                 if any(match.start < c.end and c.start < match.end for c in registry):
@@ -148,7 +148,7 @@ class CorpusIdentifierExtractor:
 
     def extract(self, queries: Iterable[str]) -> CorpusIdentifiers:
         """Single pass: fills DocumentIdentifier per type and QueryIdentifiers per query."""
-        doc_spans: dict[StructuralIdentifier, dict[str, list[IdentifierMatch]]] = {}
+        doc_spans: dict[StructuralIdentifier, dict[str, list[FeatureSpan]]] = {}
         query_models: list[QueryIdentifiers] = []
         for index, query in enumerate(queries):
             by_type = self.resolve(query)

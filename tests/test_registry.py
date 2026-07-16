@@ -177,4 +177,5 @@ def test_profile_runs_taxonomy_over_sample(tmp_path):
 
     assert len(corpus_ids.queries) == 3
     tagged = [q for q in corpus_ids.queries if q.spans]
-    assert len(tagged) == 2
+    # all three: two carry identifiers, the third's "no" is a negation marker
+    assert len(tagged) == 3

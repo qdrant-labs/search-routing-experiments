@@ -2,12 +2,9 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _UPPER_ALNUM = RegexBuilder().any_of().range("A", "Z").range("0", "9").end()
 # VIN charset excludes I, O, Q
@@ -22,7 +19,7 @@ _VIN_CHAR = (
 )
 
 
-class PhoneNumberBank(RegexBank):
+class PhoneNumberBank(IdentifierBank):
     """International +CC numbers (needs >=2 digit groups after the country
     code, so betting odds like +150 stay out) and (555) 123-4567 US style."""
 
@@ -70,7 +67,7 @@ class PhoneNumberBank(RegexBank):
         )
 
 
-class PostalCodeBank(RegexBank):
+class PostalCodeBank(IdentifierBank):
     """5-digit ZIPs (any 5-digit number — worst-case ambiguity) and UK postcodes."""
 
     @property
@@ -111,7 +108,7 @@ class PostalCodeBank(RegexBank):
         )
 
 
-class GeoCoordinateBank(RegexBank):
+class GeoCoordinateBank(IdentifierBank):
     """Decimal lat/lon pairs with >=3 decimals each — price pairs (1.99, 2.99)
     don't reach the precision bar."""
 
@@ -148,7 +145,7 @@ class GeoCoordinateBank(RegexBank):
         )
 
 
-class AltGeocodingBank(RegexBank):
+class AltGeocodingBank(IdentifierBank):
     """what3words (///a.b.c), Plus Codes (8FVC9G8F+6X), MGRS (33UUU9012)."""
 
     @property
@@ -197,7 +194,7 @@ class AltGeocodingBank(RegexBank):
         )
 
 
-class BookingReferenceBank(RegexBank):
+class BookingReferenceBank(IdentifierBank):
     """Flight numbers (LH1830) and 6-char PNRs with mixed letters+digits.
     The flight form matches any CAPS+digits token (WW2) — measure per corpus.
     Ordered before SKUBank so LH1830 reads as a flight, not a model number."""
@@ -245,7 +242,7 @@ class BookingReferenceBank(RegexBank):
         )
 
 
-class TrackingNumberBank(RegexBank):
+class TrackingNumberBank(IdentifierBank):
     """UPS 1Z tracking codes. Digit-run carrier formats (FedEx/DHL) excluded —
     indistinguishable from serial numbers without a carrier keyword."""
 
@@ -275,7 +272,7 @@ class TrackingNumberBank(RegexBank):
         )
 
 
-class BarcodeBank(RegexBank):
+class BarcodeBank(IdentifierBank):
     """Amazon ASINs (B0 + 8 alnum) and 12-13 digit EAN/UPC runs (ambiguous)."""
 
     @property
@@ -306,7 +303,7 @@ class BarcodeBank(RegexBank):
         )
 
 
-class SKUBank(RegexBank):
+class SKUBank(IdentifierBank):
     """CAPS prefix + 3-5 digits + optional alnum tail: WH-1000XM5, RTX 4090."""
 
     @property
@@ -337,7 +334,7 @@ class SKUBank(RegexBank):
         )
 
 
-class SerialNumberBank(RegexBank):
+class SerialNumberBank(IdentifierBank):
     """15-digit IMEIs and S/N-prefixed serials."""
 
     @property
@@ -375,7 +372,7 @@ class SerialNumberBank(RegexBank):
         )
 
 
-class VinContainerBank(RegexBank):
+class VinContainerBank(IdentifierBank):
     """17-char VINs (needs a letter, I/O/Q excluded) and container numbers
     (4 letters + 7 digits)."""
 
@@ -416,7 +413,7 @@ class VinContainerBank(RegexBank):
         )
 
 
-class LicensePlateBank(RegexBank):
+class LicensePlateBank(IdentifierBank):
     """German-style plates: B-QD 1234."""
 
     @property
@@ -449,7 +446,7 @@ class LicensePlateBank(RegexBank):
         )
 
 
-class AirportAirlineCodeBank(RegexBank):
+class AirportAirlineCodeBank(IdentifierBank):
     """Cue-word-gated IATA/ICAO codes (airport BER / BER airport / flight LH).
     Bare 2-4 cap codes are fully shadowed by StockTickerBank — gating is what
     keeps this bank alive at all."""
@@ -498,7 +495,7 @@ class AirportAirlineCodeBank(RegexBank):
         )
 
 
-class AircraftVesselRegBank(RegexBank):
+class AircraftVesselRegBank(IdentifierBank):
     """N-number tails (>=3 digits so N95 masks stay out), D- registrations,
     keyword-gated IMO / MMSI numbers."""
 
@@ -536,7 +533,7 @@ class AircraftVesselRegBank(RegexBank):
         )
 
 
-class CustomsClassificationBank(RegexBank):
+class CustomsClassificationBank(IdentifierBank):
     """Keyword-gated HS / HTS tariff codes."""
 
     @property
@@ -567,7 +564,7 @@ class CustomsClassificationBank(RegexBank):
         )
 
 
-class HazmatCodeBank(RegexBank):
+class HazmatCodeBank(IdentifierBank):
     """UN numbers (UN1203), GHS H/P codes (H225 — known FP: H264, P450),
     keyword-gated NFPA."""
 
@@ -600,7 +597,7 @@ class HazmatCodeBank(RegexBank):
         )
 
 
-class MaterialGradeBank(RegexBank):
+class MaterialGradeBank(IdentifierBank):
     """AISI grades, aluminium tempers (6061-T6), titanium alloys (Ti-6Al-4V)."""
 
     @property
@@ -652,7 +649,7 @@ class MaterialGradeBank(RegexBank):
         )
 
 
-class NSNBank(RegexBank):
+class NSNBank(IdentifierBank):
     """NATO Stock Numbers: 4-2-3-4 digit groups."""
 
     @property
@@ -683,7 +680,7 @@ class NSNBank(RegexBank):
         )
 
 
-class SimSubscriberIdBank(RegexBank):
+class SimSubscriberIdBank(IdentifierBank):
     """ICCIDs: 89 + 17-18 digits. IMSI (15 digits) excluded — format-identical
     to IMEI, which SerialNumberBank owns."""
 

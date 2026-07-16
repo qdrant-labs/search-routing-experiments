@@ -2,15 +2,12 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 
-class NumberBank(RegexBank):
+class NumberBank(IdentifierBank):
     """Standalone integers, decimals and scientific notation."""
 
     @property
@@ -44,7 +41,7 @@ class NumberBank(RegexBank):
         )
 
 
-class BusinessTemporalBank(RegexBank):
+class BusinessTemporalBank(IdentifierBank):
     """Q3 2026, FY25, CW28, Sprint 42. Bare quarters (Q3) without a year
     excluded as too generic."""
 
@@ -95,7 +92,7 @@ class BusinessTemporalBank(RegexBank):
         )
 
 
-class DateTimeBank(RegexBank):
+class DateTimeBank(IdentifierBank):
     """ISO 8601 dates with optional time/offset, or 10-digit unix epochs (2017-2033)."""
 
     @property

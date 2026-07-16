@@ -5,15 +5,14 @@ from edify import RegexBuilder
 from query_taxonomy.banks.core import (
     ALNUM_OR_DOT,
     HEX_DIGIT,
+    IdentifierBank,
     UPPER_OR_UNDERSCORE,
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
 )
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 
-class CVEBank(RegexBank):
+class CVEBank(IdentifierBank):
     @property
     @override
     def name(self) -> StructuralIdentifier:
@@ -34,7 +33,7 @@ class CVEBank(RegexBank):
         return builder.string("CVE-").exactly(4).digit().char("-").at_least(4).digit()
 
 
-class VersionStringBank(RegexBank):
+class VersionStringBank(IdentifierBank):
     """Semver-ish versions with optional leading v and pre-release tag."""
 
     @property
@@ -67,7 +66,7 @@ class VersionStringBank(RegexBank):
         )
 
 
-class FilePathBank(RegexBank):
+class FilePathBank(IdentifierBank):
     """Absolute unix paths (>=2 segments) and Windows drive paths."""
 
     @property
@@ -111,7 +110,7 @@ class FilePathBank(RegexBank):
         )
 
 
-class UUIDBank(RegexBank):
+class UUIDBank(IdentifierBank):
     """Canonical 8-4-4-4-12 UUIDs, or bare 32-64 char hex digests (MD5/SHA-1/SHA-256)."""
 
     @property
@@ -148,7 +147,7 @@ class UUIDBank(RegexBank):
         )
 
 
-class URIBank(RegexBank):
+class URIBank(IdentifierBank):
     """scheme://... URIs (http, s3, file, ...). Claims full URLs before HostPortBank."""
 
     @property
@@ -180,7 +179,7 @@ class URIBank(RegexBank):
         )
 
 
-class ErrorCodeBank(RegexBank):
+class ErrorCodeBank(IdentifierBank):
     """Node ERR_* symbols and POSIX errno names. Known FP: the bare word ERROR."""
 
     @property
@@ -211,7 +210,7 @@ class ErrorCodeBank(RegexBank):
         )
 
 
-class EnvVarBank(RegexBank):
+class EnvVarBank(IdentifierBank):
     """$UPPER_SNAKE env vars and --long-flags. The $ branch requires an
     underscore or >=6 chars so short cashtags ($AAPL) fall to STOCK_TICKER;
     the cost is that $HOME/$PATH-style short env vars are ceded too."""
@@ -260,7 +259,7 @@ class EnvVarBank(RegexBank):
         )
 
 
-class HexColorBank(RegexBank):
+class HexColorBank(IdentifierBank):
     """#RRGGBB and #RGB CSS colors."""
 
     @property
@@ -291,7 +290,7 @@ class HexColorBank(RegexBank):
         )
 
 
-class CodeIdentifierBank(RegexBank):
+class CodeIdentifierBank(IdentifierBank):
     """camelCase, snake_case (lower/UPPER), dotted.paths (segments >= 2 chars,
     so `e.g` and `i.e` stay out). Known FP: prose camelCase brands (iPhone, eBay)."""
 
@@ -357,7 +356,7 @@ class CodeIdentifierBank(RegexBank):
         )
 
 
-class PackageCoordinateBank(RegexBank):
+class PackageCoordinateBank(IdentifierBank):
     """npm scoped packages (@scope/name) and Maven-style group:artifact."""
 
     @property
@@ -409,7 +408,7 @@ _UNITS = (
 )
 
 
-class ValueWithUnitBank(RegexBank):
+class ValueWithUnitBank(IdentifierBank):
     """Quantity + whitelisted unit, optional space: 16GB, 3.5mm, 240 Hz."""
 
     @property
@@ -445,7 +444,7 @@ class ValueWithUnitBank(RegexBank):
         )
 
 
-class StandardsCitationBank(RegexBank):
+class StandardsCitationBank(IdentifierBank):
     """RFC / ISO(-IEC) / IEEE citations: RFC 9110, ISO/IEC 27001, IEEE 802.11ax."""
 
     @property
@@ -493,7 +492,7 @@ class StandardsCitationBank(RegexBank):
         )
 
 
-class CryptoAddressBank(RegexBank):
+class CryptoAddressBank(IdentifierBank):
     """bech32 (bc1...), ETH (0x + 40 hex), legacy base58 BTC. The base58 form
     can collide with random long alnum tokens — hence MODERATE, not RIGID."""
 

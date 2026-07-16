@@ -2,17 +2,14 @@ from typing import override
 
 from edify import RegexBuilder
 
-from query_taxonomy.banks.core import (
-    AmbiguityTier,
-    Domain,
-    RegexBank,
-    StructuralIdentifier,
-)
+from query_taxonomy.banks.core import IdentifierBank
+from query_taxonomy.core import AmbiguityTier
+from query_taxonomy.taxonomy import Domain, StructuralIdentifier
 
 _UPPER_ALNUM = RegexBuilder().any_of().range("A", "Z").range("0", "9").end()
 
 
-class CurrencyAmountBank(RegexBank):
+class CurrencyAmountBank(IdentifierBank):
     """Symbol amounts (€499.99, $1,200) and code amounts (100 EUR)."""
 
     _CODES = ("EUR", "USD", "GBP", "JPY", "CHF", "INR", "CNY")
@@ -62,7 +59,7 @@ class CurrencyAmountBank(RegexBank):
         )
 
 
-class IBANBank(RegexBank):
+class IBANBank(IdentifierBank):
     """IBANs, spaced (DE89 3704 0044 ...) or compact (>=11 body chars, so
     short VAT IDs like DE123456789 stay with TAX_ID)."""
 
@@ -99,7 +96,7 @@ class IBANBank(RegexBank):
         )
 
 
-class BICBank(RegexBank):
+class BICBank(IdentifierBank):
     """8 or 11 char BIC/SWIFT. Known FP: any 8-letter all-caps word (PASSWORD)."""
 
     @property
@@ -130,7 +127,7 @@ class BICBank(RegexBank):
         )
 
 
-class SecuritiesIdBank(RegexBank):
+class SecuritiesIdBank(IdentifierBank):
     """ISIN (2 letters + 9 alnum + check digit) and CUSIP (9 alnum).
     All-numeric CUSIPs overlap ABA routing numbers — ordered before MARKET_CODE."""
 
@@ -170,7 +167,7 @@ class SecuritiesIdBank(RegexBank):
         )
 
 
-class StockTickerBank(RegexBank):
+class StockTickerBank(IdentifierBank):
     """$CASHTAGS (1-5 caps) and bare 2-5 cap tickers (NVDA).
     The bare form matches any short all-caps word (USA, NATO) — worst FP
     generator in the bank; kept per full-coverage policy, measure per corpus."""
@@ -209,7 +206,7 @@ class StockTickerBank(RegexBank):
         )
 
 
-class LEIBank(RegexBank):
+class LEIBank(IdentifierBank):
     """20-char Legal Entity Identifiers ending in two check digits."""
 
     @property
@@ -238,7 +235,7 @@ class LEIBank(RegexBank):
         )
 
 
-class DerivativesSymbolBank(RegexBank):
+class DerivativesSymbolBank(IdentifierBank):
     """OCC option symbols (AAPL240119C00150000) and futures codes (ESH25).
     The futures form (root + month letter + year) can FP on short caps words."""
 
@@ -279,7 +276,7 @@ class DerivativesSymbolBank(RegexBank):
         )
 
 
-class MarketCodeBank(RegexBank):
+class MarketCodeBank(IdentifierBank):
     """X-prefixed MICs, 9-digit ABA routing numbers, BBG FIGIs.
     SEDOL deliberately excluded: 7 generic alnum chars carry no anchor —
     a regex for it is indistinguishable from noise."""
@@ -313,7 +310,7 @@ class MarketCodeBank(RegexBank):
         )
 
 
-class IndustryCodeBank(RegexBank):
+class IndustryCodeBank(IdentifierBank):
     """Keyword-gated NAICS / SIC / GICS codes."""
 
     @property
@@ -343,7 +340,7 @@ class IndustryCodeBank(RegexBank):
         )
 
 
-class BusinessRegistrationBank(RegexBank):
+class BusinessRegistrationBank(IdentifierBank):
     """Keyword-gated EIN / DUNS / CRN registration numbers."""
 
     @property
@@ -393,7 +390,7 @@ class BusinessRegistrationBank(RegexBank):
         )
 
 
-class TaxIdBank(RegexBank):
+class TaxIdBank(IdentifierBank):
     """EU-VAT-style CC+digits and bare EIN-shaped nn-nnnnnnn.
     Keyworded forms are claimed first by BUSINESS_REGISTRATION (RIGID)."""
 
@@ -432,7 +429,7 @@ class TaxIdBank(RegexBank):
         )
 
 
-class BettingOddsBank(RegexBank):
+class BettingOddsBank(IdentifierBank):
     """Fractional (5/2) and positive American (+150) odds. Decimal odds (3.50)
     deliberately excluded: format-identical to NUMBER. Negative American odds
     excluded: format-identical to negative integers in prose."""
@@ -474,7 +471,7 @@ class BettingOddsBank(RegexBank):
         )
 
 
-class TicketBank(RegexBank):
+class TicketBank(IdentifierBank):
     """PREFIX-digits ticket/invoice refs (INV-2026-000123, TCK-84721, JIRA-style).
     CVE-... is shaped the same — CVEBank (RIGID) claims it first in resolution."""
 
