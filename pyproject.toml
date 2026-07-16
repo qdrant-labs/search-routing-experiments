@@ -44,3 +44,7 @@ dev = [
     "ruff (>=0.15.20,<0.16.0)",
     "pytest (>=9.1.1,<10.0.0)"
 ]
+model = [
+    "gliner2[local] (>=1.2.4)",
+    "transformers (>=4.44)"
+]
