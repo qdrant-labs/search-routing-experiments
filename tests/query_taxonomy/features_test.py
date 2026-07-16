@@ -7,12 +7,14 @@ covered by features_summary_test.py / regex_bank_test.py.
 from enum import StrEnum
 
 import pytest
+from edify import RegexBuilder
 
 from query_taxonomy.core import (
     AmbiguityTier,
     FeatureSpan,
     FeatureStat,
-    GeneralBank,
+    RegexBank,
+    StatBank,
 )
 from query_taxonomy.features import (
     FeatureExtractor,
@@ -35,8 +37,8 @@ def span_bank(
     group: FeatureGroup,
     tier: AmbiguityTier,
     spans_by_text: dict[str, list[FeatureSpan]],
-) -> type[GeneralBank[FeatureSpan]]:
-    class _SpanBank(GeneralBank[FeatureSpan]):
+) -> type[RegexBank]:
+    class _SpanBank(RegexBank):
         @property
         def name(self) -> FakeType:
             return name
@@ -49,7 +51,8 @@ def span_bank(
         def ambiguity(self) -> AmbiguityTier:
             return tier
 
-        def define(self, builder):
+        def define(self, builder: RegexBuilder) -> RegexBuilder:
+            # Fake bank — regex is unused, compute() below returns canned spans.
             return builder
 
         def compute(self, text: str) -> list[FeatureSpan]:
@@ -62,8 +65,8 @@ def stat_bank(
     name: FakeType,
     group: FeatureGroup,
     stats_by_text: dict[str, list[FeatureStat]],
-) -> type[GeneralBank[FeatureStat]]:
-    class _StatBank(GeneralBank[FeatureStat]):
+) -> type[StatBank[FeatureStat]]:
+    class _StatBank(StatBank[FeatureStat]):
         @property
         def name(self) -> FakeType:
             return name
@@ -72,7 +75,7 @@ def stat_bank(
         def group(self) -> FeatureGroup:
             return group
 
-        def define(self, builder):
+        def define(self, builder: FeatureStat) -> FeatureStat:
             return builder
 
         def compute(self, text: str) -> list[FeatureStat]:

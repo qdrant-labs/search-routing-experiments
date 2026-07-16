@@ -319,7 +319,6 @@ class BaseIndexer(ABC, Generic[T]):
                 store.save(cfg.model_id, cfg.kind)
 
         return [cache[str(id_)] for id_ in ids]
-    
 
     def _embed(
         self,

@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Iterator
 
-from query_taxonomy.features import CorpusIdentifierExtractor, CorpusIdentifiers
+from query_taxonomy.features import FeatureExtractor, CorpusFeatures
 from tqdm.auto import tqdm
 
 from dataset_registry.core import (
@@ -31,9 +31,9 @@ class DatasetRegistry:
     def __init__(
         self,
         datasets: Iterable[RegistryDataset] = DATASETS,
-        extractor: CorpusIdentifierExtractor | None = None,
+        extractor: FeatureExtractor | None = None,
     ) -> None:
-        self._extractor = extractor or CorpusIdentifierExtractor()
+        self._extractor = extractor or FeatureExtractor()
         self._datasets: dict[DatasetName, RegistryDataset] = {}
         for dataset in datasets:
             name = dataset.card.name
@@ -60,9 +60,10 @@ class DatasetRegistry:
 
     def profile(
         self, name: DatasetName, n: int | None = None, *, seed: int = 0
-    ) -> CorpusIdentifiers:
-        """Run a query sample through the identifier banks — the statistical
-        approximation used to decide which datasets are worth acquiring fully."""
+    ) -> CorpusFeatures:
+        """Run a query sample through every registered feature group — the
+        statistical approximation used to decide which datasets are worth
+        acquiring fully."""
         texts = [query.text for query in self.sample(name, n, seed=seed)]
         # extract() consumes the sequence in a single enumerate pass, so a
         # tqdm wrapper tracks the actual regex work query by query
