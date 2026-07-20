@@ -1,23 +1,23 @@
 from query_taxonomy.entities.core import EntityBank, Gliner2Bank
 from query_taxonomy.entities.general import (
-    Gliner2TemporalBank,
-    LocationBank,
-    PersonBank,
-    ProperNounBank,
+    LocationLikeBank,
+    PersonLikeBank,
+    ProperNounLikeBank,
+    TemporalLikeBank,
 )
 
 ENTITY_BANKS: tuple[type[EntityBank], ...] = (
-    PersonBank,
-    LocationBank,
-    ProperNounBank,
+    PersonLikeBank,
+    LocationLikeBank,
+    ProperNounLikeBank,
 )
 
 __all__ = [
     "ENTITY_BANKS",
     "EntityBank",
     "Gliner2Bank",
-    "Gliner2TemporalBank",
-    "LocationBank",
-    "PersonBank",
-    "ProperNounBank",
+    "LocationLikeBank",
+    "PersonLikeBank",
+    "ProperNounLikeBank",
+    "TemporalLikeBank",
 ]

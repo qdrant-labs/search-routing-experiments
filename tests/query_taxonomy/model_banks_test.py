@@ -13,27 +13,27 @@ def gliner2():
 
 class TestGliner2Banks:
     def test_person_bank_finds_lowercase_person(self, gliner2):
-        from query_taxonomy.entities import PersonBank
+        from query_taxonomy.entities import PersonLikeBank
 
-        spans = PersonBank().compute("who is chef mike ward")
+        spans = PersonLikeBank().compute("who is chef mike ward")
         assert any("mike ward" in span.text for span in spans)
 
     def test_no_person_in_plain_instructional_query(self, gliner2):
         # NOTE: degenerate inputs are NOT safe negatives — the model tags
         # bare "42" as a person (high-confidence junk, same calibration
         # lesson as the audit); pin a realistic negative instead
-        from query_taxonomy.entities import PersonBank
+        from query_taxonomy.entities import PersonLikeBank
 
-        assert PersonBank().compute("how to boil rice") == []
+        assert PersonLikeBank().compute("how to boil rice") == []
 
     def test_layered_temporal_regex_claims_first(self, gliner2):
-        from query_taxonomy.entities import Gliner2TemporalBank
+        from query_taxonomy.entities import TemporalLikeBank
         from query_taxonomy.features import FeatureExtractor
         from query_taxonomy.logical import LOGICAL_BANKS
         from query_taxonomy.taxonomy import FeatureGroup, LogicalStructure
 
         extractor = FeatureExtractor(
-            {FeatureGroup.LOGICAL_STRUCTURES: LOGICAL_BANKS + (Gliner2TemporalBank,)}
+            {FeatureGroup.LOGICAL_STRUCTURES: LOGICAL_BANKS + (TemporalLikeBank,)}
         )
         features = extractor.resolve("bitcoin price today")
         temporal = features.spans[FeatureGroup.LOGICAL_STRUCTURES][
@@ -62,15 +62,15 @@ class TestPosProfileBank:
             stat.name: stat.value
             for stat in pos_bank.compute("cheap laptops in berlin")
         }
-        assert stats["pos_noun"] >= 1
-        assert stats["pos_adj"] >= 1
+        assert stats["pos_count_noun"] >= 1
+        assert stats["pos_count_adj"] >= 1
         assert 0.0 < stats["open_class_share"] <= 1.0
         assert stats["verb_presence"] == 0.0
 
     def test_empty_text(self, pos_bank):
         stats = {stat.name: stat.value for stat in pos_bank.compute("")}
         assert stats["open_class_share"] == 0.0
-        assert stats["pos_noun"] == 0.0
+        assert stats["pos_count_noun"] == 0.0
 
     def test_morphology_counts_inflections(self, pos_bank):
         from query_taxonomy.metrics.pos import MorphologyBank

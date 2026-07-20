@@ -22,7 +22,7 @@ class LengthBank(MetricBank):
     @override
     def compute(self, text: str) -> list[FeatureStat]:
         return [
-            FeatureStat("length_tokens", float(len(self.tokens(text)))),
+            FeatureStat("length_words", float(len(self.tokens(text)))),
             FeatureStat("length_chars", float(len(text))),
         ]
 

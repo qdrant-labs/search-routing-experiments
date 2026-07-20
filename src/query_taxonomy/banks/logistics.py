@@ -194,15 +194,16 @@ class AltGeocodingBank(IdentifierBank):
         )
 
 
-class BookingReferenceBank(IdentifierBank):
+class BookingReferenceLikeBank(IdentifierBank):
     """Flight numbers (LH1830) and 6-char PNRs with mixed letters+digits.
-    The flight form matches any CAPS+digits token (WW2) — measure per corpus.
-    Ordered before SKUBank so LH1830 reads as a flight, not a model number."""
+    Assumptive (AMBIGUOUS, SPEC d22): fires broadly on gene names (CX3CR1,
+    CD4, EB1) and other alnum shapes; measure per corpus. Ordered before
+    SKUBank so LH1830 reads as a flight, not a model number."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.BOOKING_REFERENCE
+        return StructuralIdentifier.BOOKING_REFERENCE_LIKE
 
     @property
     @override
@@ -448,8 +449,8 @@ class LicensePlateBank(IdentifierBank):
 
 class AirportAirlineCodeBank(IdentifierBank):
     """Cue-word-gated IATA/ICAO codes (airport BER / BER airport / flight LH).
-    Bare 2-4 cap codes are fully shadowed by StockTickerBank — gating is what
-    keeps this bank alive at all."""
+    Bare 2-4 cap codes are fully shadowed by StockTickerLikeBank — gating is
+    what keeps this bank alive at all."""
 
     @property
     @override
@@ -495,14 +496,15 @@ class AirportAirlineCodeBank(IdentifierBank):
         )
 
 
-class AircraftVesselRegBank(IdentifierBank):
+class AircraftVesselRegLikeBank(IdentifierBank):
     """N-number tails (>=3 digits so N95 masks stay out), D- registrations,
-    keyword-gated IMO / MMSI numbers."""
+    keyword-gated IMO / MMSI numbers. Assumptive (MODERATE, SPEC d22):
+    letter-digit shapes collide with protein mutation notation (N348I)."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.AIRCRAFT_VESSEL_REG
+        return StructuralIdentifier.AIRCRAFT_VESSEL_REG_LIKE
 
     @property
     @override

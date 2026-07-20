@@ -122,7 +122,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["https://qdrant.tech/docs", "s3://bucket/path"],
         ["not a uri", "http:/oops"],
     ),
-    StructuralIdentifier.ERROR_CODE: (
+    StructuralIdentifier.ERROR_CODE_LIKE: (
         ["EACCES", "got ERR_CONNECTION_REFUSED"],
         ["Error", "E42"],
     ),
@@ -173,7 +173,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["US0378331005", "037833100"],
         ["US037", "12345"],
     ),
-    StructuralIdentifier.STOCK_TICKER: (
+    StructuralIdentifier.STOCK_TICKER_LIKE: (
         ["$AAPL", "NVDA"],
         ["nvda", "ABCDEFG"],
     ),
@@ -181,7 +181,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["529900T8BM49AURSDO55", "5493001KJTIIGC8Y1R12"],
         ["SHORT123", "529900"],
     ),
-    StructuralIdentifier.DERIVATIVES_SYMBOL: (
+    StructuralIdentifier.DERIVATIVES_SYMBOL_LIKE: (
         ["AAPL240119C00150000", "ESH25"],
         ["AAPL", "240119"],
     ),
@@ -205,7 +205,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["odds of 5/2", "+150"],
         ["3.50", "150"],
     ),
-    StructuralIdentifier.TICKET: (
+    StructuralIdentifier.TICKET_LIKE: (
         ["INV-2026-000123", "TCK-84721"],
         ["INV-", "ABC"],
     ),
@@ -289,7 +289,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["///filled.count.soap", "8FVC9G8F+6X"],
         ["///filled", "8FVC"],
     ),
-    StructuralIdentifier.BOOKING_REFERENCE: (
+    StructuralIdentifier.BOOKING_REFERENCE_LIKE: (
         ["LH1830", "X4B9C2"],
         ["L1830", "ABCDEF"],
     ),
@@ -321,7 +321,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["airport BER", "flight LH"],
         ["BER", "airport"],
     ),
-    StructuralIdentifier.AIRCRAFT_VESSEL_REG: (
+    StructuralIdentifier.AIRCRAFT_VESSEL_REG_LIKE: (
         ["N12345", "D-AIMA"],
         ["N95", "D-AI"],
     ),
@@ -377,7 +377,7 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
         ["NGC 224", "M31"],
         ["NGC", "224"],
     ),
-    StructuralIdentifier.GAME_NOTATION: (
+    StructuralIdentifier.GAME_NOTATION_LIKE: (
         ["Nf3", "O-O"],
         ["e4", "N"],
     ),
@@ -447,15 +447,15 @@ def test_finance_claim_order() -> None:
     extractor = FeatureExtractor()
 
     by_type = extractor.resolve("buy $AAPL, set $JAVA_HOME, fix CVE-2024-3094").spans[FeatureGroup.STRUCTURED_IDENTIFIERS]
-    assert [m.text for m in by_type[StructuralIdentifier.STOCK_TICKER]] == ["$AAPL"]
+    assert [m.text for m in by_type[StructuralIdentifier.STOCK_TICKER_LIKE]] == ["$AAPL"]
     assert [m.text for m in by_type[StructuralIdentifier.ENV_VAR]] == ["$JAVA_HOME"]
     assert [m.text for m in by_type[StructuralIdentifier.CVE]] == ["CVE-2024-3094"]
-    assert StructuralIdentifier.TICKET not in by_type
+    assert StructuralIdentifier.TICKET_LIKE not in by_type
 
 
 def test_length_bank_counts_tokens_and_chars() -> None:
     stats = {stat.name: stat.value for stat in LengthBank().compute("hello world")}
-    assert stats == {"length_tokens": 2.0, "length_chars": 11.0}
+    assert stats == {"length_words": 2.0, "length_chars": 11.0}
 
 
 def test_stopword_ratio_bank() -> None:

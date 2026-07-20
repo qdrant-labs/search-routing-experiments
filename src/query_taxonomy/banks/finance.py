@@ -167,15 +167,18 @@ class SecuritiesIdBank(IdentifierBank):
         )
 
 
-class StockTickerBank(IdentifierBank):
-    """$CASHTAGS (1-5 caps) and bare 2-5 cap tickers (NVDA).
-    The bare form matches any short all-caps word (USA, NATO) — worst FP
-    generator in the bank; kept per full-coverage policy, measure per corpus."""
+class StockTickerLikeBank(IdentifierBank):
+    """$CASHTAGS (1-5 caps) and bare 2-5 cap tickers (NVDA). Assumptive
+    (AMBIGUOUS, SPEC d22): the bare form matches any short all-caps word
+    (USA, NATO) — the worst FP generator in the bank; on scientific corpora
+    it fires on gene names / medical acronyms (DNA, TCR, ADHD). Kept per
+    full-coverage policy — the `-Like` suffix promotes shape-vs-claim truth
+    into the emit."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.STOCK_TICKER
+        return StructuralIdentifier.STOCK_TICKER_LIKE
 
     @property
     @override
@@ -235,14 +238,15 @@ class LEIBank(IdentifierBank):
         )
 
 
-class DerivativesSymbolBank(IdentifierBank):
+class DerivativesSymbolLikeBank(IdentifierBank):
     """OCC option symbols (AAPL240119C00150000) and futures codes (ESH25).
-    The futures form (root + month letter + year) can FP on short caps words."""
+    Assumptive (MODERATE, SPEC d22): the futures form (root + month letter +
+    year) FPs on short caps words and gene names (ALDH1, PIN1)."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.DERIVATIVES_SYMBOL
+        return StructuralIdentifier.DERIVATIVES_SYMBOL_LIKE
 
     @property
     @override
@@ -471,14 +475,16 @@ class BettingOddsBank(IdentifierBank):
         )
 
 
-class TicketBank(IdentifierBank):
+class TicketLikeBank(IdentifierBank):
     """PREFIX-digits ticket/invoice refs (INV-2026-000123, TCK-84721, JIRA-style).
-    CVE-... is shaped the same — CVEBank (RIGID) claims it first in resolution."""
+    Assumptive (MODERATE, SPEC d22): the same shape fires on chemical/protein
+    codes (IL-10, TDP-43, CK-666). CVE-... is shaped the same — CVEBank
+    (RIGID) claims it first in resolution."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.TICKET
+        return StructuralIdentifier.TICKET_LIKE
 
     @property
     @override

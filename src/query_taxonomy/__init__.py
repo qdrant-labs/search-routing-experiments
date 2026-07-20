@@ -3,7 +3,7 @@ from typing import Any
 from query_taxonomy.banks import BANKS
 from query_taxonomy.core import Engine, GeneralBank
 from query_taxonomy.corruption import CORRUPTION_BANKS
-from query_taxonomy.entities import ENTITY_BANKS, Gliner2TemporalBank
+from query_taxonomy.entities import ENTITY_BANKS, TemporalLikeBank
 from query_taxonomy.logical import LOGICAL_BANKS
 from query_taxonomy.markers import MARKER_BANKS
 from query_taxonomy.metrics import METRIC_BANKS
@@ -31,7 +31,7 @@ BankTypes = type[Bank]
 FEATURE_BANKS = {
     FeatureGroup.STRUCTURED_IDENTIFIERS: BANKS + ENTITY_BANKS,
     FeatureGroup.SENTENCE_MARKERS: MARKER_BANKS,
-    FeatureGroup.LOGICAL_STRUCTURES: LOGICAL_BANKS + (Gliner2TemporalBank,),
+    FeatureGroup.LOGICAL_STRUCTURES: LOGICAL_BANKS + (TemporalLikeBank,),
     FeatureGroup.CORRUPTION: CORRUPTION_BANKS,
     FeatureGroup.STATISTICAL_METRICS: METRIC_BANKS
     + (PosProfileBank, MorphologyBank, SyntacticDepthBank),

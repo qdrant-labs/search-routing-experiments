@@ -64,8 +64,10 @@ class StructuralIdentifier(StrEnum):
     VERSION_STRING = "version_string"
     """Semver / PEP 440 strings — e.g. v1.2.3, 2.0.0-beta.1"""
 
-    ERROR_CODE = "error_code"
-    """POSIX / Node error symbols — e.g. EACCES, ERR_CONNECTION_REFUSED"""
+    ERROR_CODE_LIKE = "error_code_like"
+    """POSIX / Node error-code-shaped tokens — e.g. EACCES, ERR_CONNECTION_REFUSED.
+    Assumptive (MODERATE): shape-guesses that also match unrelated screaming
+    identifiers in scientific text; see SPEC d22."""
 
     URI = "uri"
     """HTTP, S3, file and other URI schemes — e.g. https://qdrant.tech/docs, s3://bucket/path"""
@@ -97,8 +99,10 @@ class StructuralIdentifier(StrEnum):
     CRYPTO_ADDRESS = "crypto_address"
     """On-chain wallet addresses — e.g. bc1qxy2kgdyg..."""
 
-    GAME_NOTATION = "game_notation"
-    """Chess PGN/FEN, Go SGF moves — e.g. Nf3, O-O, rnbqkbnr/pppppppp/8/..."""
+    GAME_NOTATION_LIKE = "game_notation_like"
+    """Chess PGN/FEN, Go SGF moves — e.g. Nf3, O-O, rnbqkbnr/pppppppp/8/...
+    Assumptive (MODERATE): letter-digit shapes collide with gene names /
+    protein mutations under domain shift; see SPEC d22."""
 
     # --- finance / markets ---
     CURRENCY_AMOUNT = "currency_amount"
@@ -113,14 +117,19 @@ class StructuralIdentifier(StrEnum):
     SECURITIES_ID = "securities_id"
     """Securities identifiers (ISIN / CUSIP) — e.g. US0378331005, 037833100"""
 
-    STOCK_TICKER = "stock_ticker"
-    """Stock tickers / cashtags — e.g. $AAPL, NVDA"""
+    STOCK_TICKER_LIKE = "stock_ticker_like"
+    """Stock-ticker-shaped tokens: cashtags and bare 2-5 uppercase alpha — e.g.
+    $AAPL, NVDA. Assumptive (AMBIGUOUS): the bare form is the worst FP
+    generator in the bank; fires on gene names / medical acronyms
+    (DNA, TCR, ADHD) — the `-Like` suffix promotes that truth into the
+    emitted identifier. SPEC d22."""
 
     LEI = "lei"
     """Legal Entity Identifier — e.g. 529900T8BM49AURSDO55"""
 
-    DERIVATIVES_SYMBOL = "derivatives_symbol"
-    """OCC options / futures symbols — e.g. AAPL240119C00150000, ESH25"""
+    DERIVATIVES_SYMBOL_LIKE = "derivatives_symbol_like"
+    """OCC options / futures-symbol-shaped tokens — e.g. AAPL240119C00150000,
+    ESH25. Assumptive (MODERATE): domain-shift-prone (ALDH1, PIN1); see SPEC d22."""
 
     MARKET_CODE = "market_code"
     """Market infrastructure codes (MIC / ABA routing / SEDOL / FIGI) — e.g. XNYS, 021000021, BBG000BLNNH6"""
@@ -137,8 +146,10 @@ class StructuralIdentifier(StrEnum):
     BETTING_ODDS = "betting_odds"
     """Fractional / decimal / American odds — e.g. 5/2, 3.50, +150"""
 
-    TICKET = "ticket"
-    """Invoice/ticket reference numbers — e.g. INV-2026-000123, TCK-84721"""
+    TICKET_LIKE = "ticket_like"
+    """Invoice/ticket-reference-shaped tokens — e.g. INV-2026-000123, TCK-84721.
+    Assumptive (MODERATE): fires on chemical/protein codes (IL-10, TDP-43) in
+    scientific text; see SPEC d22."""
 
     # --- legal / gov ---
     LEGAL_CITATION = "legal_citation"
@@ -205,8 +216,10 @@ class StructuralIdentifier(StrEnum):
     ALT_GEOCODING = "alt_geocoding"
     """what3words / Plus Codes / MGRS — e.g. ///filled.count.soap, 8FVC9G8F+6X, 33UUU9012"""
 
-    BOOKING_REFERENCE = "booking_reference"
-    """Airline PNR, record locators, flight numbers — e.g. LH1830, X4B9C2"""
+    BOOKING_REFERENCE_LIKE = "booking_reference_like"
+    """Airline PNR, record locators, flight-number-shaped tokens — e.g.
+    LH1830, X4B9C2. Assumptive (AMBIGUOUS): fires broadly on gene names
+    (CX3CR1, CD4) in scientific text; see SPEC d22."""
 
     TRACKING_NUMBER = "tracking_number"
     """Carrier shipment tracking codes — e.g. 1Z999AA10123456784"""
@@ -229,8 +242,10 @@ class StructuralIdentifier(StrEnum):
     AIRPORT_AIRLINE_CODE = "airport_airline_code"
     """IATA / ICAO codes — e.g. BER, EDDB, LH, DLH"""
 
-    AIRCRAFT_VESSEL_REG = "aircraft_vessel_reg"
-    """Tail numbers / IMO / MMSI — e.g. N12345, D-AIMA, IMO 9074729"""
+    AIRCRAFT_VESSEL_REG_LIKE = "aircraft_vessel_reg_like"
+    """Tail-number / IMO / MMSI-shaped tokens — e.g. N12345, D-AIMA, IMO 9074729.
+    Assumptive (MODERATE): letter-digit shapes collide with protein
+    mutation notation (N348I); see SPEC d22."""
 
     CUSTOMS_CLASSIFICATION = "customs_classification"
     """HS / HTS / Schedule B codes — e.g. HS 090111, HTS 0901.11.00"""
@@ -273,13 +288,17 @@ class StructuralIdentifier(StrEnum):
     """NGC / Messier / HD / Kepler designations — e.g. NGC 224, M31, HD 209458, Kepler-186f"""
 
     # --- named entities (Method: MODEL — GLiNER2, audited labels only) ---
-    PERSON = "person"
-    """Person names in any casing — e.g. chef mike ward. Audited 0.87 @0.32."""
+    # All MODEL-tier: Assumptive by SPEC d22 — the model is a soft classifier,
+    # the `-Like` suffix promotes that truth into the emitted identifier.
+    PERSON_LIKE = "person_like"
+    """Person-like spans in any casing — e.g. chef mike ward. Audited
+    precision 0.87 @0.32 on the smoke-eval sample."""
 
-    LOCATION = "location"
-    """Place names in any casing — e.g. dallas ga. Audited 0.84 @0.34."""
+    LOCATION_LIKE = "location_like"
+    """Location-like spans in any casing — e.g. dallas ga. Audited
+    precision 0.84 @0.34 on the smoke-eval sample."""
 
-    PROPER_NOUN = "proper_noun"
+    PROPER_NOUN_LIKE = "proper_noun_like"
     """Coarse name-like spans: titles, works, brands — the residue the four
     fine classes miss, and the coarse cover for dropped org/product.
     Audited 0.84 @0.31 (0.77 on all-lowercase text)."""
@@ -332,8 +351,8 @@ class SentenceMarker(StrEnum):
 
 class LogicalStructure(StrEnum):
     """
-    Logical Structures group: query-logic constructs. Method: REGEX now;
-    TEMPORAL is the first layered feature (GLiNER2 backstop pending).
+    Logical Structures group: query-logic constructs. Method: REGEX plus
+    a layered MODEL backstop. TEMPORAL / TEMPORAL_LIKE are the layered pair.
     """
 
     OPERATOR_SYNTAX = "operator_syntax"
@@ -341,9 +360,17 @@ class LogicalStructure(StrEnum):
     Uppercase-gated: lowercase and/or/not are ordinary function words."""
 
     TEMPORAL = "temporal"
-    """Relative temporal expressions — e.g. "bitcoin price today", "3 days ago".
-    Absolute forms (ISO dates, Q3 2026) belong to the identifier group
-    (DATETIME / BUSINESS_TEMPORAL); this feature covers what they can't."""
+    """Relative temporal expressions (closed-vocab regex, RIGID) — e.g.
+    "bitcoin price today", "3 days ago". Absolute forms (ISO dates, Q3 2026)
+    belong to the identifier group (DATETIME / BUSINESS_TEMPORAL); this
+    feature covers what they can't."""
+
+    TEMPORAL_LIKE = "temporal_like"
+    """The MODEL-layer emit name for GLiNER2's temporal recall (SPEC d22).
+    Assumptive: the model soft-classifier catches period-like nouns
+    ("Childhood", "Cold exposure") that aren't temporal expressions; the
+    `-Like` suffix makes that visible at the emit boundary. Layered with
+    TEMPORAL — the regex layer claims first."""
 
 
 class CorruptionKind(StrEnum):
@@ -364,7 +391,8 @@ class StatisticalMetric(StrEnum):
     """
 
     LENGTH = "length"
-    """Query size — length_tokens, length_chars."""
+    """Query size — length_words (regex `\\w+` tokenization), length_chars.
+    See Stat suffix convention in CONTEXT.md."""
 
     STOPWORD_RATIO = "stopword_ratio"
     """Function-word share — stopword_count, stopword_ratio. The REGEX

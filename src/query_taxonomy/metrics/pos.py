@@ -25,6 +25,10 @@ OPEN_CLASS = frozenset({"ADJ", "ADV", "INTJ", "NOUN", "PROPN", "VERB"})
 CLOSED_CLASS = frozenset(
     {"ADP", "AUX", "CCONJ", "DET", "NUM", "PART", "PRON", "SCONJ"}
 )
+# UD's content-agnostic residual: punctuation, symbols, unclassified. Split
+# from OPEN/CLOSED so open_class_share + closed_class_share + residual_share
+# is a consumer-checkable ≈1 invariant (SPEC d24).
+RESIDUAL_CLASS = frozenset({"PUNCT", "SYM", "X"})
 CLAUSAL_DEPS = frozenset(
     {"ROOT", "ccomp", "xcomp", "advcl", "acl", "relcl", "csubj"}
 )
@@ -89,7 +93,7 @@ class PosProfileBank(SpacyBank):
             return count / total if total else 0.0
 
         stats = [
-            FeatureStat(f"pos_{tag.lower()}", float(count))
+            FeatureStat(f"pos_count_{tag.lower()}", float(count))
             for tag, count in counts.items()
         ]
         stats.extend(
@@ -101,6 +105,10 @@ class PosProfileBank(SpacyBank):
                 FeatureStat(
                     "closed_class_share",
                     share(sum(counts[tag] for tag in CLOSED_CLASS)),
+                ),
+                FeatureStat(
+                    "residual_share",
+                    share(sum(counts[tag] for tag in RESIDUAL_CLASS)),
                 ),
                 FeatureStat("noun_share", share(counts["NOUN"])),
                 FeatureStat("verb_presence", float(counts["VERB"] > 0)),

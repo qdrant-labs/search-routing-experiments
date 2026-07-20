@@ -13,8 +13,8 @@ _FEN_CHAR = (
 
 class ISOCodeBank(IdentifierBank):
     """BCP-47 locale forms (en-US). Bare currency/country codes (EUR, DE) are
-    ceded to StockTickerBank — bare 2-3 caps are format-identical. Known FP:
-    prose like 'ex-US'."""
+    ceded to StockTickerLikeBank — bare 2-3 caps are format-identical. Known
+    FP: prose like 'ex-US'."""
 
     @property
     @override
@@ -325,14 +325,16 @@ class AstronomicalDesignationBank(IdentifierBank):
         )
 
 
-class GameNotationBank(IdentifierBank):
+class GameNotationLikeBank(IdentifierBank):
     """Chess SAN piece moves (Nf3), castling (O-O), FEN position strings.
-    Bare pawn moves (e4) excluded — two chars of pure cell reference."""
+    Assumptive (MODERATE, SPEC d22): the SAN shape collides with gene names
+    (Rad5) in scientific text. Bare pawn moves (e4) excluded — two chars of
+    pure cell reference."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.GAME_NOTATION
+        return StructuralIdentifier.GAME_NOTATION_LIKE
 
     @property
     @override

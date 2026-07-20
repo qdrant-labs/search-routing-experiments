@@ -37,4 +37,4 @@ def test_summary_handles_untagged_corpus():
     # spans absent -> untagged; stats always present for every query
     assert report.splitlines()[0] == "queries: 2 tagged: 0 (0.0%)"
     assert "== statistical_metrics (2 types)" in report
-    assert "length.length_tokens  docs=2" in report
+    assert "length.length_words  docs=2" in report

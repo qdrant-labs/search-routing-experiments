@@ -179,13 +179,15 @@ class URIBank(IdentifierBank):
         )
 
 
-class ErrorCodeBank(IdentifierBank):
-    """Node ERR_* symbols and POSIX errno names. Known FP: the bare word ERROR."""
+class ErrorCodeLikeBank(IdentifierBank):
+    """Node ERR_* symbols and POSIX errno names. Assumptive (MODERATE, SPEC
+    d22): the E-prefixed shape fires on medical acronyms (EPIC, ECMO) in
+    scientific text. Known FP: the bare word ERROR."""
 
     @property
     @override
     def name(self) -> StructuralIdentifier:
-        return StructuralIdentifier.ERROR_CODE
+        return StructuralIdentifier.ERROR_CODE_LIKE
 
     @property
     @override
@@ -212,7 +214,7 @@ class ErrorCodeBank(IdentifierBank):
 
 class EnvVarBank(IdentifierBank):
     """$UPPER_SNAKE env vars and --long-flags. The $ branch requires an
-    underscore or >=6 chars so short cashtags ($AAPL) fall to STOCK_TICKER;
+    underscore or >=6 chars so short cashtags ($AAPL) fall to STOCK_TICKER_LIKE;
     the cost is that $HOME/$PATH-style short env vars are ceded too."""
 
     @property
