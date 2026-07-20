@@ -43,13 +43,24 @@ only: banks of different groups never compete for the same char ranges.
   79-member enum, `Domain`, `SentenceMarker`, future enums). No machinery —
   imports nothing but the stdlib.
 - `core.py` — extraction mechanics: `FeatureSpan`, `FeatureStat`,
-  `AmbiguityTier`, and one bank family `GeneralBank[EngineT, OutT]` —
+  `AmbiguityTier`, `Engine` (regex | gliner_model | spacy_model — a
+  ClassVar on every bank, fixed by engine bases, filterable BEFORE
+  instantiation), and one bank family `GeneralBank[OutT, EngineT]` —
   `EngineT` is the definition artifact (`RegexBuilder` for regex banks, a
-  tokenizer/model for stat banks), `OutT` is a constrained TypeVar over
+  pipeline/schema for model banks), `OutT` is a constrained TypeVar over
   exactly `FeatureSpan | FeatureStat`, and `compute(text)` is the single
   output verb. `RegexBank` and `StatBank` fix one side each. `ambiguity`
   defaults to RIGID (stats are solid numbers); span-group bases re-abstract
-  it.
+  it. A feature may be served by LAYERED banks (same name, different
+  engines): deterministic engine claims first, model engine backstops.
+- `entities/` — GLiNER2-engine span banks (person, location, proper noun in
+  the identifiers group; temporal backstop in logical): one pinned schema,
+  one shared cached forward pass, offset clamping, audited per-label
+  thresholds. Requires the `model` dependency group.
+- `metrics/pos.py` — spaCy-engine stat banks (POS profile, morphology,
+  syntactic depth) over one shared pinned pipeline. spaCy is a main
+  dependency; the pinned `en_core_web_sm` model needs a separate download
+  (`poetry run python -m spacy download en_core_web_sm`).
 - `__init__.py` — `FEATURE_BANKS: dict[FeatureGroup, tuple[type[GeneralBank],
   ...]]`, the group registry. Must stay defined before any `features`
   re-export (import-order rule); group↔key consistency is validated in
@@ -69,7 +80,11 @@ only: banks of different groups never compete for the same char ranges.
   package.
 - `features.py` — pydantic models (`QueryFeatures`, `SpanProfile`,
   `StatProfile`, `CorpusFeatures`; spans and stats sections nested by
-  group) and `FeatureExtractor`: `resolve(text, *, groups=None)` /
+  group) and `FeatureExtractor`: constructor takes
+  `engines=(Engine.REGEX,)` by default (deterministic, dependency-light;
+  `engines=None` = all engines, needs the `model` group + the downloaded
+  spaCy model);
+  `resolve(text, *, groups=None)` /
   `extract(queries, *, groups=None)` run banks group by group in tier order
   with a per-group, per-text registry of claimed char ranges, so a
   lower-priority bank never re-claims overlapping text (NUMBER can't steal

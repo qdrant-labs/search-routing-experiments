@@ -5,7 +5,7 @@ description = ""
 authors = [
     {name = "andrei.cristea",email = "andrei.cristea@qdrant.com"}
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "ir-datasets (>=0.6.1,<0.7.0)",
     "pandas (>=3.0.3,<4.0.0)",
@@ -20,7 +20,8 @@ dependencies = [
     "datasets (>=4.0.0)",
     "mlcroissant (>=1.1.0,<2.0.0)",
     "gitpython (>=3.1.50,<4.0.0)",
-    "edify (>=0.3.0,<0.4.0)"
+    "edify (>=0.3.0,<0.4.0)",
+    "spacy[apple] (>=3.8.14,<4.0.0)"
 ]
 
 
