@@ -17,12 +17,12 @@ jsonl over HTTP via the HF `json` loader (still streaming, still cached once).
 
 ## Already registered
 
-| dataset | card | backend | notes |
-|---|---|---|---|
-| msmarco-passage-dev | (QQ, LLM-0, G, NT-0, i18-0, MM-0) | irds | ~55.5K Bing queries, baseline |
-| trec-dl-2022 | (QQ, LLM-0, G, NT-0, i18-0, MM-0) | irds | judged DL topics |
-| beir-nfcorpus | (QQ, LLM-0, S, NT-0, i18-0, MM-0) | irds | medical; profiled: ~1% true identifier density → dense stratum |
-| miracl-en-dev | (QQ, LLM-0, G, NT-0, i18-1, MM-0) | hf | 799 native questions → natural-question stratum |
+| dataset             | card                              | backend | notes                                                          |
+| ---------------------| -----------------------------------| ---------| ----------------------------------------------------------------|
+| msmarco-passage-dev | (QQ, LLM-0, G, NT-0, i18-0, MM-0) | irds    | ~55.5K Bing queries, baseline                                  |
+| trec-dl-2022        | (QQ, LLM-0, G, NT-0, i18-0, MM-0) | irds    | judged DL topics                                               |
+| beir-nfcorpus       | (QQ, LLM-0, S, NT-0, i18-0, MM-0) | irds    | medical; profiled: ~1% true identifier density → dense stratum |
+| miracl-en-dev       | (QQ, LLM-0, G, NT-0, i18-1, MM-0) | hf      | 799 native questions → natural-question stratum                |
 
 Open discrepancy: the 2026-07-20 candidate list codes MIRACL as
 `(LLM-1, NT-1)`; the registered card says `llm_target=False,
