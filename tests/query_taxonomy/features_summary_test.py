@@ -32,5 +32,9 @@ def test_groups_filter_limits_extraction():
 
 
 def test_summary_handles_untagged_corpus():
-    corpus = FeatureExtractor().extract(["hello there", "how are you"])
-    assert corpus.summary() == "queries: 2 tagged: 0 (0.0%)"
+    corpus = FeatureExtractor().extract(["walking shoes", "camping stoves"])
+    report = corpus.summary()
+    # spans absent -> untagged; stats always present for every query
+    assert report.splitlines()[0] == "queries: 2 tagged: 0 (0.0%)"
+    assert "== statistical_metrics (2 types)" in report
+    assert "length.length_tokens  docs=2" in report

@@ -9,14 +9,23 @@ import pytest
 
 from query_taxonomy import FEATURE_BANKS
 from query_taxonomy.banks import BANKS, StructuralIdentifier
+from query_taxonomy.core import Engine, StatBank
 from query_taxonomy.features import FeatureExtractor
-from query_taxonomy.taxonomy import FeatureGroup, SentenceMarker
+from query_taxonomy.metrics import LengthBank, StopwordRatioBank
+from query_taxonomy.taxonomy import (
+    CorruptionKind,
+    FeatureGroup,
+    LogicalStructure,
+    SentenceMarker,
+)
 
-# every registered bank of every group is subject to the case discipline
+# case discipline covers the deterministic engine; model-engine banks get
+# live behavioral tests in model_banks_test.py instead
 _BANKS = {
     cls().name: cls()
     for group_banks in FEATURE_BANKS.values()
     for cls in group_banks
+    if cls.engine is Engine.REGEX
 }
 
 # name -> (positives, negatives)
@@ -24,6 +33,38 @@ CASES: dict[StrEnum, tuple[list[str], list[str]]] = {
     SentenceMarker.NEGATION: (
         ["laptops without touchscreen", "NOT the Nokia one"],
         ["nothing knots canned", "annotated notation"],
+    ),
+    SentenceMarker.GREETING: (
+        ["hi how do I set up Qdrant", "Good morning team"],
+        ["highland cows", "the history of yoga"],
+    ),
+    SentenceMarker.POLITENESS: (
+        ["please explain vector quantization", "could you help me find restaurants"],
+        ["pleased to meet everyone", "cauldron recipes"],
+    ),
+    SentenceMarker.INTERJECTION: (
+        ["ugh my docker container keeps crashing", "wow how does HNSW work"],
+        ["laughing out loud", "lollipop stand"],
+    ),
+    SentenceMarker.COMPARATIVE: (
+        ["faster than Python", "best database for vector search"],
+        ["thank you notes", "morse code"],
+    ),
+    SentenceMarker.ACRONYM: (
+        ["IBM stock price", "the N.Y. times archive"],
+        ["Nokia phones", "usa lowercase"],
+    ),
+    LogicalStructure.OPERATOR_SYNTAX: (
+        ["cats AND dogs", "java NOT javascript"],
+        ["sand and gravel", "not now"],
+    ),
+    LogicalStructure.TEMPORAL: (
+        ["bitcoin price today", "released 3 days ago"],
+        ["tomorrowland tickets", "nowhere fast"],
+    ),
+    CorruptionKind.ENCODING_ARTIFACT: (
+        ["how to fix â€™ encoding issue", "cafÃ© menu"],
+        ["cafe menu", "clean ascii question"],
     ),
     StructuralIdentifier.CVE: (
         ["CVE-2024-3094", "see CVE-2023-12345 advisory"],
@@ -366,7 +407,12 @@ def test_negative(name: StructuralIdentifier, text: str) -> None:
 
 
 def test_every_bank_has_cases() -> None:
-    assert set(CASES) == set(_BANKS), "add 2/2 cases for every new bank"
+    # stat banks are exempt: compute() always returns stats, so the
+    # positive/negative case model doesn't apply — they get value assertions
+    span_banks = {
+        name for name, bank in _BANKS.items() if not isinstance(bank, StatBank)
+    }
+    assert set(CASES) == span_banks, "add 2/2 cases for every new span bank"
 
 
 def test_module_placement_matches_domain() -> None:
@@ -405,3 +451,22 @@ def test_finance_claim_order() -> None:
     assert [m.text for m in by_type[StructuralIdentifier.ENV_VAR]] == ["$JAVA_HOME"]
     assert [m.text for m in by_type[StructuralIdentifier.CVE]] == ["CVE-2024-3094"]
     assert StructuralIdentifier.TICKET not in by_type
+
+
+def test_length_bank_counts_tokens_and_chars() -> None:
+    stats = {stat.name: stat.value for stat in LengthBank().compute("hello world")}
+    assert stats == {"length_tokens": 2.0, "length_chars": 11.0}
+
+
+def test_stopword_ratio_bank() -> None:
+    stats = {
+        stat.name: stat.value
+        for stat in StopwordRatioBank().compute("the best of the best")
+    }
+    assert stats["stopword_count"] == 3.0
+    assert stats["stopword_ratio"] == 0.6
+
+
+def test_stopword_ratio_empty_text() -> None:
+    stats = {stat.name: stat.value for stat in StopwordRatioBank().compute("")}
+    assert stats == {"stopword_count": 0.0, "stopword_ratio": 0.0}
