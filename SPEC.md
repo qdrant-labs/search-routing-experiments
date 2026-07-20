@@ -115,6 +115,24 @@ is explicitly a later stage.
     nullable per-row (English-only); torch deps (~2–3 GB) in a dedicated
     Poetry group, never in the default install.
 
+    **Outcome (2026-07-16, hand-audited smoke eval, user ratified): ADOPTED,
+    label-scoped.** v0 label set `{person, location, proper noun}` at tuned
+    thresholds `{0.32, 0.34, 0.31}` (audited precision 0.87 / 0.84 / 0.84 —
+    proper noun holds 0.77 on the all-lowercase slice); `temporal` allowed
+    as banks-first fallback (0.83 tuned @0.58). Dropped as ambiguous
+    classes: `product` (0.49) and `organization` (0.30; threshold rescue
+    keeps 7/33) — proper noun covers org/product mentions coarsely. GLiNER
+    v1 cross-check waived. Acronym zero-shot rejected (lowercase slice
+    0.43, high-confidence FPs → thresholds can't rescue; fine-tune with
+    bank silver labels is the only model path). Closed-list markers all
+    scored 0 — banks own them, now with data. Extra guardrail from the
+    eval: GLiNER2 outputs are **schema-composition-dependent** (adding a
+    label shifts other labels' scores), so the exact schema is part of the
+    determinism pin alongside weights, library version, and batch size; the
+    extractor wrapper must clamp span `end` to `len(text)` and drop spans
+    failing the round-trip (trailing-period hallucination on
+    state-abbreviation-shaped tails).
+
 14. **POS profile = ALGO feature via pinned spaCy tagger; GLiNER schema
     unchanged** (grill-me 2026-07-16). New taxonomy row "POS profile (UD-17
     tagset)": full 17-tag histogram stored per query; recipe-facing scalars
@@ -156,6 +174,97 @@ is explicitly a later stage.
     corpus aggregates), `CorpusFeatures` with per-group `summary()` (Domain
     sub-grouping only inside structured_identifiers). Old names die without
     aliases; `dataset_registry.profile()` updates in the same change.
+
+16. **Extractor fan-out wave + engine doctrine** (grill-me 2026-07-16).
+    Three engines: RegexBank (edify — closed shapes/lists, precision-first),
+    SpacyBank (`StatBank[Language]` — grammatical signal, lands with
+    decision 14's POS wave), Gliner2Bank (context entities, audited labels
+    only, pinned schema per decision 13). **A Query Feature may need more
+    than one signal**: multiple banks may share one feature name — the
+    within-group claim registry plus AmbiguityTier ordering arbitrate
+    (deterministic engine claims first, model engine backstops at
+    AMBIGUOUS). First layered feature: `LogicalStructure.TEMPORAL` —
+    relative-vocab regex bank now; GLiNER2 date backstop (threshold 0.58)
+    lands with the Gliner2Bank wrapper. Language policy: English-v0
+    everywhere; word lists are versioned code; coverage gaps are handled by
+    process (ratification audits, model-vs-bank disagreement mining), not
+    speculative engines; multilingual is one phase-2 sweep across all
+    tiers. This wave (all regex/stat, 2-pos/2-neg cases each): markers
+    GREETING/POLITENESS/INTERJECTION/COMPARATIVE (closed lists; comparative
+    = markers + irregulars only, no -er/-est suffix matching) and ACRONYM
+    (cased shape + dotted); logical/ OPERATOR_SYNTAX (case-sensitive
+    uppercase AND/OR/NOT) and TEMPORAL (relative vocabulary only — absolute
+    forms stay with identifier DATETIME/BUSINESS_TEMPORAL); corruption/
+    ENCODING_ARTIFACT (mojibake digraphs, U+FFFD; no word boundaries);
+    metrics/ LENGTH and STOPWORD_RATIO as the first StatBanks (token-regex
+    engines; stat banks are exempt from span-case enforcement and get value
+    assertions instead). Test keying stays name-based until the first
+    layered bank ships, then re-keys per class. Deferred from the wave: POS
+    profile (spaCy dependency wave, decision 14), corrupted-identifiers
+    (needs design against banks' claim data), Gliner2Bank wrapper (offset
+    clamping + schema pin).
+
+17. **Engine as a first-class bank attribute; one unified registry**
+    (grill-me 2026-07-17). `Engine` StrEnum (`regex | gliner_model |
+    spacy_model`) as a `ClassVar` on every bank — including stat banks
+    (LengthBank's engine is its tokenizer regex; PosProfileBank's is
+    spaCy). Engine bases fix it; filtering happens **before
+    instantiation**, so selecting regex-only never imports torch/spaCy.
+    `full_feature_banks()` dies: FEATURE_BANKS holds ALL banks, and
+    `FeatureExtractor` gains `engines: Iterable[Engine] | None` —
+    **default `(Engine.REGEX,)`** (deterministic, dependency-light,
+    keeps profiling and tests fast), `None` = every engine (requires the
+    `model` + `nlp` groups). Layering composes: dropping GLINER removes
+    the temporal backstop, keeps the regex layer. Stage-1 close-out from
+    the CSV gap audit: implement Morphology (lemma≠token inflected share)
+    and Syntactic Depth (parse depth + clause count) as spaCy stat banks
+    over ONE shared cached pipeline (tagger+parser+lemmatizer, ner
+    disabled); defer PMI (blocking question: background co-occurrence
+    source), char-typos (blocking: dictionary source), mono/multilingual
+    (blocking: lang-id dependency + phase-2 multilingual), corruption
+    degree (derived view per d8); corpus-relative five stay blocked on
+    the queries-only registry decision. Case enforcement scopes to
+    engine == REGEX span banks; model banks get live tests in
+    model_banks_test.py.
+
+18. **Multilingual strategy + language engine** (grill-me 2026-07-17).
+    Three-axis design: (a) **invariant banks** — 79 identifier banks are
+    mostly language-invariant already (UUIDs, IBANs, CVEs are international
+    standards); a small audit flags the English-gated exceptions;
+    (b) **UD-routed grammatical banks** — spaCy POS/morphology/depth banks
+    route to per-language pipelines (`de_core_news_sm`, etc.) via the
+    `languages` parameter, zero architecture change; (c) **language-identity
+    features** (`LANGUAGE_SET` + `CODE_SWITCHING`) join the **SEMANTICAL**
+    group as stat banks. Engine: **lingua-py** (Apache 2.0, 75 languages,
+    Rust-backed v2, `compute_language_confidence_values()` returns ranked
+    multi-language scores — the only candidate with multi-label output,
+    which is the hard requirement for code-switching detection; spacy-fastlang
+    disqualified: exposes only `doc._.language` single string, no multi-label
+    API). fastText direct is the fallback if the 4 missing MIRACL languages
+    (Yoruba, Telugu, Swahili, Farsi) become blocking. Memory guardrail: scope
+    `LanguageDetectorBuilder.from_languages([...])` to the MIRACL 14 actually
+    covered, not all 75. Missing languages return nullable per-row (same
+    precedent as English-only spaCy banks). `LLMBank` reserved as last-resort
+    engine — explicitly deferred, not this stage. Language parameter:
+    `resolve(text, *, languages=["en"])` — caller-declares, not detected;
+    banks declare `supported_languages: ClassVar[frozenset[str] | None]`.
+    Routing architecture for per-language spaCy pipelines: see decision 19.
+
+19. **Per-language pipeline routing** (grill-me 2026-07-17). The shared
+    spaCy caches become language-keyed: `_pipeline(lang)` loads the pinned
+    per-language model (`en_core_web_sm`, `de_core_news_sm`, ...);
+    `_doc(text, lang)` caches by both. Banks declare
+    `supported_languages: ClassVar[frozenset[str] | None]` (None =
+    language-invariant); the extractor skips non-supporting banks for the
+    requested `languages` and runs supporting banks once per requested
+    language, merging results. Missing pipeline downloads **fail loudly**
+    with the download command in the error — no silent fallback to the
+    weaker `xx` multilingual model (silent degradation would corrupt
+    profiles exactly where multilingual data is the point).
+    `spacy.util.get_installed_models()` lets the extractor warn at init
+    about unservable languages. Multilingual monolingual models rejected
+    as primary (option b) on accuracy; silent fallback rejected (option c)
+    on integrity.
 
 ## Deferred questions
 

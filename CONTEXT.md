@@ -30,6 +30,24 @@ presence, PROPN share. The canonical function-word measure — the
 stopword-ratio feature is its REGEX fallback.
 _Avoid_: POS as GLiNER entity labels
 
+**Operator syntax**:
+Word-form boolean operators in uppercase (AND/OR/NOT) — the user deliberately
+speaking keyword-search dialect (attested at ~1-10% of queries, higher among
+developer audiences). Symbolic forms (`!=`, `<>`, `!x`) are NOT operator
+syntax: no query-log study attests them as search dialect; in a real query
+they are evidence of embedded formal content.
+_Avoid_: boolean operators (ambiguous with lowercase conjunctions)
+
+**Embedded formal content**:
+Formal-language material appearing inside a query as its subject — exactly
+two kinds: a code fragment (programming-language grammar) or a math
+expression (equation grammar). A grammar, not a token format: the same
+rationale that excluded SMILES from the identifier group routes this to
+Logical Structures. Spreadsheet formulas are code; physics equations are
+math; chemical identifiers are ChemicalIdBank's; bare chemical formulas
+(H2SO4) deliberately excluded.
+_Avoid_: formula (dissolves into code/math), programmatic sentence
+
 **Bank**:
 Any feature extractor: `GeneralBank[EngineT, OutT]` — `define()` builds its
 engine, `compute(text)` returns either spans or stats (OutT is constrained
@@ -40,6 +58,37 @@ _Avoid_: ScalarExtractor (dead), extractor (reserved for the facade)
 **FeatureStat**:
 A named scalar `(name, value)` emitted by a stat bank — one bank may emit
 many (a histogram is many stats). The stats counterpart of `FeatureSpan`.
+
+**Engine**:
+The detection machinery a bank is built on — RegEx (edify), spaCy, GLiNER2,
+or lang-id model. A feature's engine assignment follows the doctrine: closed
+surface form → regex; grammatical → spaCy; contextual-semantic and audited →
+GLiNER2; language identity → lang-id model (pending library decision).
+
+**Layered banks**:
+Two or more banks serving one feature name with different engines; the
+within-group claim registry plus tier ordering arbitrate — deterministic
+engine claims first, model engine backstops what it missed.
+_Avoid_: fallback bank (the model layer adds recall, it does not replace)
+
+**Language parameter**:
+The declared primary language(s) passed by the caller at extraction time —
+`resolve(text, *, languages=["en"])`. Multiple values are valid (mixed
+corpus slice). Banks declare `supported_languages: ClassVar[frozenset[str]
+| None]` (None = language-invariant, e.g. UUIDs); the extractor skips
+non-supporting banks, leaving those features nullable per-row. Distinct from
+the LANGUAGE_SET feature, which is *measured* on the query text.
+_Avoid_: lang-id (that is the engine name, not this parameter)
+
+**Code-switching**:
+A query whose tokens span two or more languages as a natural whole — not
+segmentable, not an edge case. A culturally embedded register: Moldavian
+Romanian with Russian jargon, Egyptian Arabic with English terms as class
+markers, Tolstoy's French in War and Peace. The phenomenon is holistic — the
+utterance IS the mixed language; no part is "foreign". A first-class taxonomy
+feature under SEMANTICAL: its presence carries routing signal and cultural
+information. Detection asks "is mixing present and which languages?" — not
+"where are the boundaries?".
 
 **Smoke eval**:
 The hand-audited acceptance gate for a MODEL-tier extractor: a small
