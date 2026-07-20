@@ -15,7 +15,8 @@ class FeatureGroup(StrEnum):
     STATISTICAL_METRICS = "statistical_metrics"
     CORRUPTION = "corruption"
     SEMANTICAL = "semantical"
-    """MODEL-tier / corpus-relative — no extractors yet (SPEC decisions 1, 13)."""
+    """Language identity and code-switching (SPEC decision 18); corpus-relative
+    features (vocabulary mismatch, ambiguity, etc.) also land here eventually."""
 
 
 class StructuralIdentifier(StrEnum):
@@ -271,6 +272,18 @@ class StructuralIdentifier(StrEnum):
     ASTRONOMICAL_DESIGNATION = "astronomical_designation"
     """NGC / Messier / HD / Kepler designations — e.g. NGC 224, M31, HD 209458, Kepler-186f"""
 
+    # --- named entities (Method: MODEL — GLiNER2, audited labels only) ---
+    PERSON = "person"
+    """Person names in any casing — e.g. chef mike ward. Audited 0.87 @0.32."""
+
+    LOCATION = "location"
+    """Place names in any casing — e.g. dallas ga. Audited 0.84 @0.34."""
+
+    PROPER_NOUN = "proper_noun"
+    """Coarse name-like spans: titles, works, brands — the residue the four
+    fine classes miss, and the coarse cover for dropped org/product.
+    Audited 0.84 @0.31 (0.77 on all-lowercase text)."""
+
 
 class Domain(StrEnum):
     """Semantic domain of an identifier type — validation/reporting axis.
@@ -292,8 +305,102 @@ class Domain(StrEnum):
 class SentenceMarker(StrEnum):
     """
     Sentence Markers group of the taxonomy: lexical cues about phrasing
-    register. Method: REGEX (closed word/phrase lists).
+    register. Method: REGEX (closed word/phrase lists and shapes).
     """
 
     NEGATION = "negation"
     """Negation / exclusion words — e.g. "laptops without touchscreen"."""
+
+    GREETING = "greeting"
+    """Conversational openers — e.g. "hi how do I set up Qdrant"."""
+
+    POLITENESS = "politeness"
+    """Politeness / request markers — e.g. "please explain quantization"."""
+
+    INTERJECTION = "interjection"
+    """Interjections and exclamations — e.g. "ugh my container keeps crashing"."""
+
+    COMPARATIVE = "comparative"
+    """Comparative / superlative markers — irregulars and function words only
+    (better, worst, more, than); -er/-est suffix morphology deliberately
+    excluded as FP-prone (water, forest) — revisit as an ALGO stemmer feature."""
+
+    ACRONYM = "acronym"
+    """Cased acronym shapes — e.g. NASA, N.Y. Lowercase acronyms (tv, dna)
+    are undetectable by shape; model path requires fine-tuning (SPEC d13)."""
+
+
+class LogicalStructure(StrEnum):
+    """
+    Logical Structures group: query-logic constructs. Method: REGEX now;
+    TEMPORAL is the first layered feature (GLiNER2 backstop pending).
+    """
+
+    OPERATOR_SYNTAX = "operator_syntax"
+    """Explicit boolean operators — e.g. "cats AND dogs", "java NOT javascript".
+    Uppercase-gated: lowercase and/or/not are ordinary function words."""
+
+    TEMPORAL = "temporal"
+    """Relative temporal expressions — e.g. "bitcoin price today", "3 days ago".
+    Absolute forms (ISO dates, Q3 2026) belong to the identifier group
+    (DATETIME / BUSINESS_TEMPORAL); this feature covers what they can't."""
+
+
+class CorruptionKind(StrEnum):
+    """
+    Corruption group: text-damage signals. Method: REGEX for artifacts;
+    typo/noise features are ALGO/MODEL and deferred.
+    """
+
+    ENCODING_ARTIFACT = "encoding_artifact"
+    """Encoding junk — mojibake digraphs (â€™, Ã©), U+FFFD replacement char.
+    Matches mid-word: artifacts ignore word boundaries."""
+
+
+class StatisticalMetric(StrEnum):
+    """
+    Statistical Metrics group: named scalars per query. Method: ALGO
+    (stat banks — no spans, no claim registry).
+    """
+
+    LENGTH = "length"
+    """Query size — length_tokens, length_chars."""
+
+    STOPWORD_RATIO = "stopword_ratio"
+    """Function-word share — stopword_count, stopword_ratio. The REGEX
+    fallback of the POS profile's closed_class_share (SPEC decision 14)."""
+
+    POS_PROFILE = "pos_profile"
+    """UD-17 part-of-speech histogram + derived shares (open/closed class,
+    noun, verb presence, PROPN) via the pinned spaCy tagger (SPEC decision
+    14). Needs the downloaded spaCy model."""
+
+    MORPHOLOGY = "morphology"
+    """Inflection profile via the pinned lemmatizer — inflected_count,
+    inflected_share (tokens whose lemma differs from their surface form).
+    The grammar-caused half of vocabulary mismatch."""
+
+    SYNTACTIC_DEPTH = "syntactic_depth"
+    """Compositional structure via the pinned parser — parse_depth,
+    clause_count. Deep structure = meaning sparse bag-of-words loses."""
+
+
+class SemanticFeature(StrEnum):
+    """
+    Semantical group: features that capture meaning-affecting register and
+    cross-lingual properties. Method: MODEL (lang-id engine, pending library
+    decision — see SPEC decision 18). Output: stat banks (named scalars).
+    """
+
+    LANGUAGE_SET = "language_set"
+    """The set of languages detected in the query — one FeatureStat per BCP-47
+    code present (detected_en, detected_de, ...) plus language_count. A query
+    may carry multiple languages simultaneously (code-switching); this is
+    multi-label, not single-class."""
+
+    CODE_SWITCHING = "code_switching"
+    """Whether the query mixes two or more languages as a natural, culturally
+    embedded whole (e.g. Moldavian Romanian with Russian jargon, Egyptian Arabic
+    with English class-marker terms). Stat: is_code_switched (0.0/1.0),
+    language_count. Not segmentable — the mixing is the register, not a
+    sequence of monolingual spans."""
