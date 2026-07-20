@@ -11,6 +11,7 @@ from edify import RegexBuilder
 
 from query_taxonomy.core import (
     AmbiguityTier,
+    Engine,
     FeatureSpan,
     FeatureStat,
     RegexBank,
@@ -67,6 +68,8 @@ def stat_bank(
     stats_by_text: dict[str, list[FeatureStat]],
 ) -> type[StatBank[FeatureStat]]:
     class _StatBank(StatBank[FeatureStat]):
+        engine = Engine.REGEX
+
         @property
         def name(self) -> FakeType:
             return name

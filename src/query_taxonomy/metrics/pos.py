@@ -133,8 +133,10 @@ class MorphologyBank(SpacyBank):
 
 
 def _depth(token: "Token") -> int:
+    # compare by index: `token.head` builds a FRESH wrapper object on every
+    # access, so an `is` check against the root never terminates
     depth = 0
-    while token.head is not token:
+    while token.head.i != token.i and depth < 20:
         token = token.head
         depth += 1
     return depth

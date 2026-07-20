@@ -1,7 +1,7 @@
-"""Model-engine bank checks — skipped per-class when the optional
-dependency groups (`model` for gliner2/torch, `nlp` for the tagger) are
-missing. importorskip stays inside fixtures: at module level it would skip
-the whole file and hide the other engine's tests."""
+"""Model-engine bank checks — skipped per-class when the heavy artifacts
+(`model` group for gliner2/torch, downloaded spaCy model for the tagger)
+are missing. importorskip stays inside fixtures: at module level it would
+skip the whole file and hide the other engine's tests."""
 
 import pytest
 

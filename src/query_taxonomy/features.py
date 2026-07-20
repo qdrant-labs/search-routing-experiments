@@ -147,15 +147,18 @@ class CorpusFeatures(BaseModel):
                 f"({len(profiles)} types, {tagged(profiles)} tagged)"
             )
             if group is FeatureGroup.STRUCTURED_IDENTIFIERS:
-                by_domain: dict[Domain, list[SpanProfile]] = {}
+                # model entity banks share the group but carry no Domain —
+                # they get their own subsection instead of a KeyError
+                by_domain: dict[Domain | None, list[SpanProfile]] = {}
                 for profile in profiles:
-                    domain = domain_by_type()[profile.type]
+                    domain = domain_by_type().get(profile.type)
                     by_domain.setdefault(domain, []).append(profile)
                 for domain, docs in sorted(
                     by_domain.items(), key=lambda item: -tagged(item[1])
                 ):
+                    label = domain.value if domain else "entities (model)"
                     lines.append(
-                        f"-- {domain.value} ({len(docs)} types, "
+                        f"-- {label} ({len(docs)} types, "
                         f"{tagged(docs)} tagged)"
                     )
                     lines.extend(type_lines(docs))
@@ -191,12 +194,16 @@ class FeatureExtractor:
         self,
         banks: Mapping[FeatureGroup, Iterable[BankTypes]] = FEATURE_BANKS,
         *,
-        engines: Iterable[Engine] | None = (Engine.REGEX,),
+        engines: Engine | Iterable[Engine] | None = (Engine.REGEX,),
     ) -> None:
         """`engines` filters banks BEFORE instantiation, so the default
         (regex-only) never imports torch or spaCy. None = every engine —
         requires the optional `model` dependency group and the downloaded
         spaCy model."""
+        # Engine is a StrEnum, so a bare member would iterate as characters
+        # and silently select zero banks — wrap it first.
+        if isinstance(engines, Engine):
+            engines = (engines,)
         selected = None if engines is None else set(engines)
         self._by_group: dict[FeatureGroup, list[Bank]] = {}
         for group, classes in banks.items():

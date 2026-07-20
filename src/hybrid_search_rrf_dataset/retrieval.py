@@ -23,6 +23,10 @@ class RetrievalDataset(ABC):
     def qrels(self) -> pd.DataFrame:
         """Return relevance judgments with columns: query_id, doc_id, relevance."""
 
+    def materialize(self) -> None:
+        """Pre-filter into a self-consistent snapshot before save();
+        default: nothing to do."""
+
     def save(self, path: Path | str = Path("data")) -> None:
         out = Path(path) / self.name
         out.mkdir(parents=True, exist_ok=True)
@@ -67,7 +71,7 @@ class TrecDL2022(RetrievalDataset):
     def qrels(self) -> pd.DataFrame:
         return self._qrels_df
 
-    def materialize(self):
+    def materialize(self) -> None:
         qrels_df = pd.DataFrame(
             [{"query_id": r.query_id, "doc_id": r.doc_id, "relevance": r.relevance}
              for r in self._test_ds.qrels_iter()]
