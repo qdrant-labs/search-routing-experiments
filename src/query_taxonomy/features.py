@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, computed_field
 
 from query_taxonomy import FEATURE_BANKS, Bank, BankTypes
 from query_taxonomy.banks import domain_by_type
-from query_taxonomy.core import FeatureSpan, FeatureStat
+from query_taxonomy.core import Engine, FeatureSpan, FeatureStat
 from query_taxonomy.taxonomy import Domain, FeatureGroup
 
 
@@ -190,12 +190,24 @@ class FeatureExtractor:
     def __init__(
         self,
         banks: Mapping[FeatureGroup, Iterable[BankTypes]] = FEATURE_BANKS,
+        *,
+        engines: Iterable[Engine] | None = (Engine.REGEX,),
     ) -> None:
+        """`engines` filters banks BEFORE instantiation, so the default
+        (regex-only) never imports torch or spaCy. None = every engine —
+        requires the optional `model` dependency group and the downloaded
+        spaCy model."""
+        selected = None if engines is None else set(engines)
         self._by_group: dict[FeatureGroup, list[Bank]] = {}
         for group, classes in banks.items():
+            picked = [
+                cls
+                for cls in classes
+                if selected is None or cls.engine in selected
+            ]
             # stable sort -> registration order breaks ties within a tier
             instances = sorted(
-                (cls() for cls in classes), key=lambda bank: bank.ambiguity
+                (cls() for cls in picked), key=lambda bank: bank.ambiguity
             )
             for bank in instances:
                 if bank.group is not group:

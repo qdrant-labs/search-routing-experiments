@@ -1,11 +1,22 @@
 import re
 from abc import ABC, abstractmethod
 from enum import IntEnum, StrEnum
-from typing import Generic, NamedTuple, TypeVar
+from typing import ClassVar, Generic, NamedTuple, TypeVar
 
 from edify import RegexBuilder
 
 from query_taxonomy.taxonomy import FeatureGroup
+
+
+class Engine(StrEnum):
+    """Detection machinery a bank is built on. Every bank has one —
+    including stat banks (a tokenizer regex is an engine too). Engine bases
+    fix it as a ClassVar so registries can filter BEFORE instantiation:
+    selecting regex-only must never import torch or spaCy."""
+
+    REGEX = "regex"
+    GLINER = "gliner_model"
+    SPACY = "spacy_model"
 
 
 class FeatureSpan(NamedTuple):
@@ -45,6 +56,8 @@ class GeneralBank(ABC, Generic[OutT, EngineT]):
     compete for the same char ranges.
     """
 
+    engine: ClassVar[Engine]
+
     @property
     @abstractmethod
     def name(self) -> StrEnum:
@@ -78,6 +91,8 @@ class RegexBank(GeneralBank[FeatureSpan, RegexBuilder], ABC):
     Simple, dumb class that just does SRP - gives places where text has a
     certain pattern.
     """
+
+    engine = Engine.REGEX
 
     def __init__(self) -> None:
         super().__init__()
