@@ -214,7 +214,8 @@ is explicitly a later stage.
     `FeatureExtractor` gains `engines: Iterable[Engine] | None` —
     **default `(Engine.REGEX,)`** (deterministic, dependency-light,
     keeps profiling and tests fast), `None` = every engine (requires the
-    `model` + `nlp` groups). Layering composes: dropping GLINER removes
+    `model` group + the downloaded spaCy model). Layering composes:
+    dropping GLINER removes
     the temporal backstop, keeps the regex layer. Stage-1 close-out from
     the CSV gap audit: implement Morphology (lemma≠token inflected share)
     and Syntactic Depth (parse depth + clause count) as spaCy stat banks
@@ -266,6 +267,74 @@ is explicitly a later stage.
     as primary (option b) on accuracy; silent fallback rejected (option c)
     on integrity.
 
+20. **Logical group expansion + coordination metric** (grill-me 2026-07-20).
+    OPERATOR_SYNTAX stays narrow: uppercase word operators (AND/OR/NOT)
+    only. Research grounding: boolean operators appear in ≤10% of web
+    queries (Spink et al. 2002; ~1% for advanced syntax, White & Morris
+    2007) with 50% of AND uses erroneous (Jansen et al. 2000), but usage is
+    markedly higher among specialized/developer audiences (Jones et al.
+    2000 CSTR; DIALOG 36%) — exactly Qdrant's population. Rare-but-real:
+    the recipe quotas it. Symbolic forms (`!=`, `<>`, `!x`) are NOT
+    attested search dialect — in a real query they are evidence of
+    **embedded formal content**, two new LogicalStructure members:
+    CODE_FRAGMENT (programming-language grammar: compound symbolic
+    operators `!=`/`<>`/`=>`/`->`/`::`/`&&`/`||`/`===`, call syntax
+    `identifier(`, keyword-gated bigrams like `SELECT … FROM`) and
+    MATH_EXPRESSION (equation grammar: operand-operator-operand runs,
+    `=` flanked by expressions). "Formula" dissolves: spreadsheet → code,
+    physics → math, chemical ids → ChemicalIdBank, bare chemical formulas
+    (H2SO4) deliberately excluded (letter-digit shapes collide with
+    SKUs/tickers; rationale in the enum docstring). The SMILES precedent
+    ("a grammar, not a token format") now has a home: grammars go to
+    logical, token formats to identifiers. **Cue-claiming doctrine**: the
+    regex banks (both MODERATE) claim high-precision evidence tokens, not
+    fragment boundaries — full-fragment segmentation is out of scope by
+    design; bare single-char `=`/`+`/`-`/`<`/`>` are never claimed.
+    Precision-first is structurally correct here: recipe harvesting is
+    precision-sensitive (FPs poison strata) and recall-tolerant (the order
+    sheet fills deficits via generation); recall arrives later as a model
+    layer (TEMPORAL precedent). Lowercase and/or/comma coordination is NOT
+    a span feature — new `StatisticalMetric.COORDINATION`, a SpacyBank
+    beside SyntacticDepthBank (shared cached pipeline) emitting
+    coordination_count, max_conjunct_width, clausal_coordination_count,
+    nominal_coordination_count (the parser separates the two "and"s:
+    conj arcs between verbs = clausal, between nouns = enumeration;
+    comma-coordination comes free). Not folded into SYNTACTIC_DEPTH: depth
+    = nesting (subordination), coordination = breadth (parataxis) —
+    orthogonal axes, separately quotable strata. Wave scope: 2 enum
+    members + 1 metric member, 2 CSV rows + 1, three banks, registry
+    entries, 2-pos/2-neg cases each (value assertions for the stat bank).
+
+21. **Dataset acquisition catalog + wave-1 implementation** (2026-07-20).
+    The candidate catalog lives in `docs/datasets.md`: card tuples along the
+    six DatasetCard dimensions, verified acquisition pointers, and harvest
+    hypotheses (priors for decision 7's profiling-proposes/human-ratifies
+    loop). Wave 1 = ORCAS, BRIGHT, QUEST, CRUMB, RAR-b math/code pools,
+    LIMIT, DBPedia-entity. Implementation plan:
+    - New `DatasetName` members: `ORCAS`, `BRIGHT_<split>` (the 3
+      taxonomy-relevant splits first: `leetcode`, `aops`,
+      `theoremqa_questions`; the other 9 later), `QUEST`, `CRUMB_<task>` ×8,
+      `RARB_MATH`, `RARB_CODE`, `LIMIT`, `DBPEDIA_ENTITY`. Parameterized
+      classes (MiraclDev pattern) for BRIGHT/CRUMB keep it one class per
+      source.
+    - irds one-liners (ORCAS, DBPedia, ANTIQUE): subclass
+      `IRDatasetsBacked`, set `irds_id`, write the card (~15 lines each).
+    - hf fetchers: `load_dataset(repo, config, split=..., streaming=True)`,
+      yield `Query(str(id), text)`; field names verified at registration
+      (CRUMB and RAR-b schemas unconfirmed).
+    - url fetchers (LIMIT, XOR-TyDi): `load_dataset("json",
+      data_files=<raw url>, streaming=True)` — reuses the HF machinery;
+      cards get `SourceKind.URL`, no new base class.
+    - Sample caps (proposals, ratified with the first profile run):
+      ORCAS 100K, GooAQ 50K, WebFAQ 50K/language.
+    - Every registration ends with `registry.profile()` + harvest-target
+      ratification (decision 7); the catalog's hypotheses are the priors.
+    LIMIT registers but is excluded from harvest targets (its value is the
+    strategy-labeling stage); MEMERAG is not a query source (MIRACL's
+    queries, already registered). Open ratifications: MIRACL
+    `llm_target`/`non_trivial` card vs the candidate-list coding;
+    DBPedia scope G-vs-S.
+
 ## Deferred questions
 
 - Concrete recipe values: total size, per-feature quotas, strata quotas,
@@ -287,3 +356,9 @@ is explicitly a later stage.
 - MCP wrapper around `verify()` for interactive generation.
 - Demo (b) infrastructure: corpus indexing + local Qdrant
   (docker-compose.yml exists) for the disagreement measurement.
+- Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light
+  formal content: "x squared plus y squared", prose pseudo-code) — layered
+  bank; needs a code/math detection model choice (d20).
+- Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
+  minus-exclusion, `site:`) — attested in query logs but precision-dangerous;
+  own decision (d20).

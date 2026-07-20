@@ -32,8 +32,11 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       in src/hybrid_search_rrf_dataset.
 - [ ] ILP escalation path if greedy quota-fill conflicts (solver,
       formulation).
-- [ ] Register next datasets: ORCAS (recommended_sample cap), BRIGHT, CLERC,
-      more BEIR subsets.
+- [ ] Register next datasets — full catalog with card tuples, harvest
+      hypotheses, and backend sketches now in docs/datasets.md (2026-07-20).
+      Wave 1: ORCAS, BRIGHT, QUEST, CRUMB, RAR-b math/code pools, LIMIT,
+      DBPedia-entity. Open ratifications: MIRACL llm_target/non_trivial
+      card vs candidate-list coding; DBPedia scope G-vs-S.
 - [ ] MCP wrapper around verify() for interactive generation.
 - [ ] Demo (b) infra: corpus indexing + local Qdrant for the
       strategy-disagreement measurement.
@@ -82,3 +85,11 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       language before any engine ships in that language.
 - [ ] LLMBank: reserved last-resort engine — deferred by design (d18);
       LLM's active lane is teacher (silver labels) + judgment features.
+
+## From logical-group expansion grill (2026-07-20, SPEC decision 20)
+- [ ] Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light
+      formal content: "x squared plus y squared", prose pseudo-code) —
+      layered bank; needs a code/math detection model choice.
+- [ ] Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
+      minus-exclusion, `site:`) — attested in query logs but
+      precision-dangerous; own decision.

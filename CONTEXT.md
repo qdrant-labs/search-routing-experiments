@@ -90,6 +90,13 @@ feature under SEMANTICAL: its presence carries routing signal and cultural
 information. Detection asks "is mixing present and which languages?" — not
 "where are the boundaries?".
 
+**Coordination**:
+The breadth axis of query structure — conjunct sets formed by lowercase
+and/or or commas ("one, two or three"), measured as parser scalars with a
+clausal (verb-verb) vs nominal (noun-noun, enumeration) split. Orthogonal to
+syntactic depth, which measures nesting.
+_Avoid_: enumeration (say nominal coordination), complexity (overloaded)
+
 **Smoke eval**:
 The hand-audited acceptance gate for a MODEL-tier extractor: a small
 stratified query sample from the cached datasets, measured for precision,
