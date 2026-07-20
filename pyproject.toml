@@ -20,17 +20,18 @@ dependencies = [
     "datasets (>=4.0.0)",
     "mlcroissant (>=1.1.0,<2.0.0)",
     "gitpython (>=3.1.50,<4.0.0)",
-    "edify (>=0.3.0,<0.4.0)",
-    "spacy[apple] (>=3.8.14,<4.0.0)"
+    "query-taxonomy @ file:///Users/andrei/projects/query-taxonomy"
 ]
 
 
 [tool.poetry]
 packages = [
     {include = "hybrid_search_rrf_dataset", from = "src"},
-    {include = "query_taxonomy", from = "src"},
     {include = "dataset_registry", from = "src"},
 ]
+
+[tool.poetry.dependencies]
+query-taxonomy = { develop = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -44,8 +45,4 @@ dev = [
     "ipykernel (>=7.3.0,<8.0.0)",
     "ruff (>=0.15.20,<0.16.0)",
     "pytest (>=9.1.1,<10.0.0)"
-]
-model = [
-    "gliner2[local] (>=1.2.4)",
-    "transformers (>=4.44)"
 ]
