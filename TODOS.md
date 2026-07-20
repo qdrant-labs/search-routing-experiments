@@ -93,3 +93,19 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
 - [ ] Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
       minus-exclusion, `site:`) — attested in query logs but
       precision-dangerous; own decision.
+
+## From first-profile results grill (2026-07-20, SPEC decisions 22-25)
+- [ ] Model performance stress test — throughput / latency / peak memory
+      per engine (regex, spaCy, GLiNER2) across scaling corpus sizes (10K,
+      100K, 500K queries) on realistic query-length distributions. Blocks
+      the two below: knowing which engine bottlenecks at what scale
+      determines what's worth retuning vs replacing.
+- [ ] GLiNER precision retune — hand-audit 50 spans per label from
+      scifact/nfcorpus/trec-dl-2022 profile corpora (post-d23 snapshot-
+      decoupled runs); retune per-label thresholds against those precision
+      numbers; update audited-precision docstrings in
+      `entities/general.py`. Blocked on the stress test above.
+- [ ] Per-snapshot profile artifact — second profile view scoped to the
+      grounded snapshot (for future per-query NDCG correlation, i.e. the
+      "labeling view" that d23 explicitly deferred). Blocked on the stress
+      test above.

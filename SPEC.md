@@ -335,6 +335,66 @@ is explicitly a later stage.
     `llm_target`/`non_trivial` card vs the candidate-list coding;
     DBPedia scope G-vs-S.
 
+22. **`-Like` suffix on non-RIGID span banks** (grill-me 2026-07-20,
+    triggered by first-profile results). Rename every non-RIGID span bank
+    with a `-Like` suffix — 7 regex banks (AMBIGUOUS: `StockTickerBank`,
+    `BookingReferenceBank`; MODERATE: `DerivativesSymbolBank`, `TicketBank`,
+    `GameNotationBank`, `AircraftVesselRegBank`, `ErrorCodeBank`) and 4
+    MODEL banks (`PersonBank`, `LocationBank`, `ProperNounBank`,
+    `Gliner2TemporalBank`). Cascade: class name → enum member in
+    `StructuralIdentifier` / `LogicalStructure` / entity enum → emitted
+    string in `SpanProfile`. RIGID regex banks and the regex `TemporalBank`
+    unchanged. Motivation: profile results on scientific corpora — scifact
+    fires `stock_ticker` on 29% of queries (DNA/TCR/PPAR — 100% gene names);
+    MODERATE banks misfire at the same rate under domain shift; GLiNER
+    audited precisions of 0.84–0.87 don't hold on real corpora (lowercased
+    web queries, short medical titles). Combined with the taxonomy CSV's
+    stated purpose for Structured Identifiers ("Helps to determine
+    sparseness"), the non-RIGID banks are shape-guessers, not class-claimers
+    — the emitted identifier should say so. Behavioral change: none (same
+    regex, same claim range, same tier); test surface survives
+    parametrization. Consumers filter by suffix or by tier to reject
+    shape-guessed evidence when they need certified matches only.
+
+23. **Profiling decouples from grounded snapshots** (grill-me 2026-07-20).
+    `src/profile_datasets.py` reads full source query sets directly —
+    `dataset._test_ds.queries_iter()` for TrecDL2022; existing
+    `dataset.queries()` for NFCorpus/SciFact — no snapshot materialization
+    before profiling. Motivation: the previous coupling cost 424/500 queries
+    on TREC-DL 2022 (materialize streams the 138M-passage MSMARCO v2 corpus,
+    keeps the first 30 000 judged docs by iteration order, drops queries
+    whose qrels lose all supporting docs). Two-mode split: **mining** wants
+    the full source distribution (this decision); **labeling** wants the
+    grounded snapshot for per-query NDCG correlation (deferred). Snapshot
+    machinery is unchanged for retrieval eval. Docstring in
+    `profile_datasets.py` updated: profiles now characterize the SOURCE,
+    not the labeling snapshot.
+
+24. **POS profile schema legibility** (grill-me 2026-07-20). Three
+    mechanical changes: (a) `PosProfileBank.compute` emits a new stat
+    `residual_share` = `(count[PUNCT] + count[SYM] + count[X]) / total`, so
+    `open_class_share + closed_class_share + residual_share ≈ 1` holds as a
+    consumer-checkable invariant; (b) `LengthBank` renames emitted stat
+    `length_tokens` → `length_words` — the count uses regex `\w+`
+    tokenization (not spaCy's; differs by ~7% on nfcorpus), and the name
+    now says so; (c) `PosProfileBank` renames every `pos_<tag>` →
+    `pos_count_<tag>` (17 renames) so raw counts are lexically distinct
+    from `_share` rates and `_presence` binaries in the same section. New
+    CONTEXT.md entry documents the suffix convention (see Stat suffix
+    convention). No new stats, no engine dependency change, regex-only
+    install path unchanged.
+
+25. **Cross-group co-firing is by design** (grill-me 2026-07-20). Same-token
+    spans emitted by banks in *different* FeatureGroups — e.g. `acronym`
+    from sentence_markers and `stock_ticker_like` from structured_identifiers
+    both claiming `DNA` on scifact — are parallel independent layers per
+    d15/d16, not double-counting bugs. Downstream reads them as evidence
+    about the same token from two axes; the d22 `-Like` rename makes
+    interpretation self-honest at the emit boundary (RIGID acronym +
+    assumptive stock-ticker-like ≠ two independent facts). Documentation
+    change only: CONTEXT.md's Layered banks entry updated to note that
+    cross-group co-fires are expected. No code change.
+
 ## Deferred questions
 
 - Concrete recipe values: total size, per-feature quotas, strata quotas,
