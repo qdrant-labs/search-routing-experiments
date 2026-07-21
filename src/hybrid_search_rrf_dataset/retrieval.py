@@ -123,6 +123,88 @@ class TrecDL2022(RetrievalDataset):
         self._qrels_df.to_parquet(out / "qrels.parquet", index=False)
 
 
+class MSMarcoDev(RetrievalDataset):
+    """Judged slice of MS MARCO passage dev (55.5K queries), materialized
+    query-first: sample `n_queries` (seeded), keep exactly their qrels,
+    then fetch just the judged passages through the docs_store — no corpus
+    scan, and every sampled query survives by construction (~1.06 judged
+    passages per query, so the corpus stays proportional).
+
+    First docs_store access downloads and indexes the msmarco-passage
+    collection once; after that, materialization is random-access lookups.
+    """
+
+    name = "msmarco-passage-dev"
+
+    _CORPUS_ID = "msmarco-passage"
+    _TEST_ID = "msmarco-passage/dev/judged"
+
+    def __init__(self, n_queries: int, seed: int = 0) -> None:
+        self.n_queries = n_queries
+        self.seed = seed
+        self._corpus_ds = ir_datasets.load(self._CORPUS_ID)
+        self._test_ds = ir_datasets.load(self._TEST_ID)
+        self._corpus_df: pd.DataFrame = pd.DataFrame(
+            columns=["doc_id", "title", "text"]
+        )
+        self._queries_df: pd.DataFrame = pd.DataFrame(
+            columns=["query_id", "text"]
+        )
+        self._qrels_df: pd.DataFrame = pd.DataFrame(
+            columns=["query_id", "doc_id", "relevance"]
+        )
+
+    def corpus(self) -> pd.DataFrame:
+        return self._corpus_df
+
+    def queries(self) -> pd.DataFrame:
+        return self._queries_df
+
+    def qrels(self) -> pd.DataFrame:
+        return self._qrels_df
+
+    def materialize(self) -> None:
+        queries_df = pd.DataFrame(
+            [{"query_id": q.query_id, "text": q.text}
+             for q in tqdm(
+                 self._test_ds.queries_iter(),
+                 total=self._test_ds.queries_count(),
+                 desc=f"queries:{self.name}",
+                 unit="query",
+             )]
+        )
+        qrels_df = pd.DataFrame(
+            [{"query_id": r.query_id, "doc_id": r.doc_id, "relevance": r.relevance}
+             for r in tqdm(
+                 self._test_ds.qrels_iter(),
+                 desc=f"qrels:{self.name}",
+                 unit="qrel",
+             )]
+        )
+
+        n = min(self.n_queries, len(queries_df))
+        sampled = queries_df.sample(n=n, random_state=self.seed).reset_index(drop=True)
+        qrels_df = qrels_df[
+            qrels_df["query_id"].isin(set(sampled["query_id"]))
+        ].reset_index(drop=True)
+
+        store = self._corpus_ds.docs_store()
+        docs = [
+            store.get(doc_id)
+            for doc_id in tqdm(
+                qrels_df["doc_id"].unique(),
+                desc=f"materialize:{self.name}",
+                unit="doc",
+            )
+        ]
+        # msmarco-passage docs carry no title field
+        self._corpus_df = pd.DataFrame(
+            [{"doc_id": d.doc_id, "title": "", "text": d.text} for d in docs]
+        )
+        self._queries_df = sampled
+        self._qrels_df = qrels_df
+
+
 class NFCorpus(RetrievalDataset):
     name = "nfcorpus"
 
@@ -136,7 +218,12 @@ class NFCorpus(RetrievalDataset):
     def corpus(self) -> pd.DataFrame:
         return pd.DataFrame(
             [{"doc_id": d.doc_id, "title": d.title, "text": d.text}
-             for d in self._corpus_ds.docs_iter()]
+             for d in tqdm(
+                 self._corpus_ds.docs_iter(),
+                 total=self._corpus_ds.docs_count(),
+                 desc=f"corpus:{self.name}",
+                 unit="doc",
+             )]
         )
 
     def queries(self) -> pd.DataFrame:
@@ -165,7 +252,12 @@ class SciFact(RetrievalDataset):
     def corpus(self) -> pd.DataFrame:
         return pd.DataFrame(
             [{"doc_id": d.doc_id, "title": d.title, "text": d.text}
-             for d in self._corpus_ds.docs_iter()]
+             for d in tqdm(
+                 self._corpus_ds.docs_iter(),
+                 total=self._corpus_ds.docs_count(),
+                 desc=f"corpus:{self.name}",
+                 unit="doc",
+             )]
         )
 
     def queries(self) -> pd.DataFrame:
