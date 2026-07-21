@@ -1,5 +1,6 @@
 from collections.abc import Iterable, Iterator
 
+import pandas as pd
 from query_taxonomy.features import FeatureExtractor, CorpusFeatures
 from tqdm.auto import tqdm
 
@@ -9,8 +10,22 @@ from dataset_registry.core import (
     Query,
     RegistryDataset,
 )
-from dataset_registry.hf import MiraclDev
-from dataset_registry.irds import BeirNFCorpus, MSMarcoPassageDev, TrecDL2022
+from dataset_registry.hf import (
+    CRUMB_TASKS,
+    BrightSplit,
+    CrumbTask,
+    MiraclDev,
+    Quest,
+    RarbPool,
+)
+from dataset_registry.irds import (
+    BeirNFCorpus,
+    DBPediaEntity,
+    MSMarcoPassageDev,
+    Orcas,
+    TrecDL2022,
+)
+from dataset_registry.url import Limit
 
 # Configured instances, not classes: parameterized datasets (MiraclDev per
 # language) register several entries from one class.
@@ -19,6 +34,16 @@ DATASETS: tuple[RegistryDataset, ...] = (
     TrecDL2022(),
     BeirNFCorpus(),
     MiraclDev("en"),
+    Orcas(),
+    DBPediaEntity(),
+    BrightSplit("leetcode"),
+    BrightSplit("aops"),
+    BrightSplit("theoremqa_questions"),
+    Quest(),
+    *(CrumbTask(task) for task in sorted(CRUMB_TASKS)),
+    RarbPool("math"),
+    RarbPool("code"),
+    Limit(),
 )
 
 
@@ -52,6 +77,20 @@ class DatasetRegistry:
 
     def cards(self) -> tuple[DatasetCard, ...]:
         return tuple(dataset.card for dataset in self._datasets.values())
+
+    def overview(self) -> pd.DataFrame:
+        """One row per dataset: the card's dimensions plus the live cached
+        query count (empty until that dataset is fetched). Offline — reads
+        cache metadata only."""
+        return pd.DataFrame(
+            [
+                {
+                    **dataset.card.model_dump(),
+                    "queries_cached": dataset.queries_cached,
+                }
+                for dataset in self
+            ]
+        )
 
     def sample(
         self, name: DatasetName, n: int | None = None, *, seed: int = 0

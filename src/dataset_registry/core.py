@@ -28,6 +28,24 @@ class DatasetName(StrEnum):
     TREC_DL_2022 = "trec-dl-2022"
     BEIR_NFCORPUS = "beir-nfcorpus"
     MIRACL_EN_DEV = "miracl-en-dev"
+    # acquisition wave 1 — SPEC decision 21, catalog in docs/datasets.md
+    ORCAS = "orcas"
+    DBPEDIA_ENTITY = "dbpedia-entity"
+    BRIGHT_LEETCODE = "bright-leetcode"
+    BRIGHT_AOPS = "bright-aops"
+    BRIGHT_THEOREMQA_QUESTIONS = "bright-theoremqa-questions"
+    QUEST = "quest"
+    CRUMB_CLINICAL_TRIAL = "crumb-clinical-trial"
+    CRUMB_CODE_RETRIEVAL = "crumb-code-retrieval"
+    CRUMB_LEGAL_QA = "crumb-legal-qa"
+    CRUMB_PAPER_RETRIEVAL = "crumb-paper-retrieval"
+    CRUMB_SET_OPERATION_ENTITY_RETRIEVAL = "crumb-set-operation-entity-retrieval"
+    CRUMB_STACK_EXCHANGE = "crumb-stack-exchange"
+    CRUMB_THEOREM_RETRIEVAL = "crumb-theorem-retrieval"
+    CRUMB_TIP_OF_THE_TONGUE = "crumb-tip-of-the-tongue"
+    RARB_MATH = "rarb-math"
+    RARB_CODE = "rarb-code"
+    LIMIT = "limit"
 
 
 class Grounding(StrEnum):
@@ -220,6 +238,15 @@ class RegistryDataset(ABC):
             )
             self._cache_announced = True
         return parquet
+
+    @property
+    def queries_cached(self) -> int | None:
+        """Query count of the local cache — parquet metadata only, never
+        triggers a fetch. None until a user-initiated fetch fills the cache."""
+        path = self.cache_path
+        if not path.exists():
+            return None
+        return pq.ParquetFile(path).metadata.num_rows
 
     def load_queries(self) -> Iterator[Query]:
         """Stream all queries from the local cache, filling it on first use."""
