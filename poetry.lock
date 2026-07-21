@@ -4716,6 +4716,7 @@ files = []
 develop = true
 
 [package.dependencies]
+click = ">=8.0,<9.0"
 edify = ">=0.3.0,<0.4.0"
 pydantic = ">=2.13.4,<3.0.0"
 spacy = [
