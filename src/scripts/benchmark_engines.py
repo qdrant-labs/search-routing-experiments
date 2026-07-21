@@ -1,5 +1,5 @@
 """Engine performance stress test — throughput / latency / peak RSS per
-extractor engine (REGEX / SPACY / GLINER) at scaling query counts.
+extractor engine (REGEX / SPACY) at scaling query counts.
 
 Public surface: `benchmark()` and `BenchmarkResult`. Everything else is
 implementation.
@@ -13,10 +13,9 @@ Usage — notebook or library:
 
 Usage — CLI (defaults: all engines, 100/1K/10K/100K, writes CSV):
 
-    poetry run python src/benchmark_engines.py
+    poetry run python src/scripts/benchmark_engines.py
 
-Rows append to `src/data/benchmarks/engines.csv` after every (engine, N) so
-an interrupted long GLiNER run still leaves the smaller sizes on disk.
+Rows append to `src/data/benchmarks/engines.csv` after every (engine, N)
 """
 from __future__ import annotations
 
@@ -37,10 +36,12 @@ from tqdm.auto import tqdm
 from query_taxonomy.core import Engine
 from query_taxonomy.features import FeatureExtractor
 
-DEFAULT_CSV_PATH = Path(__file__).resolve().parent / "data" / "benchmarks" / "engines.csv"
+DEFAULT_CSV_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "benchmarks" / "engines.csv"
+)
 DEFAULT_QUERY_SOURCE = "msmarco-passage/train"
 DEFAULT_SIZES: tuple[int, ...] = (100, 1_000, 10_000, 100_000)
-DEFAULT_ENGINES: tuple[Engine, ...] = (Engine.REGEX, Engine.SPACY, Engine.GLINER)
+DEFAULT_ENGINES: tuple[Engine, ...] = (Engine.REGEX, Engine.SPACY)
 DEFAULT_WARMUP = 100
 
 
