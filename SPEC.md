@@ -129,7 +129,8 @@ breadth; strategy labeling is explicitly a later stage.
     unproven-to-poor, and tagging is a solved task (~0.97 newswire) with no
     audit cost via a pinned tagger. Stopword/function-word ratio row demoted
     to REGEX fallback of closed_class_share (non-English, minimal installs);
-    recipe quotas reference closed_class_share only. Domain-shift guardrail
+    recipe quotas reference closed_class_share only (renamed
+    `natural_language_share` by d26). Domain-shift guardrail
     (taggers degrade on keyword telegrams): bank-style fixed cases + one-off
     closed_class_share↔stopword-ratio correlation diagnostic over the cached
     datasets (investigate if r < 0.8) — no hand audit, aggregate shares wash
@@ -341,10 +342,199 @@ breadth; strategy labeling is explicitly a later stage.
     change only: CONTEXT.md's Layered banks entry updated to note that
     cross-group co-fires are expected. No code change.
 
+26. **Metrics prune to the four router signals** (2026-07-21). The
+    statistical-metrics group emits exactly the scalars that answer a
+    question the router cares about — four signals, seven scalars:
+    NL-shape (`natural_language_signal.natural_language_share`; REGEX
+    fallback `stopword_ratio.stopword_ratio`), word variation
+    (`morphology.word_variation_share`), structure
+    (`syntactic_depth.nesting_depth` + `statement_count`), size
+    (`length.length_words` + `length_chars`). Dropped: the 17
+    `pos_count_*` histogram stats, `open_class_share`, `residual_share`,
+    `noun_share`, `verb_presence`, `propn_share`, `inflected_count`,
+    `stopword_count` — none answered a router question (`propn_share`
+    duplicated the proper-noun span axis; counts are share × length).
+    `StatisticalMetric.POS_PROFILE` renamed `NATURAL_LANGUAGE_SIGNAL`
+    (single-stat bank; "profile" over-promised). Amends d14: the histogram
+    and derived views are no longer stored — recompute from the shared
+    spaCy doc if a corpus study ever needs them. Retires d24(a)/(c): the
+    residual invariant and `pos_count_` renames existed to make the
+    histogram legible, moot once it's gone (d24(b) `length_words` stands).
+    Doctrine shipped with the prune: **signals are coordinates and
+    acceptance filters, never label sources** — strata are boxes in signal
+    space, synthetic queries are rejection-sampled against target
+    signatures, and strategy labels always come from retrieval outcomes
+    (labeling by signal would teach the router our heuristic back, and it
+    could then never beat the production hard classifier). Joint-reading
+    caveat: the parser hallucinates structure on non-sentences (the CVE
+    telegram out-depths the cats question), so `nesting_depth` is
+    meaningful only conditional on `natural_language_share` indicating
+    natural language — the signals are one panel, not four independent
+    columns.
+    sanity-check 2026-07-21: stat names de-jargoned to meaning-first
+    (`closed_class_share` → `natural_language_share`, `inflected_share` →
+    `word_variation_share`, `parse_depth` → `nesting_depth`,
+    `clause_count` → `statement_count`); scale-suffix convention kept, the
+    computing mechanism lives in bank docstrings and `metrics/config.py`
+    comments. Revisit if dataset columns must match an external
+    NLP-standard vocabulary.
+    Amendment (2026-07-21, d20 reconciliation): d20's COORDINATION ships
+    as the FIFTH signal, pruned to ONE scalar by this decision's own
+    doctrine — `widest_list_size` (de-jargoned from d20's
+    `max_conjunct_width`): how many equal parts the longest and/or/comma
+    chain strings together, via conj-arc chains. It answers a router
+    question the four signals cannot: wide-but-flat enumerations are
+    structure `nesting_depth` does not see, and enumeration-heavy strata
+    are separately quotable (d20). d20's `coordination_count` (a raw
+    count — share × length) and the clausal/nominal split (a second
+    scalar per question) are not emitted. Five signals, eight scalars;
+    the joint-reading caveat applies (parser output, condition on
+    `natural_language_share`).
+
+27. **Presentation layer: `CorpusReport` + domain rollup** (grill-me
+    2026-07-21). New `reporting.py` in query_taxonomy: `CorpusReport`
+    consumes `CorpusFeatures` and owns `.text()` (human-readable rewrite)
+    plus chart-ready rollup data — stdlib only; matplotlib drawing lives
+    with the consumer (parent repo, which already carries it).
+    `CorpusFeatures.summary()` and its `__str__` are deleted, not wrapped.
+    Headline chart: two-ring donut — inner ring the 8 `Domain`s sized by
+    span mass (disjoint after claim resolution → honest parts-of-whole;
+    `general` exploded into its member banks, a grab-bag slice explains
+    nothing), outer ring each domain split certified vs `-like` so the
+    Assumptive-bank doctrine survives into the viz. Query-share appears as
+    a companion bar where router framing needs it (it does not sum to 100%,
+    so it never gets a circle). Rollup is presentation-only: profiles JSON
+    and audit surfaces stay bank-level (d7 ratification needs per-bank FP
+    checks). — *82 banks as a list is unreadable; 8 domains with honesty
+    stripes is one glance.*
+    arch-validator 2026-07-21: matplotlib KEEP (HIGH) — GitHub's ipynb
+    viewer strips JS, so plotly/altair would render blank in demo.ipynb;
+    spider = ~30 lines of polar-projection DIY, no new dep. Revisit if the
+    demo moves to a hosted page wanting interactivity.
+    arch-validator 2026-07-21 (design): donut KEEP (MEDIUM) with a binding
+    slice budget — total ≤10 slices; `general` explodes into top-3 banks +
+    one `general·other`, never more (perception research holds pies to
+    5–10 slices; part-whole estimation is where pies match bars). Fallback
+    per chart instance: sorted stacked bars (certified/-like segments) if
+    the story hides inside `general·other`.
+
+28. **Dataset fingerprints: heatmap catalog view + spider comparison view**
+    (grill-me 2026-07-21). Both are views over the existing
+    `data/profiles/*.json` (d9 seeded sampling already gives unbiased
+    shape — no new sampling design). Catalog view: one heatmap, rows =
+    datasets, columns = 8 domain query-shares + 7 stat means, color
+    normalized per column, raw value printed in each cell — scales to the
+    full docs/datasets.md catalog. Comparison view: spider overlay for 2–4
+    hand-picked datasets in the demo, the only regime where radar is
+    readable (axis order is arbitrary and enclosed area exaggerates —
+    never overlay the catalog). — *One matrix answers "which dataset is
+    rich in what"; the spider keeps the storytelling moment.*
+    arch-validator 2026-07-21 (design): KEEP (HIGH) — matches published
+    radar guidance (5–8 axes, ≤4 overlays, shape-as-story; heatmap for
+    many×many). Spider axis order must be a fixed global constant —
+    reordering spokes changes the perceived shape.
+
+29. **Composition mechanics: feature table + capped harvest-priority fill**
+    (grill-me 2026-07-21). Confirms d6's greedy quota-fill; the per-dataset
+    "optimization cycle until best subset" idea stays rejected (d6/d7 —
+    ILP remains the escalation path, not the default). Greedy runs on a
+    materialized feature table: one parquet of (dataset, query_id,
+    per-bank span counts, stat scalars) from a single full extraction pass
+    per dataset; selection reads the table, so nothing unneeded is ever
+    taken (no prune phase) and recipe tweaks re-run selection without
+    re-paying extraction (~2h spaCy for ORCAS-scale). The table doubles as
+    the labeling-stage substrate and the audit trail. Fill order: each
+    quota fills from its d7 harvest-target ranking with a per-quota
+    per-dataset cap (default ≤50%, spill to next-ranked; waived when only
+    one source carries the feature) so no quota becomes a single-dataset
+    monoculture the router could learn as a register proxy. Cap value is a
+    recipe value (deferred with the rest). — *Extraction is the expensive
+    leg; selection must stay cheap to re-run.*
+    arch-validator 2026-07-21: pyarrow+pandas KEEP (HIGH) — extraction
+    (spaCy ~2h) dominates; selection at 10M rows is seconds in pandas and
+    parquet keeps an engine swap free. Revisit (duckdb over the same
+    files) if the concatenated catalog passes ~50M rows or fill logic
+    turns relational.
+    arch-validator 2026-07-21 (design): global greedy KEEP (HIGH) — quota
+    coverage Σ min(count, quota) is monotone submodular, so greedy carries
+    the classic Nemhauser (1−1/e) guarantee (caps: since quota sets
+    overlap, per-quota source caps form an *intersection* of partition
+    matroids — greedy's constant relaxes to ~1/(p+1); the monotone +
+    diminishing-returns structure is unaffected); per-dataset
+    optimization cycles score structurally worse (blind
+    subproblems + a reconciliation pass that reinvents global greedy).
+    ILP escalation trigger stays: greedy terminating with unfilled quotas
+    despite available rows.
+
+30. **Composition doctrine: floors, weakest-first fill, checkability,
+    dark matter** (grill-me 2026-07-21). Amends d29's fill mechanics; the
+    feature table, source caps, and harvest priority stand.
+    (a) *Recipe numbers are amounts, not proportions.* Quotas become
+    per-cell floors ("≥ T_c rows"), sized by the precision rule (cell
+    score trustworthy to ~±1/√n: 400 rows ≈ ±5 points; labeling budget ≈
+    cells × floor, so cells stay coarse). Representativeness is an
+    eval-time weighting: score cells separately, weight by a workload's
+    proportions — a real log's cell histogram when available (page-search
+    logs are the acquisition to chase), several hypothesized mixes or the
+    worst cell otherwise. Selection never claims to match real traffic:
+    that claim is untestable in-house (the ORCAS-anchor trap) and stays a
+    swappable input. Per-cell facts ("sparse wins UUID cells") are
+    workload-invariant; only the headline aggregate needs proportions.
+    (b) *Weakest-first (maximin) fill.* Each round feeds the cell with
+    the lowest fill/floor ratio: removes quota-order dependence, balanced
+    coverage at any budget cut, starved cell = exact per-cell conflict
+    signal feeding the order sheet. Feasible case terminates identically
+    to d29 greedy. The plain loop is a heuristic (min of submodular isn't
+    submodular); SATURATE is the named fallback, as ILP is for quotas.
+    Pilot: A/B both fill orders over the same feature table.
+    (c) *Checkable-first.* A row counts toward a floor only if gradeable:
+    ≥1 judged doc, or doc_grounded/synthetic (answerable by construction,
+    d5). Ungradeable rows bounce back for replacement; exhausted cells go
+    to the order sheet. Replacement may filter on "can't check", never on
+    "didn't like the grade": ties and all-fail rows stay, flagged as
+    their own stratum — "no strategy works" is routing information (d26
+    doctrine, feedback-loop edition).
+    (d) *Dark matter (of data).* Checkable-natural rows are visible
+    matter — curated, well-formed, judged-by-pooling. Two blind spots:
+    unjudged queries (the messy tail never enters graded benchmarks) and
+    qrel holes inside judged rows (a strategy retrieving a relevant-but-
+    unjudged doc scores zero, biasing labels toward pool-contributor-era
+    systems). Counterweights: generation doubles as the dark-matter probe
+    (grounded rows carry complete answer sheets and can target exactly
+    the ugly signatures no benchmark judges); the minimum natural share
+    keeps real texture; the two provenances' biases point in opposite
+    directions by design. Cells where strategies retrieve many unjudged
+    docs get a low-trust flag; LLM-as-judge over unjudged retrievals is
+    the deferred mitigation (MEMERAG's lane). — *No source is
+    representative and none can be; every bias gets named and paired
+    against an opposite one.*
+    Register/box definitions (coarse workload cells for eval weighting)
+    deferred until a real log can inform them.
+    arch-validator 2026-07-21 (assumption audit): stack KEEP (MEDIUM until
+    the hole pilot); labeling stage gains three gates before labels are
+    trusted. R1 — qrel-hole asymmetry is documented, not hypothetical
+    (BEIR Hole@10: BM25 ≈6.4% vs dense 14.4–31.8%; post-hoc judging lifts
+    dense nDCG most), so the d30d low-trust flag becomes a quantitative
+    gate: per-strategy Hole@10 per cell, gap over threshold blocks labels
+    until post-hoc judging (LLM-as-judge, MEMERAG-calibrated). R2 —
+    labels are stack-relative: pin the label schema tuple (dense_model,
+    sparse_model, fusion, k, depth) in the artifact; explicit tie margin
+    ε; two-dense-model kappa pilot on ~500 rows. R3 — cell scores are not
+    corpus-invariant: corpus id is a labeling covariate (not leakage —
+    the runtime router knows its corpus); high cross-corpus cell variance
+    un-defers corpus-relative features. R4 — floor sizing gets a design-
+    effect correction from cluster-robust SEs in the pilot. R5 — dark-
+    matter generation imposes mess programmatically (corruption operators
+    post-generation + d26 rejection sampling), never by prompting for
+    messiness.
+
 ## Deferred questions
 
 - Concrete recipe values: total size, per-feature quotas, strata quotas,
-  minimum natural share, harvest-target N.
+  minimum natural share, harvest-target N, per-quota per-dataset source cap
+  (d29 default ≤50%), floor precision target (d30a: ±points per cell → n).
+- Register/box definitions for eval-time weighting + page-search log
+  acquisition (d30; boxes wait for a real log).
 - Judgment-shaped MODEL features (word-order sensitivity, syntactic depth,
   corruption degree...) — GLiNER2 classification head is the default
   candidate, but behavioral/perturbation designs may fit better; own

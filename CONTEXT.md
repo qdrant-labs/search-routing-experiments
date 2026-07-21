@@ -24,12 +24,29 @@ A feature computable only against a corpus (IDF profile, vocabulary mismatch,
 ambiguity, specificity, answerability). Marked `Corpus Relative: Yes` in the
 CSV.
 
-**POS profile**:
-The UD-17 part-of-speech histogram of a query (pinned spaCy tagger, ALGO
-tier) with derived scalar views: open/closed-class share, noun share, verb
-presence, PROPN share. The canonical function-word measure — the
-stopword-ratio feature is its REGEX fallback.
-_Avoid_: POS as GLiNER entity labels
+**Natural-language signal**:
+The canonical "how natural-language-shaped is this query?" measure —
+`natural_language_share`, the fraction of tokens that are function words
+(UD closed-class POS; pinned spaCy tagger, ALGO tier). Keyword telegrams
+sit near 0.0, proper sentences near 0.4–0.5. The stopword-ratio feature is
+its REGEX fallback. Replaced the POS-profile histogram (SPEC d26): only
+this scalar answered a router question.
+_Avoid_: POS profile (dead), closed_class_share (renamed by d26), POS as
+GLiNER entity labels
+
+**The four signals**:
+The statistical-metrics group read as a panel: NL-shape
+(`natural_language_share`), word variation (`word_variation_share`),
+structure (`nesting_depth`, `statement_count`), size (`length_words`,
+`length_chars`). Names say what a scalar means, not how it's computed —
+the mechanism lives in bank docstrings (SPEC d26 sanity-check). Each
+answers one router question; together they are coordinates and acceptance
+filters for dataset work — strata are boxes in signal space, synthesis is
+rejection-sampled against them — and **never label sources**: strategy
+labels come from retrieval outcomes. Read jointly: `nesting_depth` is
+meaningful only where `natural_language_share` indicates natural language
+(the parser hallucinates structure on non-sentences).
+_Avoid_: reading a signal in isolation, labeling by signal
 
 **Operator syntax**:
 Word-form boolean operators in uppercase (AND/OR/NOT) — the user deliberately
@@ -67,13 +84,33 @@ _Avoid_: assumptive claim (say "shape guess"), fuzzy bank
 
 **FeatureStat**:
 A named scalar `(name, value)` emitted by a stat bank — one bank may emit
-many (a histogram is many stats). The stats counterpart of `FeatureSpan`.
+more than one (syntactic depth emits two). The stats counterpart of
+`FeatureSpan`.
 
 **Stat suffix convention**:
-Every FeatureStat name carries its scale in the identifier: `pos_count_<tag>`
-for integer counts, `<name>_share` for ratios in [0,1], `<name>_presence`
-for binaries in {0,1}. Bare `pos_<tag>` is disallowed — a count is always
-`pos_count_<tag>`.
+Every FeatureStat name carries its scale in the identifier: `<name>_share`
+and `<name>_ratio` for ratios in [0,1]; counts name their unit
+(`length_words`, `length_chars`, `statement_count`, `nesting_depth`). A
+bare ambiguous name (`pos_noun`, or a suffix-less `natural_language_signal`
+as a stat) is disallowed.
+
+**Report**:
+`CorpusReport` (query_taxonomy `reporting.py`) — the presentation class
+consuming `CorpusFeatures`: `.text()` human-readable rendering plus
+chart-ready rollup data, stdlib only. Plotting belongs to the consumer
+(parent repo owns matplotlib). Replaces `CorpusFeatures.summary()`.
+_Avoid_: summary() (dead), mixing rendering into the pydantic models
+
+**Domain rollup**:
+The presentation-level view of structured-identifier results at `Domain`
+granularity — 8 field domains, with `general` exploded into its top-3
+member banks + one `general·other` slice (grab-bag slices explain
+nothing; total slice budget ≤10, stacked-bar fallback past it). Charts
+split each
+domain's mass into certified vs `-like` (the Assumptive-bank doctrine
+survives into the viz). Profiles JSON and audit surfaces stay bank-level;
+rollup is a view, never the stored data.
+_Avoid_: rolling up in profiles JSON, domain slices that hide shape guesses
 
 **Engine**:
 The detection machinery a bank is built on — RegEx (edify), spaCy, GLiNER2,
@@ -150,6 +187,15 @@ The end product — a query set composed across datasets to cover the feature
 space, as opposed to any single source dataset's natural (skewed)
 distribution.
 
+**Fingerprint**:
+The per-dataset profile view, two charts over `data/profiles/*.json` (d9
+seeded sampling — never a new sampling pass): the *catalog view*, a heatmap
+of datasets × (8 domain query-shares + 7 stat means), color normalized per
+column with raw values printed in cells; and the *comparison view*, a
+spider overlay for 2–4 hand-picked datasets (the only regime where radar
+is readable).
+_Avoid_: hotmap (say heatmap), spider charts past 4 overlays
+
 **Provenance**:
 Per-row origin of a query in the diversified dataset: `natural` (taken as-is
 from a source dataset), `doc_grounded` (generated/augmented against a real
@@ -165,6 +211,37 @@ retry on FAIL. Guarantees feature fidelity, not answerability.
 Whether a query has a home corpus containing at least one document it is
 about. Guaranteed by construction for `doc_grounded` and `synthetic` rows.
 
+**Representative**:
+A claim about proportions-vs-reality — the dataset's mix matches some real
+workload's mix. Never about amounts: "UUID ≥ 50" is a floor, not
+representativeness. Untestable in-house (nobody holds the true traffic
+distribution), so it lives at eval time as a swappable weighting over
+cells — score cells separately, weight by a workload's proportions — not
+at selection time. Per-cell facts are workload-invariant; only the
+headline aggregate needs proportions (d30).
+_Avoid_: "representative targets" (contradiction), anchoring the recipe
+on ORCAS
+
+**Checkable**:
+A row whose strategy label can actually be computed: it has ≥1 judged
+relevant doc (qrels), or is `doc_grounded`/`synthetic` — answerable by
+construction. Selection counts only checkable rows toward floors.
+Replacement filters on "can't check", never on "didn't like the grade":
+ties and all-fail rows stay, flagged (d30c). Extends [[answerability]] —
+grounded means a home document exists; checkable means the grade is
+computable.
+_Avoid_: conflating with answerability, discarding graded-but-ugly rows
+
+**Dark matter (of data)**:
+What graded data systematically cannot show: unjudged queries (the messy
+tail never enters qrels-bearing benchmarks) and qrel holes (relevant docs
+no pooled system retrieved — our strategy finds one, scores zero, labels
+skew toward pool-contributor-era systems). Cannot be eliminated, only
+mapped and counterbalanced: generation probes it (grounded rows with
+complete answer sheets aimed at ugly signatures); hole-rich cells carry a
+low-trust flag (d30d).
+_Avoid_: treating qrels-bearing rows as unbiased samples of anything
+
 **Strategy label**:
 The ground-truth retrieval strategy for a query — `dense`, `sparse`, or
 `hybrid` — determined empirically (which strategy wins NDCG). The Strategy
@@ -177,6 +254,14 @@ Targets are quantities; measured features are spans + scalars. The
 verification loop checks measured-vs-target.
 
 ### Composition
+
+**Feature table**:
+The materialized composition substrate: one parquet of (dataset, query_id,
+per-bank span counts, stat scalars) produced by a single full extraction
+pass per dataset. Greedy quota-fill selects *from* the table, so no prune
+phase exists; recipe tweaks re-run selection, never re-pay extraction. Also
+the future labeling-stage substrate and the audit trail.
+_Avoid_: 2D table (say feature table), re-extracting per recipe change
 
 **Recipe**:
 The global target distribution of the diversified dataset: quotas over
