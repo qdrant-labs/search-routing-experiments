@@ -2,20 +2,6 @@
 
 Gates / next actions (2026-07-15, GLiNER2 sidestep — SPEC.md decision 13):
 
-- [x] (done 2026-07-16 — gate FAILED on organization; outcome ratified in
-      SPEC d13: adopted label-scoped {person, location, proper noun} +
-      temporal fallback; org/product dropped) GLiNER2 smoke eval: 200 stratified
-      queries (50 each msmarco/trec-dl/nfcorpus/miracl-en), labels
-      person/org/location/product/date, hand-audited; accept at precision
-      ≥ 0.8 on person/org/location, offset round-trip, lowercase parity.
-      Fail → rerun same 200 on GLiNER v1 small before considering fine-tune.
-- [x] (done 2026-07-16) Acronym regex bank (AMBIGUOUS, cased shape + dotted).
-- [x] (done 2026-07-16/17 — regex layer + Gliner2TemporalBank backstop,
-      first layered feature) Temporal-expression regex bank (closed vocabulary:
-      today/yesterday/last week...); GLiNER2 date label only as fallback.
-- [x] (done 2026-07-17 — extractor + live tests; diagnostic still open, see
-      below) POS profile extractor (SPEC decision 14): spaCy UD-17 histogram +
-      derived scalar views.
 - [ ] POS domain-shift diagnostic (d14 guardrail): one-off
       closed_class_share ↔ stopword-ratio correlation over the cached
       datasets — natural to run with the first full profile.
@@ -42,15 +28,6 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       strategy-disagreement measurement.
 
 ## From feature-review of extractor-model generalization, 2026-07-16
-- [x] (done 2026-07-16) Extend bank-case enforcement to all groups: parametrize the
-      test_every_bank_has_cases invariant over BANKS + MARKER_BANKS (and
-      future group tuples) — deferred: tests scoped out of code-implementer.
-- [x] (done 2026-07-16, SPEC decision 15) features.py multi-group generalization encodes within-group claim
-      resolution structurally (group-partitioned registries); today it is
-      type-hint-only on CorpusIdentifierExtractor.
-- [x] (done 2026-07-17) Fan-out: logical/, corruption/, metrics/ directories + remaining marker
-      banks (greetings, politeness, interjections, comparatives) on the
-      markers/ pattern.
 - [ ] Watch: edify ignore_case() flag scope if phrase_alternation is ever
       composed with case-sensitive parts inside one define().
 
@@ -59,8 +36,6 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       which background co-occurrence source? (wordfreq is unigram-only;
       using the query corpus itself makes it corpus-relative)
 - [ ] Char-level typos — blocked on: which dictionary for OOV/edit-distance?
-- [x] (resolved 2026-07-17, SPEC d18: lingua-py, LANGUAGE_SET + CODE_SWITCHING
-      in SEMANTICAL) Mono vs multilingual
 - [ ] Corruption degree (clean/light/heavy) — derived view over corruption
       features once more of them exist (SPEC decision 8)
 - [ ] Gliner2 fine-tune path for lowercase acronyms / org — silver labels
@@ -95,11 +70,10 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       precision-dangerous; own decision.
 
 ## From first-profile results grill (2026-07-20, SPEC decisions 22-25)
-- [ ] Model performance stress test — throughput / latency / peak memory
-      per engine (regex, spaCy, GLiNER2) across scaling corpus sizes (10K,
-      100K, 500K queries) on realistic query-length distributions. Blocks
-      the two below: knowing which engine bottlenecks at what scale
-      determines what's worth retuning vs replacing.
+- [ ] Full-scale run + analysis of `src/benchmark_engines.py` at N=100K on
+      all three engines (regex / spacy / gliner). Tool shipped 2026-07-20;
+      N=100 smoke row in `data/benchmarks/engines.csv`. Blocks the two
+      below.
 - [ ] GLiNER precision retune — hand-audit 50 spans per label from
       scifact/nfcorpus/trec-dl-2022 profile corpora (post-d23 snapshot-
       decoupled runs); retune per-label thresholds against those precision

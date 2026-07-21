@@ -20,7 +20,7 @@ dependencies = [
     "datasets (>=4.0.0)",
     "mlcroissant (>=1.1.0,<2.0.0)",
     "gitpython (>=3.1.50,<4.0.0)",
-    "query-taxonomy @ file:///Users/andrei/projects/query-taxonomy"
+    "query-taxonomy @ file:///Users/andrei/projects/hybrid-search-rrf-dataset/src/query-taxonomy"
 ]
 
 

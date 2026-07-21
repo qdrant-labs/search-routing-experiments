@@ -4718,11 +4718,14 @@ develop = true
 [package.dependencies]
 edify = ">=0.3.0,<0.4.0"
 pydantic = ">=2.13.4,<3.0.0"
-spacy = {version = ">=3.8.14,<4.0.0", extras = ["apple"]}
+spacy = [
+    {version = ">=3.8.14,<4.0.0"},
+    {version = ">=3.8.14,<4.0.0", extras = ["apple"], markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\""},
+]
 
 [package.source]
 type = "directory"
-url = "../query-taxonomy"
+url = "src/query-taxonomy"
 
 [[package]]
 name = "ranx"
@@ -5405,6 +5408,7 @@ description = "Improve Thinc's performance on Apple devices with native librarie
 optional = false
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\""
 files = [
     {file = "thinc_apple_ops-1.0.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:cef314b216ace57dddf403caabd12b8af9d5519b7c679b8a24871c28c7588845"},
     {file = "thinc_apple_ops-1.0.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:2f641448bfcefc5c5204484a62baac7c040741fa8d8ecb86574a0357f390e373"},
@@ -5607,9 +5611,6 @@ files = [
     {file = "wasabi-1.1.3-py3-none-any.whl", hash = "sha256:f76e16e8f7e79f8c4c8be49b4024ac725713ab10cd7f19350ad18a8e3f71728c"},
     {file = "wasabi-1.1.3.tar.gz", hash = "sha256:4bb3008f003809db0c3e28b4daf20906ea871a2bb43f9914197d540f4f2e0878"},
 ]
-
-[package.dependencies]
-colorama = {version = ">=0.4.6", markers = "sys_platform == \"win32\" and python_version >= \"3.7\""}
 
 [[package]]
 name = "wcwidth"
@@ -6104,4 +6105,4 @@ type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15"
-content-hash = "2e92b4839254215cea05d0c9ec3af0e1079ee3565f338fd84201e863bc26971c"
+content-hash = "730f01de0b92b1629e6c40fa5530759dd1ab1c092fd6c82fbe2c5a2c8b9f7b3d"

@@ -1,16 +1,17 @@
 # SPEC: Diversified Query Dataset Pipeline
 
-Vocabulary: see CONTEXT.md. Session date: 2026-07-15.
+Vocabulary: see CONTEXT.md. Session dates: 2026-07-15 → 2026-07-20 (each
+decision carries its own date).
 
 ## Problem
 
 Build a diversified query dataset for the Strategy Router (dense/sparse/hybrid)
 by composing natural queries harvested from registered IR datasets with
 generated/augmented ones — such that the full feature taxonomy
-(`src/query_taxonomy/query-taxonomy.csv`) is well represented, every row stays
-answerable against some corpus, and the dataset can later be labeled
-empirically. Current focus is extractor quality and breadth; strategy labeling
-is explicitly a later stage.
+(`query_taxonomy/query-taxonomy.csv` in the sibling package) is well
+represented, every row stays answerable against some corpus, and the dataset
+can later be labeled empirically. Current focus is extractor quality and
+breadth; strategy labeling is explicitly a later stage.
 
 ## Decisions
 
@@ -96,24 +97,9 @@ is explicitly a later stage.
     (arch-validator verdict + andrey-review amendment, 2026-07-15; user
     ratified). GLiNER2 (`fastino/gliner2-base-v1`, Apache 2.0) beat spaCy
     (closed 18-type vocabulary fails the evolving-taxonomy requirement) and
-    tied GLiNER v1, tiebreakers favoring GLiNER2: classification head
-    covers the deferred judgment-shaped features, built-in RegexValidator,
-    family shared with the auto-fusion router. Review verdict:
-    **measure-then-ship** — commitment is gated on a 200-query smoke eval
-    (50 each msmarco / trec-dl / nfcorpus / miracl-en from the cached
-    parquets; labels person/org/location/product/date; hand-audited).
-    Acceptance: precision ≥ 0.8 on person/org/location at tuned thresholds;
-    `text[start:end] == span.text` on every hit; lowercase variants within
-    a few points of cased. Below the bar → same 200 through GLiNER v1
-    before conceding to fine-tuning. Scope trim from review: **acronyms →
-    regex bank** (shape-defined, AMBIGUOUS tier); **temporal → banks-first**
-    (patterns + small closed vocabulary), model fallback only if the smoke
-    eval's date label earns it. Guardrails: pin `gliner2>=1.2.4`
-    (char-offset bug below); pinned weights + batch size (near-threshold
-    float determinism); per-type confidence thresholds; MODEL spans never
-    claim ranges from the banks' tier-priority registry; MODEL features
-    nullable per-row (English-only); torch deps (~2–3 GB) in a dedicated
-    Poetry group, never in the default install.
+    tied GLiNER v1; measure-then-ship gated on a hand-audited 200-query
+    smoke eval (50 each msmarco/trec-dl/nfcorpus/miracl-en). See outcome
+    below for what shipped.
 
     **Outcome (2026-07-16, hand-audited smoke eval, user ratified): ADOPTED,
     label-scoped.** v0 label set `{person, location, proper noun}` at tuned
@@ -151,82 +137,42 @@ is explicitly a later stage.
     the `model` group; POS fields nullable per-row (English-only).
 
 15. **Unified bank family + FeatureExtractor** (grill-me 2026-07-16). One
-    family: `GeneralBank[EngineT, OutT]` where `OutT` is a *constrained*
-    TypeVar over exactly `FeatureSpan | FeatureStat` — `matches()` and
-    `compute()` unify as `compute(text) -> list[OutT]`; `ScalarExtractor`
-    deleted; `FeatureStat = (name, value)` is the stats counterpart of
-    `FeatureSpan`; `StatBank(GeneralBank[EngineT, FeatureStat])` keeps the
-    engine generic (tokenizer pattern, spaCy Language). `ambiguity` gets a
-    concrete RIGID default on `GeneralBank` ("stats are solid numbers");
-    span-group bases (IdentifierBank, MarkerBank) re-abstract it so span
-    banks still declare tiers explicitly. Registry:
-    `FEATURE_BANKS: dict[FeatureGroup, tuple[type[GeneralBank], ...]]` in
-    `query_taxonomy/__init__.py` (defined before any features re-export —
-    import-order rule), group↔key consistency validated at
-    `FeatureExtractor.__init__` (structural within-group claim resolution).
-    `FeatureExtractor` replaces `CorpusIdentifierExtractor`:
-    `resolve(text, *, groups: Iterable[FeatureGroup] | None = None)` and
-    `extract(queries, *, groups=...)` — the class owns iteration, one text
-    pass covers all requested groups. Output model: `QueryFeatures`
-    (spans + stats sections, each nested by group), `SpanProfile` (was
-    DocumentIdentifier; diversity/dfs unchanged), `StatProfile` (doc-keyed
-    per-query stat values kept — recipe strata need them — with computed
-    corpus aggregates), `CorpusFeatures` with per-group `summary()` (Domain
-    sub-grouping only inside structured_identifiers). Old names die without
-    aliases; `dataset_registry.profile()` updates in the same change.
+    generic family `GeneralBank[EngineT, OutT]` with `OutT` constrained to
+    exactly `FeatureSpan | FeatureStat` (`RegexBank`/`StatBank`/`Gliner2Bank`
+    as engine bases). Registry `FEATURE_BANKS: dict[FeatureGroup,
+    tuple[type[GeneralBank], ...]]` is group-partitioned; `FeatureExtractor`
+    runs one pass per text with within-group claim resolution, exposing
+    `resolve(text, *, groups=...)` and `extract(queries, *, groups=...)`.
+    Output: `QueryFeatures` (spans + stats sections nested by group),
+    aggregated into `CorpusFeatures` with per-group `summary()`.
 
 16. **Extractor fan-out wave + engine doctrine** (grill-me 2026-07-16).
     Three engines: RegexBank (edify — closed shapes/lists, precision-first),
-    SpacyBank (`StatBank[Language]` — grammatical signal, lands with
-    decision 14's POS wave), Gliner2Bank (context entities, audited labels
-    only, pinned schema per decision 13). **A Query Feature may need more
+    SpacyBank (grammatical signal), Gliner2Bank (context entities, audited
+    labels only, pinned schema per d13). **A Query Feature may need more
     than one signal**: multiple banks may share one feature name — the
     within-group claim registry plus AmbiguityTier ordering arbitrate
-    (deterministic engine claims first, model engine backstops at
-    AMBIGUOUS). First layered feature: `LogicalStructure.TEMPORAL` —
-    relative-vocab regex bank now; GLiNER2 date backstop (threshold 0.58)
-    lands with the Gliner2Bank wrapper. Language policy: English-v0
-    everywhere; word lists are versioned code; coverage gaps are handled by
-    process (ratification audits, model-vs-bank disagreement mining), not
-    speculative engines; multilingual is one phase-2 sweep across all
-    tiers. This wave (all regex/stat, 2-pos/2-neg cases each): markers
-    GREETING/POLITENESS/INTERJECTION/COMPARATIVE (closed lists; comparative
-    = markers + irregulars only, no -er/-est suffix matching) and ACRONYM
-    (cased shape + dotted); logical/ OPERATOR_SYNTAX (case-sensitive
-    uppercase AND/OR/NOT) and TEMPORAL (relative vocabulary only — absolute
-    forms stay with identifier DATETIME/BUSINESS_TEMPORAL); corruption/
-    ENCODING_ARTIFACT (mojibake digraphs, U+FFFD; no word boundaries);
-    metrics/ LENGTH and STOPWORD_RATIO as the first StatBanks (token-regex
-    engines; stat banks are exempt from span-case enforcement and get value
-    assertions instead). Test keying stays name-based until the first
-    layered bank ships, then re-keys per class. Deferred from the wave: POS
-    profile (spaCy dependency wave, decision 14), corrupted-identifiers
-    (needs design against banks' claim data), Gliner2Bank wrapper (offset
-    clamping + schema pin).
+    (deterministic engine claims first, model engine backstops at AMBIGUOUS).
+    First layered feature: `LogicalStructure.TEMPORAL` — relative-vocab
+    regex bank + GLiNER2 date backstop (threshold 0.58). Language policy:
+    English-v0 everywhere; word lists are versioned code; coverage gaps are
+    handled by process (ratification audits, model-vs-bank disagreement
+    mining), not speculative engines; multilingual is one phase-2 sweep.
 
 17. **Engine as a first-class bank attribute; one unified registry**
     (grill-me 2026-07-17). `Engine` StrEnum (`regex | gliner_model |
-    spacy_model`) as a `ClassVar` on every bank — including stat banks
-    (LengthBank's engine is its tokenizer regex; PosProfileBank's is
-    spaCy). Engine bases fix it; filtering happens **before
-    instantiation**, so selecting regex-only never imports torch/spaCy.
-    `full_feature_banks()` dies: FEATURE_BANKS holds ALL banks, and
-    `FeatureExtractor` gains `engines: Iterable[Engine] | None` —
-    **default `(Engine.REGEX,)`** (deterministic, dependency-light,
-    keeps profiling and tests fast), `None` = every engine (requires the
-    `model` group + the downloaded spaCy model). Layering composes:
-    dropping GLINER removes
-    the temporal backstop, keeps the regex layer. Stage-1 close-out from
-    the CSV gap audit: implement Morphology (lemma≠token inflected share)
-    and Syntactic Depth (parse depth + clause count) as spaCy stat banks
-    over ONE shared cached pipeline (tagger+parser+lemmatizer, ner
-    disabled); defer PMI (blocking question: background co-occurrence
-    source), char-typos (blocking: dictionary source), mono/multilingual
-    (blocking: lang-id dependency + phase-2 multilingual), corruption
-    degree (derived view per d8); corpus-relative five stay blocked on
-    the queries-only registry decision. Case enforcement scopes to
-    engine == REGEX span banks; model banks get live tests in
-    model_banks_test.py.
+    spacy_model`) as a `ClassVar` on every bank — engine bases fix it, so
+    `FeatureExtractor(engines=[Engine.REGEX])` filters **before
+    instantiation** and never imports torch/spaCy. Default is
+    `(Engine.REGEX,)` (deterministic, dependency-light); `None` selects
+    every engine (requires the `model` group + downloaded spaCy model).
+    Layering composes: dropping GLINER removes the temporal backstop, keeps
+    the regex layer. Case-enforcement invariant scopes to engine == REGEX
+    span banks; model banks get live tests. Stage-1 CSV gap close-out
+    shipped Morphology + Syntactic Depth as spaCy stat banks over ONE
+    shared cached pipeline; PMI, char-typos, multilingual,
+    corruption-degree, and the five corpus-relative features tracked in
+    TODOS.
 
 18. **Multilingual strategy + language engine** (grill-me 2026-07-17).
     Three-axis design: (a) **invariant banks** — 79 identifier banks are

@@ -8,9 +8,10 @@ query-feature taxonomy, then building a diversified query dataset from them.
 ### Taxonomy
 
 **Feature**:
-One row of `src/query_taxonomy/query-taxonomy.csv` — a measurable query
-property (e.g. Structured Identifiers, stopword ratio, length). Each feature
-has a Method (REGEX, ALGO, MODEL) and is either query-only or corpus-relative.
+One row of `query_taxonomy/query-taxonomy.csv` (in the sibling package) — a
+measurable query property (e.g. Structured Identifiers, stopword ratio,
+length). Each feature has a Method (REGEX, ALGO, MODEL) and is either
+query-only or corpus-relative.
 _Avoid_: quantifier, signal, dimension
 
 **Structured Identifiers**:
