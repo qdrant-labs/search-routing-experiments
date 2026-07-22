@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.figure import Figure
 
-from catalog_axes import DEFAULT_AXES, CoverageAxis
+from composition.catalog_axes import DEFAULT_AXES, CoverageAxis
 
 from ._base import blank
 from .coverage_map import CoverageMap

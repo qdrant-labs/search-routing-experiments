@@ -8,7 +8,7 @@ that prefer one-shot invocation.
 """
 
 from ._base import DOMAIN_PALETTE, ROUTER_SIGNAL_AXES
-from catalog_axes import (
+from composition.catalog_axes import (
     DEFAULT_AXES,
     CoverageAxis,
     SpanCountAxis,

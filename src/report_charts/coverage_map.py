@@ -19,7 +19,7 @@ import pandas as pd
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-from catalog_axes import LENGTH_AXIS, CoverageAxis
+from composition.catalog_axes import LENGTH_AXIS, CoverageAxis
 from query_taxonomy.taxonomy import FeatureGroup
 
 from ._base import blank, make_axis

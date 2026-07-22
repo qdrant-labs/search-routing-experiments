@@ -28,6 +28,8 @@ dependencies = [
 packages = [
     {include = "hybrid_search_rrf_dataset", from = "src"},
     {include = "dataset_registry", from = "src"},
+    {include = "report_charts", from = "src"},
+    {include = "composition", from = "src"},
 ]
 
 [tool.poetry.dependencies]

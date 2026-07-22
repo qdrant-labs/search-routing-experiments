@@ -13,7 +13,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from catalog_axes import stat_column
+from composition.catalog_axes import stat_column
 
 
 class EqualWeightScale:
