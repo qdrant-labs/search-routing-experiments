@@ -22,13 +22,16 @@ def build_matrix(
 
 
 def per_column_normalize(matrix: np.ndarray) -> np.ndarray:
-    """Min-max per column. Flat columns (min==max) map to 0.5 so they
-    render as mid-tone rather than confusingly saturated."""
+    """Min-max per column. Flat nonzero columns (min==max) map to 0.5 so
+    they render as mid-tone rather than confusingly saturated; flat ZERO
+    columns map to 0.0 — the zero is a finding (SPEC d31: no legal bank
+    fired anywhere), and a mid-tone stripe would hide it."""
     lo = matrix.min(axis=0)
     hi = matrix.max(axis=0)
     span = np.where(hi > lo, hi - lo, 1.0)
     normalized = (matrix - lo) / span
     normalized[:, hi == lo] = 0.5
+    normalized[:, (hi == lo) & (hi == 0.0)] = 0.0
     return normalized
 
 
