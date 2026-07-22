@@ -8,14 +8,14 @@ that prefer one-shot invocation.
 """
 
 from ._base import DOMAIN_PALETTE, ROUTER_SIGNAL_AXES
-from .coverage_map import (
+from catalog_axes import (
     DEFAULT_AXES,
     CoverageAxis,
-    CoverageMap,
     SpanCountAxis,
     StatAxis,
-    coverage_map,
 )
+
+from .coverage_map import CoverageMap, coverage_map
 from .coverage_map_grid import CoverageMapGrid, coverage_map_grid
 from .domain_donut import feature_donut
 from .equal_weight import EqualWeightScale

@@ -13,6 +13,8 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from catalog_axes import stat_column
+
 
 class EqualWeightScale:
     """Fitted once on the catalog for a fixed axis tuple; fingerprint
@@ -69,16 +71,6 @@ class EqualWeightScale:
                 last_leq >= 0, cdf[np.clip(last_leq, 0, None)], 0.0
             )
         return out
-
-
-def stat_column(catalog: pd.DataFrame, stat: str) -> str:
-    """Map a bare stat name to its `<bank>.<stat>` catalog column."""
-    matches = [c for c in catalog.columns if c.endswith(f".{stat}")]
-    if len(matches) != 1:
-        raise ValueError(
-            f"stat {stat!r} maps to {matches or 'no catalog column'}"
-        )
-    return matches[0]
 
 
 def _dataset_key(label: str) -> str:
