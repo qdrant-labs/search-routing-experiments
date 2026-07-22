@@ -1,5 +1,5 @@
 """Canonical axes over the d29 feature-table catalog — shared knowledge,
-owned by no consumer. The coverage charts (SPEC d31) and the composition
+housed with the composition floors that select against it. The coverage charts (SPEC d31) and the composition
 floors (SPEC d33b) both read their band definitions from here, so the
 coordinate system a human sees in a chart and the one the fill selects
 against can never drift apart. Bands are RAW scalar units by decision
