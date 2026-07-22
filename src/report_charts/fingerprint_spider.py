@@ -1,5 +1,4 @@
-"""SPEC d28 spider comparison — 2-4 datasets, fixed axis order,
-per-axis min-max normalization across the compared set."""
+"""SPEC d28 spider comparison — 2-4 datasets overlaid, fixed axis order."""
 
 from __future__ import annotations
 
@@ -14,13 +13,12 @@ from query_taxonomy.reporting import CorpusReport
 
 from ._base import DOMAIN_PALETTE, ROUTER_SIGNAL_AXES, blank, make_axis
 from ._matrix import build_matrix, per_column_normalize, stat_value
+from .fingerprint_spider_grid import FingerprintSpiderGrid
 
 
 class FingerprintSpider:
-    """Polar-projection overlay. The shape reads as relative position on
-    each axis (fullest reach = highest in the comparison). Raw ranges
-    are surfaced on axis tick labels so absolute magnitudes stay
-    visible."""
+    """Polar overlay. Shape reads as relative position on each axis;
+    raw ranges surface on tick labels so magnitudes stay visible."""
 
     def __init__(
         self,
@@ -89,9 +87,13 @@ def fingerprint_spider(
     axes: Sequence[str] = ROUTER_SIGNAL_AXES,
     ax: plt.Axes | None = None,
 ) -> Figure:
-    """Functional shim — falls back to a blank chart on <2 datasets so
-    scripts don't need to guard the call; >4 still raises (design
-    invariant, not a soft case)."""
+    """Dispatches by set size: 2-4 → overlay (single chart, storytelling
+    view); 5+ → small-multiples grid (one mini per dataset, shared
+    per-axis normalization). Under 2 → blank."""
     if len(reports) < 2:
         return blank(ax, "spider needs ≥2 datasets to compare")[0]
-    return FingerprintSpider(reports, axes).render(ax)
+    if len(reports) <= 4:
+        return FingerprintSpider(reports, axes).render(ax)
+    if ax is not None:
+        raise ValueError("spider grid renders its own figure; drop `ax`")
+    return FingerprintSpiderGrid(reports, axes).render()

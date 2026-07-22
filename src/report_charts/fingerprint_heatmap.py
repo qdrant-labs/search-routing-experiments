@@ -13,6 +13,7 @@ from query_taxonomy.taxonomy import Domain
 
 from ._base import blank, make_axis
 from ._matrix import build_matrix, domain_value, per_column_normalize, stat_value
+from .equal_weight import EqualWeightScale
 
 _DOMAIN_AXES: tuple[str, ...] = tuple(d.value for d in Domain)
 _STAT_AXES: tuple[str, ...] = (
@@ -32,6 +33,7 @@ class FingerprintHeatmap:
         reports: dict[str, CorpusReport],
         domain_axes: Sequence[str] = _DOMAIN_AXES,
         stat_axes: Sequence[str] = _STAT_AXES,
+        scale: EqualWeightScale | None = None,
     ) -> None:
         if not reports:
             raise ValueError("FingerprintHeatmap needs at least one dataset")
@@ -39,11 +41,29 @@ class FingerprintHeatmap:
         self.domain_axes, self.stat_axes = tuple(domain_axes), tuple(stat_axes)
         self.cols = [*self.domain_axes, *self.stat_axes]
         self.n_domain_cols = len(self.domain_axes)
-        self.raw = np.concatenate([
-            build_matrix(reports, self.domain_axes, domain_value),
-            build_matrix(reports, self.stat_axes, stat_value),
-        ], axis=1)
-        self.normalized = per_column_normalize(self.raw)
+        domain_block = build_matrix(reports, self.domain_axes, domain_value)
+        if scale is None:
+            stat_block = build_matrix(reports, self.stat_axes, stat_value)
+            self.raw = np.concatenate([domain_block, stat_block], axis=1)
+            self.normalized = per_column_normalize(self.raw)
+            self.scale_note = "color per column, raw value in cell"
+        else:
+            if scale.axes != self.stat_axes:
+                raise ValueError(
+                    f"scale fitted for {scale.axes}, chart wants {self.stat_axes}"
+                )
+            # domain shares are already comparable [0,1] rates — only the
+            # stat block moves to the equal-weight percentile scale (d31)
+            stat_block = scale.dataset_medians(self.rows)
+            self.raw = np.concatenate([domain_block, stat_block], axis=1)
+            self.normalized = np.concatenate([
+                per_column_normalize(domain_block),
+                scale.percentile_matrix(self.rows),
+            ], axis=1)
+            self.scale_note = (
+                "domains min-max; stats equal-weight percentile, "
+                "median in cell (d31)"
+            )
 
     def render(self, ax: plt.Axes | None = None) -> Figure:
         height = max(2.2, 0.55 * len(self.rows) + 1.2)
@@ -52,7 +72,7 @@ class FingerprintHeatmap:
         axis.imshow(self.normalized, aspect="auto", cmap="Blues", vmin=0, vmax=1)
         self._annotate(axis)
         self._configure_axes(axis)
-        axis.set_title("Dataset fingerprints — color per column, raw value in cell")
+        axis.set_title(f"Dataset fingerprints — {self.scale_note}")
         return fig
 
     def _annotate(self, axis: plt.Axes) -> None:
@@ -72,8 +92,7 @@ class FingerprintHeatmap:
         return f"{raw:.1f}" if raw >= 10 else f"{raw:.2f}"
 
     def _light_text(self, i: int, j: int) -> bool:
-        lo, hi = self.raw[:, j].min(), self.raw[:, j].max()
-        return hi > lo and (self.raw[i, j] - lo) / (hi - lo) > 0.6
+        return self.normalized[i, j] > 0.6
 
     def _configure_axes(self, axis: plt.Axes) -> None:
         axis.set_xticks(range(len(self.cols)))
