@@ -193,8 +193,37 @@ seeded sampling — never a new sampling pass): the *catalog view*, a heatmap
 of datasets × (8 domain query-shares + 7 stat means), color normalized per
 column with raw values printed in cells; and the *comparison view*, a
 spider overlay for 2–4 hand-picked datasets (the only regime where radar
-is readable).
+is readable). Cross-dataset axes use the equal-weight percentile scale.
 _Avoid_: hotmap (say heatmap), spider charts past 4 overlays
+
+**Equal-weight percentile scale**:
+The canonical scale for comparing datasets on a scalar: build the reference
+distribution from all queries with each dataset given equal total weight
+(one crumb-theorem query ≈ 1450 msmarco queries), then report a dataset as
+its queries' median percentile in that reference. Size-independent (the
+100K msmarco/orcas samples are ~90% of raw catalog rows and would dominate
+any raw pool) and outlier-proof (one 252-word dataset can't flatten the
+length axis for everyone else). Applies to fingerprints and pooled charts;
+presentation-only — composition cell boundaries live on raw scalar bands
+(d33), which stay stable and generation-targetable as the catalog grows.
+_Avoid_: raw min-max across dataset means, unweighted pooled percentiles
+
+**Order sheet**:
+Per-floor shortfall amounts (with reason: exhausted vs capped) emitted by a
+fill run — the generation lane's purchase order. After d33 a shortfall
+always means supply ran out, never that the accounting was infeasible.
+_Avoid_: gap report, error log
+
+**Label lane**:
+Per-row labeling route recorded at selection time: `qrels` (gradeable
+today) vs `deferred` (QC rows awaiting clicks or LLM-as-judge).
+_Avoid_: checkable (that is the input proxy, not the route), tier
+
+**Dark forest**:
+The feature-blind 20% of the target dataset: uniform draws from ≥3
+generalist champions, deliberately unconditioned on any extractor output —
+insurance against the taxonomy's own blind spots.
+_Avoid_: unknown universe, random slice
 
 **Provenance**:
 Per-row origin of a query in the diversified dataset: `natural` (taken as-is

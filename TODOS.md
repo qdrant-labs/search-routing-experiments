@@ -8,9 +8,9 @@ Gates / next actions (2026-07-15, GLiNER2 sidestep — SPEC.md decision 13):
 
 Deferred by grill-me session 2026-07-15 (see SPEC.md):
 
-- [ ] Recipe values: total size, per-feature quotas, within-feature strata
-      quotas, minimum natural share, harvest-target N, per-quota
-      per-dataset source cap (d29 default ≤50%).
+- [x] (mostly resolved 2026-07-22 by d32/d33: 50K total, 60/20/20 split,
+      19 × 1,000-weight floors, 14 stat-band floors, cap ≤50%) Remaining
+      recipe values tracked in the d33 section below.
 - [ ] MODEL-tier features: pick the model + testing story for
       non-deterministic extractors (arch-validator session).
 - [ ] Corpus-relative features: explicitly decide whether to lift the
@@ -69,12 +69,11 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       precision-dangerous; own decision.
 
 ## From presentation & composition grill (2026-07-21, SPEC decisions 27-29)
-- [ ] `CorpusReport` in query_taxonomy `reporting.py` (.text() human
-      rewrite + chart-ready rollup data, stdlib only); delete
-      `CorpusFeatures.summary()`/`__str__`; point profile_datasets.py's
-      `.summary.txt` at the new text.
-- [ ] Parent-repo chart helpers (matplotlib): two-ring domain donut (d27),
-      fingerprint heatmap + spider comparison (d28); wire into demo.ipynb.
+- [x] (done 2026-07-22) `CorpusReport` in query_taxonomy `reporting.py`;
+      `CorpusFeatures.summary()`/`__str__` deleted.
+- [x] (done 2026-07-22) Parent-repo chart helpers: `src/report_charts/`
+      package (donut, heatmap, spider, spider grid, share bars) wired
+      into demo.ipynb.
 - [x] (done 2026-07-21) Feature-table extraction pass → parquet (d29):
       `src/feature_table.py` — per-dataset parquet + concatenated catalog
       in src/data/feature_table/, columns `<group>.<type>` span counts +
@@ -82,6 +81,32 @@ Deferred by grill-me session 2026-07-15 (see SPEC.md):
       until the qrels/queries-only decision lands, then goes per-query.
       Greedy quota-fill with capped harvest-priority reads it — fill
       itself stays blocked on recipe values.
+
+## From profile-at-scale grill (2026-07-22, SPEC decision 31)
+- [x] (done 2026-07-22) Coverage view — shipped bigger than spec'd:
+      pluggable x-axis (`CoverageAxis`) + 4-panel grid
+      (report_charts/coverage_map.py, coverage_map_grid.py); length ×
+      spans, identifier count, nesting depth, NL-share.
+- [x] (done 2026-07-22) Equal-weight percentile scale wired into
+      fingerprint heatmap + spider grid (equal_weight.py).
+- [x] (done 2026-07-22) Honest zeros: all-zero columns map to 0.0 in
+      per-column normalization (_matrix.py).
+- [ ] ORCAS-tail harvest: named top source for short × feature-rich cells
+      (~500K natural feature-bearing rows) — the d33 order sheet is the
+      demand signal; wire harvest as the fill's supply escalation.
+- [x] (resolved 2026-07-22, d33b) Cell boundaries: raw scalar bands;
+      percentile scale is presentation-only.
+
+## From composition-fill grill (2026-07-22, SPEC decision 33)
+- [ ] Implement `src/composition/` package (recipe / floors / fill /
+      slices / compose) + `src/scripts/compose_target.py` +
+      `tests/test_composition.py` per the ratified plan — code-implementer
+      picks this up.
+- [ ] Provisional recipe values to revisit after the first fill's order
+      sheet + lane split: ambiguity discounts (MODERATE 0.75,
+      AMBIGUOUS 0.5), 1,000-weight floor size / slack margin.
+- [ ] Minimum natural share — becomes binding when the generation lane
+      starts filling order-sheet items.
 
 ## From composition doctrine grill (2026-07-21, SPEC decision 30)
 - [ ] Pilot A/B: quota-sequential vs weakest-first fill over the same

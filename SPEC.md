@@ -528,11 +528,129 @@ breadth; strategy labeling is explicitly a later stage.
     post-generation + d26 rejection sampling), never by prompting for
     messiness.
 
+31. **First profile-at-scale readout: bimodal sources, equal-weight
+    percentile scale, harvest priorities** (grill-me 2026-07-22, over the
+    21-dataset catalog, 225K rows). The fingerprint run shows bimodal
+    sources: register-realistic but feature-poor (msmarco/orcas/trec-dl/
+    dbpedia/limit: 3–7 words, near-zero identifier rates) vs feature-rich
+    but register-alien (BRIGHT/CRUMB/RAR-b: 26–253-word problem
+    statements, entirely outside the production router's 0–9-token rule
+    band). Read as CONFIRMATION of d30d ("no source is representative"),
+    NOT as a source ranking — dropping either cluster re-creates the
+    ORCAS-anchor trap from one side or the other. Rates are not counts:
+    orcas at 0.05 identifier share × 10.4M ≈ 500K natural feature-bearing
+    rows, more than all specialized sources combined (~15K queries) —
+    ORCAS-tail harvest is the named top source for short × feature-rich
+    cells. That region is EMPTY in every public source; the coverage
+    chart's empty cells are the generation lane's first concrete order
+    sheet. Cluster-B strategy labels lean on R3's corpus covariate
+    (register far outside production traffic) — recorded, no new
+    machinery. Presentation scale: cross-dataset comparisons use the
+    **equal-weight percentile scale** (see CONTEXT.md): reference
+    distribution weights every dataset equally (raw catalog pools are
+    ~90% msmarco+orcas), dataset value = median percentile — fixes both
+    outlier squash (one 252-word source flattening the length axis) and
+    pool dominance. New *coverage view* (third fingerprint chart):
+    per-query cell counts over the d29 catalog (length × NL-share bins,
+    equal-weight), dominant dataset annotated per cell. Legal-domain
+    finding: zero legal-bank fires across all 225K rows — legal REGISTER
+    (crumb-legal-qa, NL-share 0.48) carries no citation-shaped
+    identifiers; all-zero domain columns must render as honest zeros, not
+    NaN stripes (chart guard, not data fix). Whether composition cell
+    boundaries live on the percentile scale or raw scalars is deferred
+    with the recipe values.
+
+32. **Target composition: 50K, macro-split 60/20/20, audit lenses**
+    (dataset-audit session 2026-07-22, ratified over
+    `src/dataset_audit.ipynb`). Sets the deferred macro recipe values;
+    per-cell floor sizes stay deferred (d30a precision rule).
+    (a) *The split.* 50K total. 60% (30K) span-evidence rows — queries
+    carrying ≥1 span of ANY group (identifiers, markers, logical).
+    Inside that slice, 80/20: 80% (24K) allocated against span-type
+    targets (per certified identifier domain, per marker type, per
+    logical type — the audit's floor-supply columns); 20% (6K)
+    entity-carrying rows drawn with NO preference (no mass bias, no type
+    targeting) so natural single-span queries keep their share against
+    archetypes. 20% (10K) statistical strata: zero-span rows spread over
+    the scalar-signal bands (length, NL-share, nesting depth — the
+    coverage-grid x-axes), extremes included. 20% (10K) dark forest:
+    feature-BLIND uniform draws from ≥3 generalist champions, no
+    champion >50% of the slice (candidates: orcas, msmarco, one long-NL
+    source) — insurance against the taxonomy's own blind spots,
+    deliberately not conditioned on any extractor output.
+    (b) *Feasibility facts (audit 2026-07-22).* The catalog holds ~32K
+    span-carrying rows against the 30K entity slice — no selection
+    slack: the slice REQUIRES the ORCAS full-cache regex harvest
+    (~16 min at regex rates; observed supply scales ×104, d31) plus the
+    generation order sheet for thin cells. The statistical slice is thin
+    at the extremes (60+ words × 0 spans = 288 rows catalog-wide).
+    (c) *Certified-only domain floors; shape-guesses pool.* Span-type
+    targets count certified banks only. `*_like` spans are wrong about
+    the domain, right about identifier-ness (the SciFact gene-symbol
+    audit) → they pool into one domain-agnostic shape_guess target that
+    supplies sparse-affinity needs but never domain floors. Weighting
+    them down was rejected: the error is in the label, not the
+    magnitude.
+    (d) *Mass ≠ supply.* Floors count queries (≥1 qualifying span),
+    never span mass — 115 of crumb-stack-exchange's 117 datetime spans
+    sit in ONE query. Mass preference inside the entity slice is
+    explicitly rejected: span-dense rows are the easy, low-information
+    case for the router (obvious BM25).
+    (e) *Dataset value is target-relative; three lenses.* Winner-take-all
+    equal-weight dominance (d31 coverage cells) structurally zeroes
+    generalists — msmarco dominates 0 cells yet is runner-up supply
+    nearly everywhere and the conversational-marker champion (politeness
+    933). Keep/leave verdicts (recorded in the audit notebook,
+    notebook-only for now) read three lenses: contribution to the 50K
+    fill, sole-supplier criticality, span-type supply. Narrow ≠ leave;
+    redundant across all three lenses = leave.
+    — *Size against the target, not the catalog: debias by dataset size
+    when characterizing, allocate by the 50K when selecting.*
+
+33. **Fill recipe: evidence floors, raw bands, B-first order** (grill-me
+    2026-07-22, over the d32 fill plan; d29/d30 greedy mechanics and their
+    arch-validator verdicts stand unchanged).
+    (a) *Floors are evidence amounts in weight currency.* A selected row
+    credits a span-type floor at the ambiguity discount of its most-rigid
+    qualifying bank (RIGID 1.0, MODERATE 0.75, AMBIGUOUS/shape-guess 0.5 —
+    provisional recipe values) while still costing 1 row of budget.
+    Floors are sized BELOW budget (19 floors × 1,000 weight under the
+    24K-row slice) so discount inflation is absorbed by slack — an
+    order-sheet shortfall therefore always means supply ran out (reason:
+    exhausted vs capped), never that the arithmetic was infeasible.
+    Effective-sample-size logic: guesses are worth less evidence per row.
+    (b) *Composition cells live on raw scalar bands.* Resolves d31's
+    deferred question: floor boundaries are raw units (3-6 words,
+    NL-share 0.4+, nesting 2-3 — the coverage-grid bands) because
+    composition needs stable, generation-targetable coordinates that do
+    not move when the catalog grows. The equal-weight percentile scale
+    stays presentation-only.
+    (c) *Fill order B → A → C → D.* The no-preference sub-slice draws
+    FIRST (one seeded uniform sample over the whole span pool): drawn
+    after A it degenerates into orcas leftovers (A's qrels lane consumes
+    all ~19.3K checkable span rows), defeating d32(a)'s "natural queries
+    keep their share" rationale. A fills its floors from the remainder;
+    C (zero-span pool at 6× its budget) and D (feature-blind) are
+    order-insensitive and run last with global dedup.
+    (d) *Two-tier label lanes.* Every slice fills checkable rows first;
+    QC rows top up flagged `label_lane="deferred"` (clicks / LLM-as-judge
+    later) vs `"qrels"`. Dark-forest champions: orcas/msmarco/
+    crumb-legal-qa ≈ 50/30/20 within the ≤50% cap. `checkable` stays the
+    card-level proxy until d30's per-row column lands.
+    Artifact: `src/composition/` package (recipe / floors / fill /
+    slices / compose) + `src/data/composition/{selection,order_sheet}`
+    parquets + summary; selection schema (dataset, query_id, query,
+    slice, floors, checkable, label_lane) feeds the labeling stage's
+    FusionRow builders. — *The order sheet is a purchase order, not an
+    error log.*
+
 ## Deferred questions
 
-- Concrete recipe values: total size, per-feature quotas, strata quotas,
-  minimum natural share, harvest-target N, per-quota per-dataset source cap
-  (d29 default ≤50%), floor precision target (d30a: ±points per cell → n).
+- Recipe values remaining after d32's macro-split (50K; 60/20/20; entity
+  slice 80/20; dark forest ≥3 champions, ≤50% each): per-cell floor sizes
+  (d30a precision rule), per-span-type target amounts, minimum natural
+  share, harvest-target N, per-quota per-dataset source cap (d29 default
+  ≤50%).
 - Register/box definitions for eval-time weighting + page-search log
   acquisition (d30; boxes wait for a real log).
 - Judgment-shaped MODEL features (word-order sensitivity, syntactic depth,
