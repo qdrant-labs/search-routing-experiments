@@ -164,6 +164,13 @@ class RegistryDataset(ABC):
     def card(self) -> DatasetCard:
         """Selection dimensions and acquisition facts for this dataset."""
 
+    @property
+    def name(self) -> str:
+        """The card's name as a plain string — the shared identity surface
+        with RetrievalDataset, so name-keyed consumers (ProfileStore) can
+        address both worlds uniformly."""
+        return self.card.name.value
+
     @abstractmethod
     def _fetch_queries(self) -> Iterator[Query]:
         """Stream queries from the raw source; runs once per cache fill and
