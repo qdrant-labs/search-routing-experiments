@@ -20,7 +20,12 @@ dependencies = [
     "datasets (>=4.0.0)",
     "mlcroissant (>=1.1.0,<2.0.0)",
     "gitpython (>=3.1.50,<4.0.0)",
-    "query-taxonomy @ file:///Users/andrei/projects/hybrid-search-rrf-dataset/src/query-taxonomy"
+    "query-taxonomy @ file:///Users/andrei/projects/hybrid-search-rrf-dataset/src/query-taxonomy",
+    "rstr (>=3.2.2)",
+    "mcp (>=1.28.1,<2.0.0)",
+    "litellm (>=1.93.0,<2.0.0)",
+    "instructor (>=1.15.4,<2.0.0)",
+    "umap-learn (>=0.5.12,<0.6.0)"
 ]
 
 
@@ -30,6 +35,7 @@ packages = [
     {include = "dataset_registry", from = "src"},
     {include = "report_charts", from = "src"},
     {include = "composition", from = "src"},
+    {include = "taxonomy_generators", from = "src"},
 ]
 
 [tool.poetry.dependencies]

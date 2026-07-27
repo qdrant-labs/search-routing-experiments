@@ -119,6 +119,13 @@ breadth; strategy labeling is explicitly a later stage.
     failing the round-trip (trailing-period hallucination on
     state-abbreviation-shaped tails).
 
+    **Dropped 2026-07-21** (same-day simplification push as the d26 prune):
+    `entities/` deleted, `Engine` = regex | spacy only — GLiNER ran ~600×
+    slower than regex and its entity spans answered no router question.
+    Profiles, demo, and benchmarks were regenerated without it. The
+    smoke-eval method above remains the gate for any future MODEL-tier
+    engine.
+
 14. **POS profile = ALGO feature via pinned spaCy tagger; GLiNER schema
     unchanged** (grill-me 2026-07-16). New taxonomy row "POS profile (UD-17
     tagset)": full 17-tag histogram stored per query; recipe-facing scalars
@@ -317,19 +324,13 @@ breadth; strategy labeling is explicitly a later stage.
     `profile_datasets.py` updated: profiles now characterize the SOURCE,
     not the labeling snapshot.
 
-24. **POS profile schema legibility** (grill-me 2026-07-20). Three
-    mechanical changes: (a) `PosProfileBank.compute` emits a new stat
-    `residual_share` = `(count[PUNCT] + count[SYM] + count[X]) / total`, so
-    `open_class_share + closed_class_share + residual_share ≈ 1` holds as a
-    consumer-checkable invariant; (b) `LengthBank` renames emitted stat
-    `length_tokens` → `length_words` — the count uses regex `\w+`
-    tokenization (not spaCy's; differs by ~7% on nfcorpus), and the name
-    now says so; (c) `PosProfileBank` renames every `pos_<tag>` →
-    `pos_count_<tag>` (17 renames) so raw counts are lexically distinct
-    from `_share` rates and `_presence` binaries in the same section. New
-    CONTEXT.md entry documents the suffix convention (see Stat suffix
-    convention). No new stats, no engine dependency change, regex-only
-    install path unchanged.
+24. **POS profile schema legibility** (grill-me 2026-07-20). Surviving
+    piece: (b) `LengthBank` renames emitted stat `length_tokens` →
+    `length_words` — the count uses regex `\w+` tokenization (not spaCy's;
+    differs by ~7% on nfcorpus), and the name now says so. Parts (a)
+    (`residual_share` invariant) and (c) (`pos_count_<tag>` renames) were
+    retired with the POS histogram by d26. The Stat suffix convention
+    (CONTEXT.md) stands.
 
 25. **Cross-group co-firing is by design** (grill-me 2026-07-20). Same-token
     spans emitted by banks in *different* FeatureGroups — e.g. `acronym`
@@ -644,6 +645,63 @@ breadth; strategy labeling is explicitly a later stage.
     FusionRow builders. — *The order sheet is a purchase order, not an
     error log.*
 
+34. **taxonomy-generators: the generation twin package** (grill-me
+    2026-07-23). New package `taxonomy-generators` (module
+    `taxonomy_generators`, starts as `src/taxonomy_generators/`, extracted
+    to a sibling repo when stable — the query-taxonomy precedent). Both
+    packages implement the same taxonomy: query-taxonomy detects,
+    taxonomy-generators produces.
+    (a) *Boundary: dumb surfaces + verify + tool layer; no orchestrator.*
+    The package emits grounding-blind feature surfaces (a valid UUID, a
+    politeness phrase), wraps the extractor as `verify(text, targets)`
+    (d10's library-first verb), and exposes both to LLMs; the calling
+    LLM's own agentic loop does the enrichment (weaving surfaces into
+    queries). d5's free-floating ban is enforced upstream in the parent
+    repo's generation lane, never in this API; doc consistency for
+    augmented rows is a separate deferred layer.
+    (b) *Mechanism: auto-sample bank patterns; overrides for realism.*
+    Default generator per regex span bank = reverse-regex sampling over
+    the bank's guard-stripped compiled pattern, so ~90 features get
+    generators for free and a bank pattern change flows into its
+    generator automatically. Hand-written override classes shadow the
+    default under the same feature name where gibberish hurts (ticket
+    prefixes, plausible years). Lock-step is enforced by the round-trip
+    test: every registered generator, sampled seeded N times, must have
+    each surface claimed by its twin bank under the same emitted name.
+    (c) *Dependency direction.* taxonomy-generators depends on
+    query-taxonomy (versioned dependency); detection stays unaware
+    generation exists; no taxonomy-core third package — one taxonomy.py.
+    (d) *Coverage.* All regex span banks: certified identifiers, -Like
+    banks (shape-guess surfaces supply d32c's shape_guess pool), markers
+    (closed phrase lists), logical cue tokens. The five signals are
+    verify-only acceptance filters (d26 doctrine) — never generated.
+    Corruption operators deferred.
+    (e) *Tool surface: parameterized trio.* `list_features()` /
+    `generate_surface(feature, n)` / `verify(text, targets)` as a
+    framework-agnostic registry (name + description + JSON schema +
+    callable) plus an MCP server entry point behind an optional
+    dependency group — closes d10's deferred MCP wrapper. One tool per
+    feature (~90) rejected: blows agent tool budgets; the catalog lives
+    in `list_features()`.
+    (f) *Shape.* `SurfaceGenerator` ABC mirroring the bank family
+    (feature name, group, `sample(rng, n)`); `PatternGenerator` defaults
+    auto-built by iterating FEATURE_BANKS at import; group-keyed registry
+    like FEATURE_BANKS; seeded `random.Random` injection end-to-end.
+    — *Same taxonomy, two directions: detection certifies what text is;
+    generation supplies text that detection will certify.*
+    arch-validator 2026-07-23: rstr KEEP (HIGH) — BSD, stdlib-only,
+    injectable seeded Random, walks the same `re._parser` tree the banks
+    compile to; exrex disqualified outright (AGPL); hypothesis is a test
+    framework misused at runtime; DIY re-implements rstr. Revisit if
+    bank patterns outgrow rstr's construct support (its crude
+    \b/lookaround handling is absorbed by guard-stripping + the
+    round-trip test).
+    sanity-check 2026-07-23: KEEP — the only custom machinery
+    (auto-registry + round-trip test) is exactly what the lock-step and
+    tool-surface requirements demand; sampling is delegated to rstr,
+    verification to query-taxonomy. Flips if interactive LLM enrichment
+    is abandoned for a one-off batch script.
+
 ## Deferred questions
 
 - Recipe values remaining after d32's macro-split (50K; 60/20/20; entity
@@ -665,9 +723,19 @@ breadth; strategy labeling is explicitly a later stage.
 - Strategy labeling stage: empirical dense/sparse/hybrid labels via NDCG in
   `src/hybrid_search_rrf_dataset`.
 - ILP escalation for quota conflicts (solver choice, formulation).
-- Next acquisitions: ORCAS (needs `recommended_sample`), BRIGHT, CLERC,
-  further BEIR subsets.
-- MCP wrapper around `verify()` for interactive generation.
+- Next acquisitions: CLERC, the 9 unregistered BRIGHT splits, further BEIR
+  subsets (ORCAS with `recommended_sample=100K` + 3 BRIGHT splits
+  registered 2026-07-20, d21/d31).
+- Enrichment grounding layer: how augmented rows keep answerability (doc
+  consistency; provenance of natural-query + injected-surface rows) — own
+  session (d34a).
+- Corruption operators' home (R5 programmatic damage):
+  taxonomy-generators later wave vs parent-repo lane (d34d).
+- Orchestrator-LLM batch lane (d10's scripted loop) as a consumer of the
+  d34e tool registry — build when the order sheet demands volume.
+- Realism overrides over the d34b defaults: which features need them is
+  discovered empirically from seeded round-trip samples, not decided up
+  front.
 - Demo (b) infrastructure: corpus indexing + local Qdrant
   (docker-compose.yml exists) for the disagreement measurement.
 - Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light

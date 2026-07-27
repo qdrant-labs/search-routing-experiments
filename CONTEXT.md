@@ -34,11 +34,12 @@ this scalar answered a router question.
 _Avoid_: POS profile (dead), closed_class_share (renamed by d26), POS as
 GLiNER entity labels
 
-**The four signals**:
+**The five signals**:
 The statistical-metrics group read as a panel: NL-shape
 (`natural_language_share`), word variation (`word_variation_share`),
 structure (`nesting_depth`, `statement_count`), size (`length_words`,
-`length_chars`). Names say what a scalar means, not how it's computed —
+`length_chars`), coordination breadth (`widest_list_size`, d26
+amendment). Names say what a scalar means, not how it's computed —
 the mechanism lives in bank docstrings (SPEC d26 sanity-check). Each
 answers one router question; together they are coordinates and acceptance
 filters for dataset work — strata are boxes in signal space, synthesis is
@@ -46,7 +47,8 @@ rejection-sampled against them — and **never label sources**: strategy
 labels come from retrieval outcomes. Read jointly: `nesting_depth` is
 meaningful only where `natural_language_share` indicates natural language
 (the parser hallucinates structure on non-sentences).
-_Avoid_: reading a signal in isolation, labeling by signal
+_Avoid_: reading a signal in isolation, labeling by signal, "the four
+signals" (superseded count)
 
 **Operator syntax**:
 Word-form boolean operators in uppercase (AND/OR/NOT) — the user deliberately
@@ -113,15 +115,18 @@ rollup is a view, never the stored data.
 _Avoid_: rolling up in profiles JSON, domain slices that hide shape guesses
 
 **Engine**:
-The detection machinery a bank is built on — RegEx (edify), spaCy, GLiNER2,
-or lang-id model. A feature's engine assignment follows the doctrine: closed
-surface form → regex; grammatical → spaCy; contextual-semantic and audited →
-GLiNER2; language identity → lang-id model (pending library decision).
+The detection machinery a bank is built on — RegEx (edify) or spaCy since
+the 2026-07-21 GLiNER drop (SPEC d13 amendment). Doctrine: closed surface
+form → regex; grammatical → spaCy; contextual-semantic → future MODEL
+tier (deferred); language identity → lang-id model (pending library
+decision).
 
 **Layered banks**:
 Two or more banks serving one feature name with different engines; the
 within-group claim registry plus tier ordering arbitrate — deterministic
-engine claims first, model engine backstops what it missed. Same-token
+engine claims first, model engine backstops what it missed (no model
+layer currently ships — the GLiNER temporal backstop left with the
+2026-07-21 drop; the mechanism stands, d16). Same-token
 spans emitted by banks in *different* FeatureGroups (e.g. `acronym` from
 sentence_markers and `stock_ticker_like` from structured_identifiers
 claiming `DNA`) are parallel independent layers by design — not double
@@ -150,9 +155,10 @@ information. Detection asks "is mixing present and which languages?" — not
 
 **Coordination**:
 The breadth axis of query structure — conjunct sets formed by lowercase
-and/or or commas ("one, two or three"), measured as parser scalars with a
-clausal (verb-verb) vs nominal (noun-noun, enumeration) split. Orthogonal to
-syntactic depth, which measures nesting.
+and/or or commas ("one, two or three"), measured as ONE parser scalar,
+`widest_list_size` (the clausal/nominal split was pruned by the d26
+amendment: one scalar per router question). Orthogonal to syntactic
+depth, which measures nesting.
 _Avoid_: enumeration (say nominal coordination), complexity (overloaded)
 
 **Smoke eval**:
@@ -174,7 +180,27 @@ _Avoid_: labeling (labels = dense/sparse/hybrid ground truth, a later stage)
 
 **Augmentation**:
 Deriving new queries from existing ones by injecting or altering feature
-values (e.g. inserting identifiers to strengthen sparse signal).
+values (e.g. inserting identifiers to strengthen sparse signal). The
+LLM-with-tools edition weaves surfaces into an existing query, iterating
+against verify().
+_Avoid_: enrichment (same act — say augmentation)
+
+**Surface**:
+A generated text snippet exhibiting exactly one taxonomy feature — a valid
+UUID, a politeness phrase, a `!=` cue token. The unit taxonomy-generators
+emits; grounding-blind by design (whether the surface exists in any corpus
+is the upstream lane's concern, d34a). LLMs weave surfaces into queries;
+the package never touches surrounding text.
+_Avoid_: sample (overloaded with dataset sampling), mint (implies placing
+into text)
+
+**Round-trip test**:
+The lock-step invariant between the twin packages: every registered
+generator, sampled seeded N times, must have each surface claimed by its
+twin detection bank under the same emitted feature name. A bank pattern
+change that breaks generation fails this test at CI time, never a profile
+run.
+_Avoid_: drift test, mirror test
 
 ### Datasets
 
@@ -188,12 +214,14 @@ space, as opposed to any single source dataset's natural (skewed)
 distribution.
 
 **Fingerprint**:
-The per-dataset profile view, two charts over `data/profiles/*.json` (d9
+The per-dataset profile view, three charts over `data/profiles/*.json` (d9
 seeded sampling — never a new sampling pass): the *catalog view*, a heatmap
 of datasets × (8 domain query-shares + 7 stat means), color normalized per
-column with raw values printed in cells; and the *comparison view*, a
+column with raw values printed in cells; the *comparison view*, a
 spider overlay for 2–4 hand-picked datasets (the only regime where radar
-is readable). Cross-dataset axes use the equal-weight percentile scale.
+is readable); and the *coverage view* (d31), per-query cell counts over
+the catalog, dominant dataset annotated per cell. Cross-dataset axes use
+the equal-weight percentile scale.
 _Avoid_: hotmap (say heatmap), spider charts past 4 overlays
 
 **Equal-weight percentile scale**:
@@ -210,8 +238,10 @@ _Avoid_: raw min-max across dataset means, unweighted pooled percentiles
 
 **Order sheet**:
 Per-floor shortfall amounts (with reason: exhausted vs capped) emitted by a
-fill run — the generation lane's purchase order. After d33 a shortfall
-always means supply ran out, never that the accounting was infeasible.
+fill run — the deficit Generation must produce (doc_grounded/synthetic,
+under the provenance mix); the generation lane's purchase order. After d33
+a shortfall always means supply ran out, never that the accounting was
+infeasible.
 _Avoid_: gap report, error log
 
 **Label lane**:
@@ -309,10 +339,6 @@ recipe needs too.
 **Natural core**:
 Step A of composition — the dataset assembled from natural rows only, driven
 by harvest targets, before any generation.
-
-**Order sheet**:
-Step B input — the deficit between natural core and recipe; exactly what
-Generation must produce (doc_grounded/synthetic), under the provenance mix.
 
 **Within-feature strata**:
 Sub-quotas inside one feature: density (feature mass vs query length),
