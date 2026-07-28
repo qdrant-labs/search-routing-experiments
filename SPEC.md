@@ -94,55 +94,29 @@ breadth; strategy labeling is explicitly a later stage.
     — *Scopes the 2026-07-13 "not router features" rule.*
 
 13. **MODEL-tier v0 = GLiNER2, named entities only, gated on a smoke eval**
-    (arch-validator verdict + andrey-review amendment, 2026-07-15; user
-    ratified). GLiNER2 (`fastino/gliner2-base-v1`, Apache 2.0) beat spaCy
-    (closed 18-type vocabulary fails the evolving-taxonomy requirement) and
-    tied GLiNER v1; measure-then-ship gated on a hand-audited 200-query
-    smoke eval (50 each msmarco/trec-dl/nfcorpus/miracl-en). See outcome
-    below for what shipped.
+    (2026-07-15; adopted label-scoped 2026-07-16 after a hand-audited
+    200-query smoke eval; **dropped 2026-07-21**, same push as the d26
+    prune: `entities/` deleted, `Engine` = regex | spacy only — GLiNER ran
+    ~600× slower than regex and its entity spans answered no router
+    question; profiles, demo, and benchmarks regenerated without it).
+    What survives: the smoke-eval method (stratified sample, hand-audited
+    precision, lowercase parity, offset integrity) remains the gate for
+    any future MODEL-tier engine; closed-list markers scored 0 zero-shot —
+    banks own them, now with data. Eval details (per-label thresholds,
+    acronym rejection, the schema-composition determinism pin) live in
+    this entry's git history.
 
-    **Outcome (2026-07-16, hand-audited smoke eval, user ratified): ADOPTED,
-    label-scoped.** v0 label set `{person, location, proper noun}` at tuned
-    thresholds `{0.32, 0.34, 0.31}` (audited precision 0.87 / 0.84 / 0.84 —
-    proper noun holds 0.77 on the all-lowercase slice); `temporal` allowed
-    as banks-first fallback (0.83 tuned @0.58). Dropped as ambiguous
-    classes: `product` (0.49) and `organization` (0.30; threshold rescue
-    keeps 7/33) — proper noun covers org/product mentions coarsely. GLiNER
-    v1 cross-check waived. Acronym zero-shot rejected (lowercase slice
-    0.43, high-confidence FPs → thresholds can't rescue; fine-tune with
-    bank silver labels is the only model path). Closed-list markers all
-    scored 0 — banks own them, now with data. Extra guardrail from the
-    eval: GLiNER2 outputs are **schema-composition-dependent** (adding a
-    label shifts other labels' scores), so the exact schema is part of the
-    determinism pin alongside weights, library version, and batch size; the
-    extractor wrapper must clamp span `end` to `len(text)` and drop spans
-    failing the round-trip (trailing-period hallucination on
-    state-abbreviation-shaped tails).
-
-    **Dropped 2026-07-21** (same-day simplification push as the d26 prune):
-    `entities/` deleted, `Engine` = regex | spacy only — GLiNER ran ~600×
-    slower than regex and its entity spans answered no router question.
-    Profiles, demo, and benchmarks were regenerated without it. The
-    smoke-eval method above remains the gate for any future MODEL-tier
-    engine.
-
-14. **POS profile = ALGO feature via pinned spaCy tagger; GLiNER schema
-    unchanged** (grill-me 2026-07-16). New taxonomy row "POS profile (UD-17
-    tagset)": full 17-tag histogram stored per query; recipe-facing scalars
-    derived as computed views (open_class_share, closed_class_share,
-    noun_share, verb_presence, propn_share) per decision 8. POS labels
-    rejected as GLiNER entity prompts — violates decision 13's
-    named-entities-only scope, zero-shot NER recall on function words is
-    unproven-to-poor, and tagging is a solved task (~0.97 newswire) with no
-    audit cost via a pinned tagger. Stopword/function-word ratio row demoted
-    to REGEX fallback of closed_class_share (non-English, minimal installs);
-    recipe quotas reference closed_class_share only (renamed
-    `natural_language_share` by d26). Domain-shift guardrail
-    (taggers degrade on keyword telegrams): bank-style fixed cases + one-off
-    closed_class_share↔stopword-ratio correlation diagnostic over the cached
-    datasets (investigate if r < 0.8) — no hand audit, aggregate shares wash
-    out single-token errors. Deps: spacy + exact-pinned en_core_web_sm in
-    the `model` group; POS fields nullable per-row (English-only).
+14. **POS profile = ALGO feature via pinned spaCy tagger** (grill-me
+    2026-07-16). Shipped as the tagger behind what d26 renamed
+    `natural_language_share`; the 17-tag histogram and its derived views
+    were retired by d26 (recompute from the shared spaCy doc if ever
+    needed). Still live: stopword/function-word ratio is the REGEX
+    fallback of `natural_language_share` (non-English, minimal installs;
+    recipe quotas reference the spaCy scalar only); POS fields nullable
+    per-row (English-only); and the domain-shift guardrail (taggers
+    degrade on keyword telegrams) — bank-style fixed cases + a one-off
+    `natural_language_share`↔stopword-ratio correlation diagnostic over
+    the cached datasets (investigate if r < 0.8), still an open TODO gate.
 
 15. **Unified bank family + FeatureExtractor** (grill-me 2026-07-16). One
     generic family `GeneralBank[EngineT, OutT]` with `OutT` constrained to
@@ -325,12 +299,10 @@ breadth; strategy labeling is explicitly a later stage.
     not the labeling snapshot.
 
 24. **POS profile schema legibility** (grill-me 2026-07-20). Surviving
-    piece: (b) `LengthBank` renames emitted stat `length_tokens` →
-    `length_words` — the count uses regex `\w+` tokenization (not spaCy's;
-    differs by ~7% on nfcorpus), and the name now says so. Parts (a)
-    (`residual_share` invariant) and (c) (`pos_count_<tag>` renames) were
-    retired with the POS histogram by d26. The Stat suffix convention
-    (CONTEXT.md) stands.
+    piece: `LengthBank` emits `length_words` (regex `\w+` tokenization,
+    not spaCy's; differs by ~7% on nfcorpus — the name says so). Parts (a)
+    and (c) were retired with the POS histogram by d26. The Stat suffix
+    convention (CONTEXT.md) stands.
 
 25. **Cross-group co-firing is by design** (grill-me 2026-07-20). Same-token
     spans emitted by banks in *different* FeatureGroups — e.g. `acronym`
@@ -703,116 +675,25 @@ breadth; strategy labeling is explicitly a later stage.
     is abandoned for a one-off batch script.
 
 35. **R1 reframed: LLM-judge calibration pilot** (grill-me 2026-07-27,
-    supersedes d30's R1 hole-diagnostic framing).
-    **SUPERSEDED by d37, 2026-07-28. Gate failed on measured evidence
-    (kappa 0.120–0.139, bootstrap CI upper bound 0.181 — out of reach of
-    0.6 at any sample size); `judge.py` and the pilot notebook deleted.
-    The load-bearing error is in (b) below: orcas was called "no qrels",
-    but ORCAS ships 18.8M click pairs mapped onto msmarco-document
-    doc_ids, so it is positive-only-qrels, not unlabelable. Text retained
-    as the record of what was tried and why.**
-    The original R1's
-    binary question ("do we need LLM-as-judge?") is moot: 31% of the
-    d32 composition is the deferred lane (~15.7K orcas QC rows) with
-    no qrels to compute NDCG from, so the labeling stage requires an
-    LLM judge regardless of hole-gap magnitude. R1's actual job flips
-    from "should we deploy?" to "how well can we trust it?" — measured
-    against the qrels we do have.
-    (a) *Qrels serve two roles.* Label source for qrels-lane rows via
-    NDCG; calibration ground truth for the LLM judge that labels
-    deferred-lane rows and fills unjudged retrievals. No leakage —
-    the judge is upstream of the router (produces labels), never
-    trained by it.
-    (b) *Pilot corpus.* TREC-DL 2022 qrels, ~200 human judgments per
-    query pooled across many systems — the deep-pool measurement
-    instrument used in BEIR's own Hole@10 literature. msmarco-passage-
-    dev's ~1 qrel/query is uninterpretable for judge calibration.
-    No retrieval, no corpus indexing needed — the pilot judges
-    pre-existing (query, doc) pairs from qrels.
-    (c) *Sampling: stratified equal per graded relevance level.*
-    125 pairs × 4 levels (0–3) = 500 pairs total; both models judge
-    the same pairs. Rationale: NDCG@10 is dominated by rare
-    high-relevance docs; a judge that nails level 0 but misgrades
-    level 3 shows fake kappa on natural-distribution sampling. Equal
-    stratification puts statistical power where NDCG needs it.
-    (d) *Models compared.* Claude Haiku 4.5 vs Claude Sonnet 4.5.
-    Opus 4.7 excluded on cost + latency (labeling stage scales to
-    ~50K–150K judge calls). Same 500 pairs for both.
-    (e) *Prompt.* TREC-DL's own annotation guidelines verbatim; ask
-    for a 0–3 grade + brief justification. One pair per LLM call in
-    the pilot (batching is a production-time optimization, own grill).
-    (f) *Metrics.* Cohen's kappa as the headline (chance-adjusted,
-    standard IR-judge threshold literature), 1000-resample bootstrap
-    CI to expose measurement noise. Per-level accuracy floor: no
-    grade below 70% (bottom-guard so a judge cannot game kappa by
-    nailing common classes).
-    (g) *Decision rule.* Pick the cheapest model that clears both
-    kappa ≥ 0.6 AND every per-level accuracy ≥ 70%. If none pass,
-    escalate to prompt iteration as a follow-up mini-session — not
-    R1's scope.
-    (h) *Shipped artifact.* `src/hybrid_search_rrf_dataset/judge.py`
-    (module: `judge(query, doc, model_id) -> LLMJudgment` +
-    pinned `PROMPT` constant, ~80 lines); the pilot notebook is the
-    calibration harness that consumes the module and reports numbers.
-    Downstream labeling stage does `from ...judge import judge` —
-    no rewrite. Promotes to a pinned judge-config artifact
-    (`{model_id, prompt_hash, kappa, per_level_acc, ci, pilot_date}`,
-    referenced by every emitted label as a foreign key) at the
-    labeling-stage grill — that's R2's schema-pin territory (d30 R2),
-    not R1's.
-    — *The qrels are the calibrator; the judge is the extender; the
-    router never sees either directly. Two roles for the same data,
-    no leakage.*
+    supersedes d30's R1 hole-diagnostic framing). **SUPERSEDED by d37,
+    2026-07-28 — full record in docs/adr/0001.** 4-level TREC-DL grading
+    (500 stratified pairs, Haiku 4.5 vs Sonnet 4.5) against a kappa ≥ 0.6
+    + per-level-accuracy ≥ 70% gate: failed on measured evidence (kappa
+    0.120–0.139, bootstrap CI upper bound 0.181 — out of reach at any
+    sample size). Load-bearing premise error: orcas was called "no
+    qrels", but ORCAS ships 18.8M click pairs mapped onto msmarco-document
+    doc_ids — positive-only qrels, not unlabelable. `judge.py` and the
+    pilot notebook deleted (cae28fc); `data/r1_pilot/` is the audit trail.
 
-36. **R1 prompt-iteration escalation: 3-domain hand-crafted few-shot +
-    cross-domain diagnostic** (grill-me 2026-07-27, follows d35's
-    escalation clause "if neither passes, prompt iteration").
-    **SUPERSEDED by d37, 2026-07-28. Ran at n=500: few-shot moved kappa
-    by ±0.02 with fully overlapping bootstrap CIs (Haiku 0.348 → 0.328,
-    Sonnet 0.320 → 0.340 at grade≥2), so exemplar quality was never the
-    binding constraint. The real defect was measuring per-document grade
-    agreement when the pipeline consumes a per-query route decision. The
-    real-exemplar ablation in (a) is dropped, not deferred.**
-    First-pass
-    n=60 result on d35's base prompt: both Haiku 4.5 and Sonnet 4.6
-    landed at kappa ~0.19 with `acc@2 = 0.0` — systematic middle-grade
-    avoidance. Prompt iteration doctrine below.
-    (a) *Exemplars are hand-crafted, not real qrels.* Real dataset
-    exemplars would embed each source's assessor conventions in the
-    prompt — one dataset's conventions on top of a judge that will
-    label a mix of dataset domains. Hand-crafted-in-style teaches the
-    TREC-DL rubric via generic vehicles, avoiding overfit to any single
-    assessor pool. Real-exemplar variant deferred as the ablation
-    escalation if hand-crafted V2 still shows the failure at n=500.
-    (b) *12-exemplar shape: 3 source-style queries × 4 grades.* Query A
-    TREC-DL-style factual ("average annual income for a registered
-    nurse"); Query B BRIGHT-style technical problem ("linked-list cycle
-    detection, O(1) space"); Query C QUEST-style entity-set retrieval
-    ("British authors 1900-1950, not set in England"). Each query has
-    four passages illustrating grades 0/1/2/3 under the same rubric —
-    the point is that the rubric applies uniformly across domains, and
-    grade is about *focus*, not domain. Prompt closes with an explicit
-    directive naming the middle-grade avoidance failure ("do not
-    collapse grade 2 into grade 1 or grade 3").
-    (c) *Cross-domain diagnostic on msmarco-passage-dev, 200 pairs.*
-    Held out from the 3 exemplar sources. Sparse+binary qrels
-    (~1 rel/query) — measurement is *positive-agreement rate*: fraction
-    of human-relevant pairs where the LLM's collapsed grade ({2,3} →
-    relevant, {0,1} → irrelevant) also says relevant. Bootstrap
-    1000-resample CI. **Diagnostic only** — reported alongside the
-    TREC-DL kappa headline but *not* a pass/fail gate: R1's decision
-    rule (d35g) is preserved unchanged. Purpose: hypothesize the
-    labeling stage's cross-domain generalization; a collapsed number
-    (say < 60%) triggers a follow-up grill on domain-specific prompt
-    work, not a pilot rejection.
-    (d) *API surface.* Additive to d35's `judge.py`: keep `PROMPT` (base
-    rubric, backwards-compatible default); add `PROMPT_FEW_SHOT`
-    (base + 12 hand-crafted exemplars + closing directive); add
-    `build_fewshot_prompt(examples)` for the future real-exemplar
-    ablation. `judge()` grows a keyword `prompt: str = PROMPT` so
-    callers swap variants without touching the tool-use path.
-    — *Ship the diagnostic, keep the pilot's decision rule clean;
-    escalation ladder stays intact.*
+36. **R1 prompt-iteration escalation: hand-crafted few-shot** (grill-me
+    2026-07-27, follows d35's escalation clause). **SUPERSEDED by d37,
+    2026-07-28 — full record in docs/adr/0001.** Ran at n=500: 12
+    hand-crafted exemplars (3 source-style queries × 4 grades) moved
+    kappa by ±0.02 with fully overlapping bootstrap CIs (Haiku 0.348 →
+    0.328, Sonnet 0.320 → 0.340 at grade≥2), so exemplar quality was
+    never the binding constraint — the defect was measuring per-document
+    grade agreement when the pipeline consumes a per-query route
+    decision. The real-exemplar ablation is dropped, not deferred.
 
 37. **Golden set: route labels from retrieval outcomes, not from an LLM's
     opinion** (grill-me 2026-07-28, supersedes d35 and d36; amends d30's
@@ -910,18 +791,107 @@ breadth; strategy labeling is explicitly a later stage.
     — *The LLM judges documents; arithmetic picks the route. Everything
     needed to re-pick it later is on disk.*
 
+38. **msmarco-passage-dev anchor: the composition's largest lane gets
+    labelled on a realistic index** (grill-me 2026-07-28, executes d37j/g
+    for the 31% lane; nfcorpus anchor measured same day).
+    (a) *Queries are the composition's, full stop.* `TargetComposition().
+    build()` → `RouteLabels.rows_for("msmarco-passage-dev")` — 15,678
+    rows. Local dev qrels (`~/.ir_datasets/msmarco-passage/dev/qrels`,
+    59,273 judgments) cover 7,697 of them (49.1%); those get labelled,
+    the other 7,981 stay `unlabelled` in coverage. Source datasets supply
+    qrels and passage text for selected query_ids, never queries.
+    (b) *Corpus text via ir_datasets*, the same tool that fetched the
+    queries/qrels on 07-15: one user-initiated ~1.06GB fetch of the v1
+    collection, whose doc_ids are the ones the qrels name. After that,
+    fully offline-re-runnable.
+    (c) *Corpus recipe: all 8,219 judged-relevant passages force-included
+    + uniform-random distractors (fixed seed) to 100K total.* Uniform
+    sampling preserves the collection's vocabulary/IDF profile — the
+    d37(g) fix: trec-dl's judged-docs-only 30K was near-all answers,
+    inflating dense and starving sparse. Full 8.8M rejected for now
+    (~day-scale embedding); reversible, the recipe is a parameter.
+    (d) *Artifacts follow the existing owners.* `data/msmarco-passage-dev/
+    {corpus,qrels}.parquet` in `SnapshotDataset` layout; Qdrant collection
+    `msmarco_routes` with the same `dense_base`/`sparse_base` configs
+    (bge-small-en-v1.5 384 cosine, Qdrant/bm25); `min_relevance=1`
+    (grades are binary). Labels merge into `data/route_labels/
+    labels.parquet` via `RouteLabels.label`.
+    (e) *Rule parity with the nfcorpus anchor.* The shipped argmax
+    labels this run too, so the two datasets differ by exactly one
+    variable. The deliberate tie/all_zero rule (d37i) stays a separate
+    change, re-derivable from persisted route_scores/route_rankings
+    (d37e) with zero retrieval.
+    (f) *Notebook: append per-dataset sections* to `route_labels.ipynb`
+    following the §4–§7 pattern, closing with coverage over both
+    datasets. A dataset loop is premature at 2; revisit at 5+.
+    (g) *Why this dataset second:* median 1 relevant/query (vs nfcorpus
+    16) is the regime where two different top-10 lists cannot both be
+    right — measured on nfcorpus that dense-vs-sparse top-10 Jaccard is
+    0.184 yet 66% of rows sit within 0.06 of a tie, so rich judging, not
+    retrieval agreement, was eating the signal.
+
+39. **Qrels acquisition: every human-judged lane, snapshot-first**
+    (grill-me 2026-07-29, d38 follow-on; scales d37j's anchor to the
+    composition). Scope: the 18 QQ-grounded lanes, ~18.3K selected rows.
+    Motivation: the labelled distribution (84% dense over decisive rows)
+    is an artifact of *which* lanes are labelled — two natural-language
+    lanes where the dense encoder is at home. The sparse/hybrid signal
+    lives in the unlabelled technical and entity lanes.
+    (a) *Registry bypass, settled.* Doc-side acquisition lives in
+    per-lane `RetrievalDataset` classes in
+    `hybrid_search_rrf_dataset/retrieval.py`; the registry stays
+    queries-only — its own documented doctrine. Proof the registry was
+    never on the labeling path: zero `dataset_registry` imports in the
+    labeling package, and 8,020 rows labelled while the cache stayed
+    `[query_id, text]`. The TODOS "lift queries-only" item is re-scoped
+    to what actually needs it — corpus-relative features (d37l) — and
+    per-lane Qdrant indexes may serve query-term IDF before any refill.
+    (b) *Corpus-pending snapshots.* Pass 1 writes
+    `data/<lane>/{queries,qrels}.parquet` for all 18 lanes; `corpus.
+    parquet` arrives in pass 2. `SnapshotDataset` init tolerates the
+    pending state, `corpus()` fails loud. `coverage()` gains a
+    `qrels_ready` state: unlabelled → qrels_ready → labelled. Network
+    hit once per lane ever.
+    (c) *Declarative lane table.* `LANES` in
+    `hybrid_search_rrf_dataset` maps composition key → (source class,
+    min_relevance, quirks — BRIGHT's `excluded_ids` honored). The
+    notebook iterates the table; amends d38(f): the per-lane-sections
+    pattern was right at 2 lanes, the loop is earned at 18.
+    nfcorpus/msmarco sections stay as shipped; done lanes sit in the
+    table and skip via `label()`'s existing idempotency.
+    (d) *min_relevance defaults:* 1 for the binary lanes (rarb, bright,
+    crumb, quest, limit, miracl); dbpedia-entity 1 with the §9
+    zero-retrieval sensitivity cell as the escape hatch; trec-dl 2 per
+    d37(a) (parked anyway).
+    (e) *One threshold corpus rule.* Corpus ≤ 100K docs ⇒ index in
+    full; > 100K ⇒ d38(c) recipe verbatim (judged force-included +
+    uniform-random distractors to 100K, seed=0). No per-lane hand
+    decisions; the table records measured size and which branch fired.
+    Expected: rarb/bright/crumb full; quest, dbpedia-entity,
+    miracl-en-dev capped. Embedding budget ≈ 500–800K docs total,
+    cached.
+    (f) *Pass-2 order: sparse signal first.* Wave 1, the ≤100K
+    technical lanes — rarb-code, crumb-code-retrieval, bright-leetcode/
+    aops/theoremqa, crumb-theorem/legal/clinical/stack-exchange/paper,
+    rarb-math, crumb-set-operation, crumb-tip-of-the-tongue, limit
+    (~16K rows). Wave 2, capped lanes by entity signal: quest →
+    dbpedia-entity → miracl-en-dev. Row-count-first ordering rejected:
+    it answers the sparse question last.
+    (g) *Parked, with reopen triggers.* ORCAS click lane (15,744 rows;
+    own grill — needs the 18.8M click pairs and a trust model for
+    clicks). LLM judgment source for never-judged rows (msmarco's
+    7,981 + pass-1 findings; trigger: d37k hole rate measured).
+    trec-dl-2022 rebuild (16 of 79 selected rows judged; hours of v2
+    scanning; trigger: hole-filling reopens it).
+    (h) *Standing rules carried:* collections named `<lane>_routes`;
+    shared `./.embedding_cache`; seed=0; missing qrels ⇒ `unlabelled`,
+    never query substitution; argmax rule parity until the tie-rule
+    decision lands.
+    — *The registry catalogs queries; lanes own their judgments. The
+    distribution question is answered when the technical lanes land.*
+
 ## Deferred questions
 
-- Delete the continuous-alpha family (`GoldenSetBuilder`,
-  `LLMFusionBuilder`, `WeightedRRFStrategy`, `WeightedDBSFStrategy`).
-  Confirmed out of scope 2026-07-28 — a continuous alpha is not a label
-  the router can emit, and CONTEXT.md defines **strategy label** as
-  exactly three values. Deferred, not done: deleting breaks
-  `experiments.ipynb` cells 24–30 and makes six artifacts
-  (`golden_wrrf`, `golden_dbsf`, `wrrf_equal`, `wrrf_llm`, `dbsf_equal`,
-  `dbsf_llm`) unloadable through the model layer, though the parquet
-  stays readable. Cost of keeping them: every refactor touches five
-  builders when two are in scope.
 - Recipe values remaining after d32's macro-split (50K; 60/20/20; entity
   slice 80/20; dark forest ≥3 champions, ≤50% each): per-cell floor sizes
   (d30a precision rule), per-span-type target amounts, minimum natural
@@ -943,9 +913,24 @@ breadth; strategy labeling is explicitly a later stage.
   dataset's doc_ids are currently dropped on ingest.
 - Strategy labeling stage: empirical dense/sparse/hybrid labels in
   `src/hybrid_search_rrf_dataset`, scored by d37(a)'s objective (was "via
-  NDCG"). Remaining: pool extraction, per-dataset corpus sizing, the
-  unanswerable-query outcome (d37i), and the anchor yield measurement
-  (d37j).
+  NDCG"). Remaining: pool extraction and the unanswerable-query outcome
+  (d37i); corpus sizing settled composition-wide by d39(e)'s threshold
+  rule. Anchor yield (d37j) measured 2026-07-28, msmarco lane 2026-07-29:
+  `data/route_labels/labels.parquet` (8,020 rows).
+- Pass-1 reality check (d39): per-lane qrels_ready counts are unknown
+  until the fetches run — msmarco's 49.1% says declared QQ grounding
+  does not guarantee per-query coverage. Re-price wave order if a lane
+  comes back thin. Qrels dialects (RAR-b tsv, BRIGHT gold_ids +
+  excluded_ids, crumb/quest/limit lists) verified at implementation.
+- Label form: argmax one-hot vs the per-route score vector as the training
+  target (a classifier can sit on top of regression, not vice versa; near-
+  ties then teach "equivalent" instead of a fabricated winner). Leaning
+  score-vector; decide after msmarco margins land (d38g context).
+- msmarco corpus scale-up past 100K if margins look corpus-limited —
+  recipe is a parameter (d38c), embedding cache amortizes the retry.
+- ORCAS click-lane labeling (the other 31% of the composition): clicks are
+  weak relevance of a different kind (`source='click'` in QrelStore, d37d)
+  — own decision, not lumped into qrels-lane work.
 - ILP escalation for quota conflicts (solver choice, formulation).
 - Next acquisitions: CLERC, the 9 unregistered BRIGHT splits, further BEIR
   subsets (ORCAS with `recommended_sample=100K` + 3 BRIGHT splits

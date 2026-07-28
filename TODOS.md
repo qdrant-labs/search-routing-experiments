@@ -9,46 +9,28 @@ Gates / next actions:
       (even `--help`) runs the full benchmark and appends rows to
       engines.csv — bit us 2026-07-21 (two stray rows scrubbed by hand).
 
-Deferred by grill-me session 2026-07-15 (see SPEC.md):
-
-- [ ] Corpus-relative features: explicitly decide whether to lift the
-      registry's queries-only restriction.
-- [ ] Strategy labeling stage: empirical dense/sparse/hybrid labels via NDCG
-      in src/hybrid_search_rrf_dataset.
-- [ ] ILP escalation path if greedy quota-fill conflicts (solver,
-      formulation).
-- [ ] Demo (b) infra: corpus indexing + local Qdrant for the
-      strategy-disagreement measurement.
-- [ ] Open card ratifications (SPEC d21): MIRACL llm_target/non_trivial
-      vs candidate-list coding; DBPedia scope G-vs-S.
-
 ## From golden-set grill (2026-07-28, SPEC decision 37)
 
 Next actions, in order — (1) and (2) block everything else:
 
-- [ ] Lift the registry's queries-only restriction to retain doc_ids and
-      ORCAS clicks. Cache is `[query_id, text]` for all 21 datasets, so
-      the 18.8M ORCAS click pairs are dropped on ingest. Needs a cache
-      refill (user-initiated).
+- [ ] Lift the registry's queries-only restriction — **re-scoped by
+      d39(a)**: labeling never needed it (18 lanes acquire doc-side via
+      retrieval.py snapshot classes; 8,020 rows labelled with the cache
+      untouched). Remaining customers: corpus-relative features (d37l,
+      possibly servable from per-lane Qdrant indexes instead) and ORCAS
+      clicks (parked click lane). Refill only when one of those fires.
 - [ ] Pool extraction: run the three routes over a query list and emit
       `(dataset, query_id, route, rank, doc_id, score)`. No qrels needed,
       so it does not touch `FusionBuilder`. `_iter_queries`' skip-on-no-
       qrels guard is correct and stays — removing it would fabricate a
       `dense_only` label per unlabelable query.
-- [ ] Anchor yield measurement on nfcorpus (323 queries, 3,633 docs,
-      already indexed as collection `nf`): the three-way split of
-      d37(i) — all-tied / routes-differ / all-zero. Decides whether 50K
-      queries yield enough trainable rows.
-- [ ] Explicit outcome for unanswerable queries (d37i). Today the argmax
-      falls through to list order and fabricates `dense_only` (1 of 76 on
-      trec-dl; grows with corpus realism).
+- [ ] Unanswerable-query outcome, remaining half (d37i): the `shape`
+      column ships (`labels.py` `outcome_shape`; nfcorpus anchor: 77/323
+      all_zero), but the `route` column still fabricates a label for
+      all_zero rows via tie-break list order.
 - [ ] Deliberate tie-break rule, replacing incidental list order. Note
       `dense_only` is likely not the cheapest route — BM25 needs no
       query-side transformer pass.
-- [ ] Constant-dense and constant-sparse baselines (d37h). Two
-      `BaselineBuilder` calls; without them a router can lose to one line
-      of code and still look fine on regret.
-- [ ] `QrelSource.CLICK` + conflict priority human > click > llm.
 - [ ] Retrieval latency benchmark for the three routes. Speed is one of
       three stated requirements and is entirely unmeasured;
       `data/engines.csv` benchmarks taxonomy extractors, not retrieval.
@@ -57,6 +39,8 @@ Next actions, in order — (1) and (2) block everything else:
       dbpedia ~4.6M for 400, while msmarco is 8.8M for 15,678.
       `TrecDL2022(30000).materialize()` (judged docs only) is the existing
       pattern, but a corpus of near-answers inflates dense — d37(g).
+      **msmarco settled by d38(c)**: judged-relevant + uniform-random
+      distractors to 100K; remaining datasets still open.
 - [ ] Pre-retrieval corpus-relative features (d37l): query-term IDF in
       the index, out-of-vocabulary rate. Post-retrieval ones (score
       margin, dense/sparse candidate overlap) cannot inform which
@@ -68,33 +52,48 @@ Next actions, in order — (1) and (2) block everything else:
       `min_relevance` boundary, `QrelStore.lookup` conflict resolution,
       the `build_or_load` objective-mismatch guard.
 
+## From msmarco-anchor grill (2026-07-28, SPEC decision 38)
+
+- [x] The run itself — DONE 2026-07-29: 7,697 rows labelled into
+      `labels.parquet` (52% routes_differ, 2% all_zero; 927 decisive,
+      84% dense). Finding: 53% of routes_differ rows are top-two ties
+      whose label is argmax list order — feeds the tie-rule and
+      label-form decisions.
+- [ ] Label form: argmax one-hot vs per-route score vector as training
+      target — decide after msmarco margins land (d38g).
+- [ ] msmarco corpus scale-up past 100K if margins look corpus-limited;
+      recipe is a parameter, embedding cache amortizes the retry.
+- [ ] ORCAS click-lane labeling (other 31% of composition): clicks are
+      `source='click'` relevance (d37d) — own decision, own session.
+
+## From qrels-acquisition grill (2026-07-29, SPEC decision 39)
+
+- [ ] Pass 1 (code-implementer): per-lane RetrievalDataset classes for
+      the 5 HF families (RAR-b, BRIGHT w/ excluded_ids, crumb, quest,
+      limit) + dbpedia-entity/miracl via ir_datasets; `LANES` table;
+      SnapshotDataset corpus-pending relaxation; `coverage()` gains
+      `qrels_ready`. Output: `data/<lane>/{queries,qrels}.parquet` × 18
+      + per-lane qrels_ready counts in the notebook.
+- [ ] Pass 2 wave 1: index + label the ≤100K technical lanes
+      (rarb-code, crumb-code, bright-*, crumb-theorem/legal/clinical/
+      stack-exchange/paper, rarb-math, crumb-set-operation,
+      crumb-tip-of-the-tongue, limit) — threshold rule d39(e), argmax
+      parity d39(h).
+- [ ] Pass 2 wave 2: quest → dbpedia-entity → miracl-en-dev, capped
+      100K per d38(c) recipe.
+- [ ] Re-read the route distribution + margins over all landed lanes —
+      the "where to go next" readout this plan exists for; feeds the
+      label-form decision (d38 deferred).
+- [ ] Re-price wave order if pass 1 shows a lane's qrels_ready is thin
+      (msmarco precedent: declared QQ ≠ per-query coverage).
+
 ## R1 LLM-judge pilot (SPEC d35 + d36) — CLOSED 2026-07-28, no action
 
-Superseded by SPEC d37. `judge.py` and `r1_judge_calibration.ipynb` are
-deleted; `data/r1_pilot/` is kept as the measurement audit trail. Recorded
-here so the result is not re-derived from scratch:
-
-- 4-level kappa 0.120–0.139, bootstrap CI upper bound 0.181 — a 0.6 gate is
-  out of reach at any sample size, so the verdict is definitive rather than
-  underpowered.
-- Few-shot moved it by ±0.02 with fully overlapping CIs (Haiku 0.348 →
-  0.328, Sonnet 0.320 → 0.340 at grade≥2). Exemplar quality was never the
-  binding constraint, so the real-exemplar ablation is dropped, not deferred.
-- Sonnet ≈ Haiku throughout: 3× the cost bought nothing.
-- Root cause: the design measured per-document grade agreement where the
-  pipeline consumes a per-query route decision. Whether route agreement
-  survives moderate per-document noise is untested — that is d37's question.
-- Do not reuse those cached judgments to evaluate a *binary* judge. They came
-  from a 4-level prompt over pairs sampled from existing qrels; the 155-vs-8
-  false-negative skew is an artifact of collapsing that rubric at grade≥2,
-  not a property of a judge asked the binary question directly.
+Superseded by SPEC d37; full record in `docs/adr/0001` (kappa numbers, root
+cause, and the do-not-reuse warning for the cached judgments).
+`data/r1_pilot/` is the measurement audit trail.
 
 ## From taxonomy-generators grill (2026-07-23, SPEC decision 34)
-- [x] Implement `src/taxonomy_generators/` per d34: SurfaceGenerator ABC,
-      PatternGenerator defaults over FEATURE_BANKS (rstr, guard-stripped
-      patterns), override hook, tool trio registry, MCP extra, round-trip
-      test (`tests/test_taxonomy_generators.py`). Absorbed the former
-      "MCP wrapper around verify()" item (d34e).
 - [ ] Realism-override audit: eyeball seeded samples per feature once
       defaults ship; write overrides where gibberish hurts (d34b).
       Named cases so far: `uri` (bank pattern is deliberately loose, so
@@ -147,14 +146,6 @@ here so the result is not re-derived from scratch:
 - [ ] LLMBank: reserved last-resort engine — deferred by design (d18);
       LLM's active lane is teacher (silver labels) + judgment features.
 
-## From logical-group expansion grill (2026-07-20, SPEC decision 20)
-- [ ] Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light
-      formal content: "x squared plus y squared", prose pseudo-code) —
-      layered bank; needs a code/math detection model choice.
-- [ ] Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
-      minus-exclusion, `site:`) — attested in query logs but
-      precision-dangerous; own decision.
-
 ## From profile-at-scale grill (2026-07-22, SPEC decision 31)
 - [ ] ORCAS-tail harvest: named top source for short × feature-rich cells
       (~500K natural feature-bearing rows) — the d33 order sheet is the
@@ -169,7 +160,13 @@ here so the result is not re-derived from scratch:
       texts (chase upstream in the source caches — likely a cache bug,
       distinct from dedup) and 339 exact-duplicate texts (the exact-dup
       half of the near-duplicate gate below — step 1 upstream dedup
-      catches these for free).
+      catches these for free). Also (2026-07-29, d38 labeling run):
+      `checkable`/`label_lane` are assigned per-dataset, not per-query —
+      all 15,678 msmarco-passage-dev rows carry `checkable=True`, but
+      only 7,697 have a published judgment (MS MARCO judged 55% of dev;
+      the fill drew judgment-blind and slightly anti-correlated, 49.1%
+      realized). The per-query `checkable` feature-table column below is
+      the fix.
 - [ ] Provisional recipe values to revisit after the first fill's order
       sheet + lane split: ambiguity discounts (MODERATE 0.75,
       AMBIGUOUS 0.5), 1,000-weight floor size / slack margin.
@@ -214,7 +211,7 @@ here so the result is not re-derived from scratch:
       disagreeing about *what the query even asks*, not about which
       candidate is more relevant — those rows carry noisy signal,
       not richer signal. Distinguish via label-agreement rate in the
-      R1 hole pilot before scaling the weighting.
+      hole-filling measurement (d37k) before scaling the weighting.
 - [ ] Pilot A/B: quota-sequential vs weakest-first fill over the same
       feature table — fill-ratio profiles at several budget cuts +
       selected-set overlap.
@@ -222,10 +219,6 @@ here so the result is not re-derived from scratch:
       generated provenance).
 - [ ] Floor precision target — one number (±points per cell → n via
       1/√n); decide together with the recipe values.
-- [ ] R1 hole pilot — SUPERSEDED 2026-07-27 by d35: reframed as an
-      LLM-judge calibration pilot because the deferred lane already
-      forces LLM-as-judge deployment. Implementation item is now in
-      the composition-fill section below (d35 R1-implementation).
 - [ ] R2 label schema: pin (dense_model, sparse_model, fusion, k, depth)
       tuple in the label artifact; set tie margin ε; two-dense-model
       kappa pilot on ~500 rows (low-kappa cells = stack artifacts).

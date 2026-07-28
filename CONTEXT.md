@@ -421,3 +421,31 @@ Sub-quotas inside one feature: density (feature mass vs query length),
 surface diversity (distinct forms per type), repetition (same form repeated),
 clustering (feature spans concentrated into a centroid of mass vs scattered
 across the query). Computed as views over spans, not separate extractors.
+
+### Route labels
+
+**Lane**:
+One composition dataset's labeling pipeline: source fetch → snapshot
+(`data/<lane>/`) → route collection (`<lane>_routes`) → rows in
+`labels.parquet`. Queries always come from the composition; the lane supplies
+qrels and documents for them.
+_Avoid_: dataset (ambiguous — the composition is *the* dataset), subset
+
+**Judgment source**:
+Where a relevance judgment came from: `human`, `click`, or `llm`
+(`QrelStore.source`, conflict priority in that order). Orthogonal to Lane —
+one lane's rows may eventually carry several sources.
+_Avoid_: judgment lane (collides with Lane), label_lane (that column is the
+composition's provenance field, not the QrelStore source)
+
+**Corpus-pending snapshot**:
+A lane directory holding `queries.parquet` + `qrels.parquet` but no
+`corpus.parquet` yet — the state between qrels acquisition (pass 1) and
+corpus indexing (pass 2). Coverage reports its rows as `qrels_ready`.
+
+**Decisive label**:
+A `routes_differ` row whose winner hit rank 1 and leads the runner-up by
+≥ 0.06 — a label that is a fact about retrieval rather than a tie broken by
+argmax list order. The honest trainable count.
+_Avoid_: trainable rows (routes_differ alone overcounts — 53% of msmarco's
+were top-two ties)
