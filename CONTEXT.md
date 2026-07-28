@@ -245,15 +245,27 @@ infeasible.
 _Avoid_: gap report, error log
 
 **Label lane**:
-Per-row labeling route recorded at selection time: `qrels` (gradeable
-today) vs `deferred` (QC rows awaiting clicks or LLM-as-judge).
-_Avoid_: checkable (that is the input proxy, not the route), tier
+Per-row labeling route recorded at selection time: `qrels` vs `deferred`.
+Derived from the registry's grounding card (QQ vs QC), **not** from actual
+judgment coverage, which makes it a weaker claim than it reads as: a
+`qrels`-lane row from a positive-only dataset has ~1 judged doc against an
+18–25 doc pool, so ~95% of what the routes retrieve is unjudged there too.
+The `deferred` label is also now stale — its only member was orcas, which
+has 18.8M clicks (d37k). Due for redefinition in terms of
+[[qrel-hole]] rate per row rather than grounding.
+_Avoid_: reading `qrels` as "fully judged", checkable (that is the input
+proxy, not the route), tier
 
 **Dark forest**:
 The feature-blind 20% of the target dataset: uniform draws from ≥3
 generalist champions, deliberately unconditioned on any extractor output —
-insurance against the taxonomy's own blind spots.
-_Avoid_: unknown universe, random slice
+insurance against the taxonomy's own blind spots. A *selection* concept
+(slice D of the composition).
+_Avoid_: unknown universe, random slice, and — since 2026-07-28 — using it
+for unanswerable queries; that is [[route-outcome-shape]]'s all-zero case,
+an *outcome* discovered after retrieval, not a slice chosen up front. The
+two are unrelated: a dark-forest row may be perfectly answerable, and an
+unanswerable query may sit in any slice.
 
 **Provenance**:
 Per-row origin of a query in the diversified dataset: `natural` (taken as-is
@@ -302,10 +314,74 @@ low-trust flag (d30d).
 _Avoid_: treating qrels-bearing rows as unbiased samples of anything
 
 **Strategy label**:
-The ground-truth retrieval strategy for a query — `dense`, `sparse`, or
-`hybrid` — determined empirically (which strategy wins NDCG). The Strategy
-Router's target variable; deferred stage, not computed by the taxonomy.
-_Avoid_: class, category (overloaded with identifier types)
+The ground-truth retrieval strategy for a query — `dense_only`, `pure_rrf`,
+or `sparse_only` — determined empirically by running all three and scoring
+each with the [[router-objective]] (d37a; was "which strategy wins NDCG").
+Computed from retrieval outcomes, never asked of an LLM: dense-vs-sparse
+depends on corpus vocabulary and IDF, which are not in the query (d37f).
+The Strategy Router's target variable; not computed by the taxonomy.
+_Avoid_: class, category (overloaded with identifier types), continuous
+alpha (not a value the router can emit)
+
+**Router objective**:
+`0.7·HitRate@1 + 0.3·NDCG@10`, with a per-dataset `min_relevance`
+binarizing graded qrels (2 for TREC-DL's 0–3 scale, 1 for already-binary
+qrels). Lexicographic, not a blend: while the hit weight exceeds the NDCG
+weight the score ranges are disjoint (rank-1 hit ⇒ ≥0.700, miss ⇒ ≤0.300),
+so top-1 decides and NDCG@10 only breaks ties within each group. NDCG is
+the tie-breaker because MRR@10 is 1.0 for every route with a relevant
+rank-1 doc (blind to coverage) and Recall@10 collapses to two values when a
+query has one relevant doc — the majority case (d37c).
+_Avoid_: "scored by NDCG" (bare NDCG has no top-1 primacy), calling the
+weights a blend
+
+**Route outcome shape**:
+Which of three situations a query's per-route scores fall into (d37i): all
+routes tied above zero (equivalent — send to the cheapest, the signal for
+the speed requirement), routes differ (the quality signal), or all routes
+zero (unanswerable — **no valid label exists**). Two of the three are
+usable; the all-zero case currently fabricates a label by falling through
+to tie-break order.
+_Avoid_: treating an all-zero tie as a `dense_only` label
+
+**Qrel hole**:
+A document a retriever surfaces but no human ever judged — treated as
+irrelevant by NDCG whether it is or isn't. Asymmetric across retrievers:
+BM25 was in most historical pooling rounds so its holes are small
+(~6%); dense retrievers post-date the pools and hit 14–32% holes on
+older-era corpora. Labels computed without hole correction systematically
+under-rate dense retrieval.
+_Avoid_: unjudged doc (vaguer), missing qrel (that's the qrel's frame)
+
+**LLM-as-judge**:
+An LLM asked whether one document is relevant to one query — binary, and
+strategy-blind. It never sees which retriever surfaced the document and is
+never asked which route wins (d37f). Its scope narrowed sharply on
+2026-07-28: since every composition dataset has qrels or ORCAS clicks, the
+judge no longer manufactures labels, and its only remaining job is
+[[hole-filling]] — deferred until the raw per-route hole rate is measured.
+Never trained by the router; always upstream.
+_Avoid_: LLM annotator (assessor is the IR term), 4-level grading (the d35
+design; failed 2026-07-28), treating it as a source of strategy labels
+
+**Hole-filling**:
+Judging documents a retriever surfaced but no human graded, to correct the
+[[qrel-hole]] asymmetry that under-rates dense retrieval. A correction to
+labels that are already computable, not a prerequisite for having them —
+and self-validating: if it works, dense gains in the predicted direction
+(d37k).
+_Avoid_: conflating with label manufacture (no dataset needs that)
+
+**Cohen's kappa**:
+Chance-adjusted agreement between two labelers on the same items. Ranges
+[-1, 1]. Used in d35's pilot as a per-document judge gate at ≥0.6 — a
+threshold imported from IR assessor-agreement literature without checking
+that it matched this pipeline's consumer, which is a per-query route
+decision, not a per-document grade. Retained as a diagnostic; **not** a
+gate. Report bootstrap CIs, since a point estimate cannot distinguish a
+failed gate from an underpowered one.
+_Avoid_: using it as a pass/fail gate, accuracy alone (chance-inflated),
+comparing point estimates without CIs
 
 **Feature target**:
 Per-feature quantity a generator is asked to hit (counts, ratios, ranges).
