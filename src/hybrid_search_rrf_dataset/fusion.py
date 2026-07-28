@@ -4,15 +4,12 @@ from abc import ABC, abstractmethod
 from enum import StrEnum
 from typing import ClassVar
 
-import numpy as np
 from fastembed import SparseTextEmbedding, TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Fusion,
     FusionQuery,
     Prefetch,
-    Rrf,
-    RrfQuery,
     ScoredPoint,
     SparseVector,
 )
@@ -21,26 +18,20 @@ from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
 
 
 class StrategyName(StrEnum):
-    PURE_RRF = "pure_rrf"
-    WEIGHTED_RRF = "weighted_rrf"
-    WEIGHTED_DBSF = "weighted_dbsf"
+    """The router's decision surface — exactly three routes.
+
+    Weighted variants (weighted_rrf, weighted_dbsf) were removed 2026-07-28
+    per SPEC d37: a continuous dense/sparse weight is not a label the router
+    can emit, so tuning one served no downstream consumer.
+    """
+
     DENSE_ONLY = "dense_only"
+    PURE_RRF = "pure_rrf"
     SPARSE_ONLY = "sparse_only"
 
 
-def dbsf_normalize(scores: list[float]) -> list[float]:
-    """3-sigma DBSF: z-score, clip to [-3, 3], shift to [0, 1]."""
-    if not scores:
-        return []
-    arr = np.asarray(scores, dtype=np.float64)
-    if arr.std() == 0:
-        return [0.5] * len(scores)
-    z = np.clip((arr - arr.mean()) / arr.std(), -3.0, 3.0)
-    return ((z + 3.0) / 6.0).tolist()
-
-
 class FusionStrategy(ABC):
-    """Fetches candidates from Qdrant and returns a fused ranking as {doc_id: score}."""
+    """Fetches candidates from Qdrant and returns a ranking as {doc_id: score}."""
 
     name: ClassVar[StrategyName]
 
@@ -107,28 +98,43 @@ class FusionStrategy(ABC):
             ),
         ]
 
+    @staticmethod
+    def _ranking(hits: list[ScoredPoint]) -> dict[str, float]:
+        return {h.payload["doc_id"]: h.score for h in hits if h.payload}
+
     @abstractmethod
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]: ...
+    def rank(self, query: str) -> dict[str, float]: ...
 
 
-class WeightedFusionStrategy(FusionStrategy, ABC):
-    """Marker base: strategies whose output actually depends on weights.
+class DenseOnlyStrategy(FusionStrategy):
+    """Dense retrieval only, raw cosine similarity preserved."""
 
-    GoldenSetBuilder and LLMFusionBuilder require this subtype so that
-    weight-agnostic strategies (PureRRF) can't be passed by mistake.
-    """
+    name: ClassVar[StrategyName] = StrategyName.DENSE_ONLY
+
+    def rank(self, query: str) -> dict[str, float]:
+        return self._ranking(self._dense_hits(query))
+
+
+class SparseOnlyStrategy(FusionStrategy):
+    """Sparse (BM25) retrieval only, raw BM25 score preserved."""
+
+    name: ClassVar[StrategyName] = StrategyName.SPARSE_ONLY
+
+    def rank(self, query: str) -> dict[str, float]:
+        return self._ranking(self._sparse_hits(query))
 
 
 class PureRRFStrategy(FusionStrategy):
-    """Baseline: Qdrant native RRF fusion in a single call. Weights are ignored."""
+    """Qdrant-native RRF fusion in a single call — matches production `Fusion::Rrf`.
+
+    RRF fuses by rank position, which dilutes a confident top-1: a doc ranked
+    first by dense and 40th by sparse loses to one ranked third by both. That
+    is the behaviour the router exists to avoid paying for (SPEC d37g).
+    """
 
     name: ClassVar[StrategyName] = StrategyName.PURE_RRF
 
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]:
+    def rank(self, query: str) -> dict[str, float]:
         hits = self.client.query_points(
             collection_name=self.collection_name,
             prefetch=self._prefetch_pair(query),
@@ -136,72 +142,4 @@ class PureRRFStrategy(FusionStrategy):
             limit=self.fetch_limit,
             with_payload=True,
         ).points
-        return {h.payload["doc_id"]: h.score for h in hits if h.payload}
-
-
-class WeightedRRFStrategy(WeightedFusionStrategy):
-    """Qdrant-native weighted RRF via RrfQuery(rrf=Rrf(weights=[...]))."""
-
-    name: ClassVar[StrategyName] = StrategyName.WEIGHTED_RRF
-
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]:
-        hits = self.client.query_points(
-            collection_name=self.collection_name,
-            prefetch=self._prefetch_pair(query),
-            query=RrfQuery(rrf=Rrf(weights=[dense_weight, sparse_weight])),
-            limit=self.fetch_limit,
-            with_payload=True,
-        ).points
-        return {h.payload["doc_id"]: h.score for h in hits if h.payload}
-
-
-class DenseOnlyStrategy(FusionStrategy):
-    """Route endpoint: dense retrieval only, raw cosine similarity preserved.
-
-    Weight arguments are ignored — routing builders pick this strategy per query
-    and score magnitude is the whole point (unlike RRF, which discards it).
-    """
-
-    name: ClassVar[StrategyName] = StrategyName.DENSE_ONLY
-
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]:
-        return {h.payload["doc_id"]: h.score for h in self._dense_hits(query) if h.payload}
-
-
-class SparseOnlyStrategy(FusionStrategy):
-    """Route endpoint: sparse (BM25) retrieval only, raw BM25 score preserved."""
-
-    name: ClassVar[StrategyName] = StrategyName.SPARSE_ONLY
-
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]:
-        return {h.payload["doc_id"]: h.score for h in self._sparse_hits(query) if h.payload}
-
-
-class WeightedDBSFStrategy(WeightedFusionStrategy):
-    """DBSF-normalize each source, then combine linearly with weights (client-side)."""
-
-    name: ClassVar[StrategyName] = StrategyName.WEIGHTED_DBSF
-
-    def rank(
-        self, query: str, dense_weight: float, sparse_weight: float
-    ) -> dict[str, float]:
-        dense_hits = self._dense_hits(query)
-        sparse_hits = self._sparse_hits(query)
-
-        dense_ids = [h.payload["doc_id"] for h in dense_hits if h.payload]
-        sparse_ids = [h.payload["doc_id"] for h in sparse_hits if h.payload]
-        dense_scores = dbsf_normalize([h.score for h in dense_hits])
-        sparse_scores = dbsf_normalize([h.score for h in sparse_hits])
-
-        merged: dict[str, float] = {}
-        for doc_id, score in zip(dense_ids, dense_scores, strict=True):
-            merged[doc_id] = dense_weight * score
-        for doc_id, score in zip(sparse_ids, sparse_scores, strict=True):
-            merged[doc_id] = merged.get(doc_id, 0.0) + sparse_weight * score
-        return merged
+        return self._ranking(hits)
