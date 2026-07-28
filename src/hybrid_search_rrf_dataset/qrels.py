@@ -5,8 +5,8 @@ used to ride on every result row: parquet encodes a doc_id-keyed dict as a
 struct with one field per distinct doc_id in the whole file — 30,000 fields at
 76 rows — which does not survive composition scale.
 
-`source` keeps human assessments and LLM judgments in one table, so scoring a
-dataset against either is a filter rather than a second pipeline.
+`source` keeps assessor judgments, clicks, and LLM judgments in one table, so
+scoring a dataset against any lane is a filter rather than a second pipeline.
 """
 
 from __future__ import annotations
@@ -21,8 +21,18 @@ from hybrid_search_rrf_dataset.retrieval import RetrievalDataset
 
 
 class QrelSource(StrEnum):
+    """Provenance of a judgment. **Declaration order is precedence** — earlier
+    members win when two lanes judge the same (query, doc). Insert new members
+    at the right rank rather than appending."""
+
     HUMAN = "human"
     """Assessor judgments shipped with the dataset."""
+
+    CLICK = "click"
+    """A user clicked this doc for this query — ORCAS's 18.8M pairs over
+    msmarco-document. Weaker than an assessor judgment (position bias, no true
+    negatives) but it is a real relevance signal, and it is why no dataset in
+    the composition needs manufactured qrels (SPEC d37k)."""
 
     LLM = "llm"
     """Judgments produced by an LLM to fill holes the assessors left — docs a
@@ -30,8 +40,8 @@ class QrelSource(StrEnum):
     per-route hole rate is measured, so nothing writes this lane yet."""
 
 
-_PRIORITY = {QrelSource.HUMAN: 0, QrelSource.LLM: 1}
-"""Human assessments outrank LLM judgments for the same (query, doc)."""
+_PRIORITY = {source: rank for rank, source in enumerate(QrelSource)}
+"""Derived from declaration order so a new `QrelSource` cannot desync it."""
 
 
 class QrelStore:
@@ -91,16 +101,14 @@ class QrelStore:
         objectives score against.
 
         With `source` set, only that lane is returned. Without it, lanes are
-        merged and a human judgment wins any (query, doc) the LLM also graded.
+        merged and the highest-precedence source wins any (query, doc) that
+        more than one lane judged.
         """
         rows = self.frame[self.frame["dataset"] == dataset]
         if source is not None:
             rows = rows[rows["source"] == str(source)]
-        elif rows["source"].nunique() > 1:
-            rows = rows.assign(
-                _priority=[_PRIORITY[QrelSource(s)] for s in rows["source"]]
-            ).sort_values("_priority", kind="stable")
-            rows = rows.drop_duplicates(["query_id", "doc_id"], keep="first")
+        else:
+            rows = self._resolve_conflicts(rows)
 
         out: dict[str, dict[str, int]] = {}
         for query_id, doc_id, relevance in zip(
@@ -108,6 +116,17 @@ class QrelStore:
         ):
             out.setdefault(query_id, {})[doc_id] = int(relevance)
         return out
+
+    @staticmethod
+    def _resolve_conflicts(rows: pd.DataFrame) -> pd.DataFrame:
+        """Keep one judgment per (query, doc), preferring the highest-precedence
+        source. No-op when only one lane is present."""
+        if rows["source"].nunique() <= 1:
+            return rows
+        ranked = rows.assign(
+            _precedence=[_PRIORITY[QrelSource(s)] for s in rows["source"]]
+        ).sort_values("_precedence", kind="stable")
+        return ranked.drop_duplicates(["query_id", "doc_id"], keep="first")
 
     def save(self, path: Path | str) -> Path:
         file = Path(path)

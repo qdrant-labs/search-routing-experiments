@@ -14,13 +14,13 @@ if TYPE_CHECKING:
 
 
 class ComparisonSummary(BaseModel):
-    """Head-to-head numbers for a candidate fusion strategy vs a golden reference.
+    """Head-to-head numbers for a candidate router vs the oracle reference.
 
     Metric-agnostic: `metric_name` carries whatever the rows were scored with
-    (e.g. NDCG@10, MRR@20) and every regret number is in that metric's units.
-    Alpha-space agreement is deliberately excluded: the golden alpha is
-    non-unique (the metric plateaus over alpha), so distance-to-oracle-alpha
-    is not evidence of quality.
+    and every regret number is in that metric's units. Compare against the
+    constant-route baselines too, not just the oracle — a candidate can post
+    respectable regret while still losing to always picking one route
+    (SPEC d37h).
     """
 
     n_queries: int
@@ -44,8 +44,13 @@ class ComparisonSummary(BaseModel):
 
     oracle_hit_rate_pct: float
     """% of queries where the candidate reaches the golden metric (within
-    epsilon). Outcome-space replacement for alpha-tolerance: a different alpha
-    on the same metric plateau counts as a hit, as it should."""
+    epsilon). Outcome-space, so picking a *different* route that scores just as
+    well counts as a hit — as it should."""
+
+    route_agreement_pct: float
+    """% of queries where the candidate picked the oracle's route. Weaker than
+    `oracle_hit_rate_pct` as a quality signal (a tie broken the other way reads
+    as disagreement) but it is the quantity the router is trained to predict."""
 
 
 def _single_metric_name(rows: Iterable[FusionRow]) -> str:
@@ -63,8 +68,11 @@ def _joined(
     keys = ["dataset_name", "query_id"]
     ref = pd.DataFrame([r.model_dump() for r in golden]).set_index(keys)
     cand = pd.DataFrame([r.model_dump() for r in candidate]).set_index(keys)
-    return ref[["alpha", "metric", "query"]].join(
-        cand[["alpha", "metric"]], lsuffix="_golden", rsuffix="_candidate", how="inner"
+    return ref[["metric", "query", "strategy_name"]].join(
+        cand[["metric", "strategy_name"]],
+        lsuffix="_golden",
+        rsuffix="_candidate",
+        how="inner",
     )
 
 
@@ -76,9 +84,9 @@ def compare(
     """Compare a candidate builder's rows against the golden (optimal) rows.
 
     Regret = golden.metric - candidate.metric, in units of the rows' shared
-    metric. Positive means the candidate left quality on the table. Slightly
-    negative regret is possible when the candidate's alpha falls between the
-    golden sweep's grid points.
+    metric. Positive means the candidate left quality on the table; it cannot go
+    negative, since the golden rows take the max over the same three routes the
+    candidate chose from.
     """
     metric_name = _single_metric_name([*golden, *candidate])
     df = _joined(golden, candidate)
@@ -95,6 +103,9 @@ def compare(
         median_regret=float(regret.median()),
         p90_regret=float(regret.quantile(0.9)),
         oracle_hit_rate_pct=float((regret <= regret_epsilon).mean() * 100),
+        route_agreement_pct=float(
+            (df["strategy_name_golden"] == df["strategy_name_candidate"]).mean() * 100
+        ),
     )
 
 
@@ -103,50 +114,56 @@ def plot_comparison(
     candidate: list[FusionRow],
     candidate_label: str = "candidate",
 ) -> Figure:
-    """Four-panel plot: alpha scatter, metric scatter, alpha delta, regret."""
+    """Three panels: metric agreement, regret, and the route confusion matrix."""
     metric_name = _single_metric_name([*golden, *candidate])
     df = _joined(golden, candidate)
     if df.empty:
         raise ValueError("No overlapping (dataset_name, query_id) between golden and candidate.")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
-    ax = axes[0, 0]
-    ax.scatter(df["alpha_golden"], df["alpha_candidate"], alpha=0.6)
-    ax.plot([0, 1], [0, 1], "k--", alpha=0.4, label="y=x")
-    ax.set_xlabel("golden alpha (optimal)")
-    ax.set_ylabel(f"{candidate_label} alpha")
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title("Alpha agreement")
-    ax.legend()
-
-    ax = axes[0, 1]
+    ax = axes[0]
     ax.scatter(df["metric_golden"], df["metric_candidate"], alpha=0.6)
     lim = max(df["metric_golden"].max(), df["metric_candidate"].max()) * 1.05
     ax.plot([0, lim], [0, lim], "k--", alpha=0.4, label="y=x")
-    ax.set_xlabel(f"golden {metric_name} (best possible)")
+    ax.set_xlabel(f"oracle {metric_name} (best possible)")
     ax.set_ylabel(f"{candidate_label} {metric_name}")
     ax.set_xlim(0, lim)
     ax.set_ylim(0, lim)
     ax.set_title(f"{metric_name} agreement")
     ax.legend()
 
-    ax = axes[1, 0]
-    delta = df["alpha_candidate"] - df["alpha_golden"]
-    ax.hist(delta, bins=20, edgecolor="black")
-    ax.axvline(0, color="k", linestyle="--", alpha=0.6)
-    ax.set_xlabel(f"alpha delta ({candidate_label} - golden)")
-    ax.set_ylabel("queries")
-    ax.set_title(f"Alpha delta (MAE = {delta.abs().mean():.3f})")
-
-    ax = axes[1, 1]
+    ax = axes[1]
     regret = df["metric_golden"] - df["metric_candidate"]
     ax.hist(regret, bins=20, edgecolor="black")
     ax.axvline(0, color="k", linestyle="--", alpha=0.6)
-    ax.set_xlabel(f"{metric_name} regret (golden - {candidate_label})")
+    ax.set_xlabel(f"{metric_name} regret (oracle - {candidate_label})")
     ax.set_ylabel("queries")
     ax.set_title(f"{metric_name} regret (mean = {regret.mean():.3f})")
+
+    ax = axes[2]
+    routes = sorted(
+        set(df["strategy_name_golden"]) | set(df["strategy_name_candidate"])
+    )
+    counts = pd.crosstab(
+        df["strategy_name_golden"], df["strategy_name_candidate"]
+    ).reindex(index=routes, columns=routes, fill_value=0)
+    ax.imshow(counts.to_numpy(), cmap="Blues", aspect="auto")
+    peak = counts.to_numpy().max()
+    for i, row in enumerate(counts.to_numpy()):
+        for j, n in enumerate(row):
+            ax.text(
+                j, i, str(n), ha="center", va="center",
+                color="white" if n > peak * 0.5 else "black",
+            )
+    ax.set_xticks(range(len(routes)), routes, rotation=45, ha="right")
+    ax.set_yticks(range(len(routes)), routes)
+    ax.set_xlabel(f"{candidate_label} route")
+    ax.set_ylabel("oracle route")
+    agreement = (
+        df["strategy_name_golden"] == df["strategy_name_candidate"]
+    ).mean() * 100
+    ax.set_title(f"Route choice (agreement = {agreement:.0f}%)")
 
     fig.tight_layout()
     return fig

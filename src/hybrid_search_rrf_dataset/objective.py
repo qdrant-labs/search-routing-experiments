@@ -1,10 +1,10 @@
-"""Per-query scoring objectives that route/alpha builders maximize.
+"""Per-query scoring objectives that route builders maximize.
 
-`score(ranking, gold_qrel)` collapses one ranking into the single float a
-builder argmaxes over its decision surface. Graded qrels are binarized at
-`min_relevance` first: ranx pins its own relevance threshold to 1, so a
-TREC-DL grade 1 ("related but does not answer") would otherwise count as a
-hit and hand a perfect score to a route that answered nothing.
+`assess(ranking, gold_qrel)` collapses one ranking into the float a builder
+argmaxes over the three routes, plus the top-k ids the row stores. Graded qrels
+are binarized at `min_relevance` first: ranx pins its own relevance threshold
+to 1, so a TREC-DL grade 1 ("related but does not answer") would otherwise
+count as a hit and hand a perfect score to a route that answered nothing.
 """
 
 from __future__ import annotations
@@ -33,7 +33,18 @@ class Objective(BaseModel, metaclass=ABCMeta):
         `evaluation.compare` refuses to mix rows scored differently."""
 
     @abstractmethod
-    def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float: ...
+    def assess(
+        self, ranking: dict[str, float], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        """Return (score, top-k doc ids) from a single ordering pass.
+
+        Combined rather than split because every caller needs both, and a
+        separate `score()` implementation would order the ranking a second
+        time — up to `fetch_limit` candidates re-sorted per route per query.
+        """
+
+    def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float:
+        return self.assess(ranking, gold_qrel)[0]
 
     def relevant(self, gold_qrel: dict[str, int]) -> dict[str, int]:
         return {d: r for d, r in gold_qrel.items() if r >= self.min_relevance}
@@ -93,13 +104,15 @@ class RouterObjective(Objective):
     def name(self) -> str:
         return f"{self.hit_weight:g}*HitRate@1+{self.ndcg_weight:g}*NDCG@{self.top_k}"
 
-    def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float:
+    def assess(
+        self, ranking: dict[str, float], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        top = self.ordered(ranking)
         relevant = self.relevant(gold_qrel)
         if not relevant:
-            return 0.0
-        top = self.ordered(ranking)
+            return 0.0, top
         hit = self.hit_weight if top and top[0] in relevant else 0.0
-        return hit + self.ndcg_weight * self.ndcg(ranking, relevant)
+        return hit + self.ndcg_weight * self.ndcg(ranking, relevant), top
 
 
 class NDCGObjective(Objective):
@@ -115,5 +128,10 @@ class NDCGObjective(Objective):
     def name(self) -> str:
         return f"NDCG@{self.top_k}"
 
-    def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float:
-        return self.ndcg(ranking, self.relevant(gold_qrel))
+    def assess(
+        self, ranking: dict[str, float], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        return (
+            self.ndcg(ranking, self.relevant(gold_qrel)),
+            self.ordered(ranking),
+        )
