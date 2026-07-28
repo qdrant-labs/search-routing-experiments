@@ -9,8 +9,7 @@ from typing import ClassVar, Generic, TypeVar
 import numpy as np
 import pandas as pd
 import requests
-from pydantic import BaseModel
-from ranx import Qrels, Run, evaluate
+from pydantic import BaseModel, Field
 from tqdm.auto import tqdm
 
 from hybrid_search_rrf_dataset.fusion import (
@@ -18,6 +17,8 @@ from hybrid_search_rrf_dataset.fusion import (
     StrategyName,
     WeightedFusionStrategy,
 )
+from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
+from hybrid_search_rrf_dataset.qrels import QrelStore
 from hybrid_search_rrf_dataset.retrieval import RetrievalDataset
 
 
@@ -27,6 +28,10 @@ class FusionRow(BaseModel):
     Concrete row types (GoldenDataset, LLMFusionDataset, BaselineDataset)
     inherit without adding fields — the class identity marks how `alpha`
     was chosen. `strategy_name` marks which fusion algorithm produced the ranking.
+
+    Judgments deliberately live outside the row, in `QrelStore`: as a per-row
+    dict they became a parquet struct with one field per distinct doc_id in the
+    file. Rejoin on (dataset_name, query_id) when a metric needs recomputing.
     """
 
     id: int
@@ -34,7 +39,6 @@ class FusionRow(BaseModel):
     dataset_name: str
     query: str
     qdrant_answer: list[str]
-    gold_qrel: dict[str, int]
     metric: float
     metric_name: str
     alpha: float
@@ -69,7 +73,17 @@ class GoldenRoutingDataset(FusionRow):
     Same alpha convention as HybridRoutingDataset: Dense→0.0, Hybrid→0.5,
     Sparse→1.0 — a continuous golden alpha of, say, 0.2 falls in the Dense
     bucket and the row stores 0.0.
+
+    Unlike the other row types this keeps the roads not taken, so a changed
+    objective, a latency margin, or a tie-detection rule can be re-derived
+    without touching Qdrant again. Both fields are keyed by strategy name —
+    three stable keys, which parquet encodes as a fixed struct; keying
+    anything by doc_id would unify every doc in the file into one schema.
+    Defaulted so rows written before this field existed still load.
     """
+
+    route_scores: dict[str, float] = Field(default_factory=dict)
+    route_rankings: dict[str, list[str]] = Field(default_factory=dict)
 
 
 T = TypeVar("T", bound=FusionRow)
@@ -114,48 +128,35 @@ class LLMScoreClient:
         return int(response.json()["score"])
 
 
-def ndcg_score(
-    merged: dict[str, float], gold_qrel: dict[str, int], top_k: int
-) -> float:
-    qrels = Qrels({"q": gold_qrel})
-    run = Run({"q": merged})
-    return float(evaluate(qrels, run, f"ndcg@{top_k}"))
-
-
-def top_k_ids(merged: dict[str, float], k: int) -> list[str]:
-    return [
-        doc_id for doc_id, _ in sorted(merged.items(), key=lambda kv: -kv[1])[:k]
-    ]
-
-
 class FusionBuilder(ABC, Generic[T]):
     """Base for hybrid-fusion row builders.
 
     Delegates all Qdrant + embedding + fusion math to the injected
-    `FusionStrategy`. Subclasses decide only how alpha (weight split) is chosen.
+    `FusionStrategy`, and all scoring to the injected `Objective`. Subclasses
+    decide only how alpha (weight split) is chosen.
     """
 
     row_type: ClassVar[type[FusionRow]]
     default_dir: ClassVar[Path] = Path("data/fusion")
 
-    def __init__(self, strategy: FusionStrategy, top_k: int = 10) -> None:
+    def __init__(
+        self,
+        strategy: FusionStrategy,
+        *,
+        objective: Objective | None = None,
+    ) -> None:
         self.strategy = strategy
-        self.top_k = top_k
+        self.objective = objective or RouterObjective()
 
     def _iter_queries(
-        self, dataset: RetrievalDataset, start_id: int
+        self,
+        dataset: RetrievalDataset,
+        start_id: int,
+        qrels: QrelStore | None = None,
     ) -> Iterator[tuple[int, str, str, dict[str, int]]]:
+        store = qrels or QrelStore.from_dataset(dataset)
+        by_query = store.lookup(dataset.name)
         queries_df = dataset.queries()
-        qrels_by_query: dict[str, dict[str, int]] = {
-            str(qid): dict(
-                zip(
-                    g["doc_id"].astype(str),
-                    g["relevance"].astype(int),
-                    strict=True,
-                )
-            )
-            for qid, g in dataset.qrels().groupby("query_id")
-        }
         for i, q in enumerate(
             tqdm(
                 queries_df.itertuples(index=False),
@@ -164,7 +165,7 @@ class FusionBuilder(ABC, Generic[T]):
             )
         ):
             qid = str(q.query_id)
-            gold = qrels_by_query.get(qid, {})
+            gold = by_query.get(qid, {})
             if not gold:
                 continue
             yield start_id + i, qid, str(q.text), gold
@@ -179,10 +180,17 @@ class FusionBuilder(ABC, Generic[T]):
         dataset_name: str,
     ) -> T: ...
 
-    def build(self, dataset: RetrievalDataset, start_id: int = 0) -> list[T]:
+    def build(
+        self,
+        dataset: RetrievalDataset,
+        start_id: int = 0,
+        qrels: QrelStore | None = None,
+    ) -> list[T]:
+        """Score `dataset`'s queries. Pass `qrels` to judge against a store
+        other than the dataset's own — an LLM lane, or human and LLM merged."""
         return [
             self.build_row(rid, qid, q, gold, dataset.name)
-            for rid, qid, q, gold in self._iter_queries(dataset, start_id)
+            for rid, qid, q, gold in self._iter_queries(dataset, start_id, qrels)
         ]
 
     def save(self, rows: list[T], path: Path | str | None = None) -> Path:
@@ -196,33 +204,40 @@ class FusionBuilder(ABC, Generic[T]):
     def load(cls, path: Path | str | None = None) -> list[T]:
         file = Path(path or cls.default_dir) / "rows.parquet"
         df = pd.read_parquet(file)
-        rows: list[T] = []
-        for rec in df.to_dict("records"):
-            # Parquet stores dict columns as STRUCT, unifying keys across all rows
-            # and filling missing entries with None (ints also come back as floats).
-            # Strip that padding so gold_qrel matches its dict[str, int] contract.
-            gq = rec.get("gold_qrel")
-            if isinstance(gq, dict):
-                rec["gold_qrel"] = {k: int(v) for k, v in gq.items() if v is not None}
-            rows.append(cls.row_type(**rec))
-        return rows
+        # Drop columns the schema no longer carries, so artifacts written before
+        # judgments moved into QrelStore still load.
+        fields = set(cls.row_type.model_fields)
+        return [
+            cls.row_type(**{k: v for k, v in rec.items() if k in fields})
+            for rec in df.to_dict("records")
+        ]
 
     def build_or_load(
         self,
         dataset: RetrievalDataset,
         path: Path | str | None = None,
         start_id: int = 0,
+        qrels: QrelStore | None = None,
     ) -> list[T]:
         file = Path(path or self.default_dir) / "rows.parquet"
         if file.exists():
-            return type(self).load(path)
-        rows = self.build(dataset, start_id=start_id)
+            rows = type(self).load(path)
+            stale = {r.metric_name for r in rows} - {self.objective.name}
+            if stale:
+                raise ValueError(
+                    f"{file} holds rows scored with {sorted(stale)}, but this "
+                    f"builder is configured for {self.objective.name!r}. Delete "
+                    f"the file to rebuild, or point at a different path — "
+                    f"mixing objectives silently would corrupt every comparison."
+                )
+            return rows
+        rows = self.build(dataset, start_id=start_id, qrels=qrels)
         self.save(rows, path)
         return rows
 
 
 class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
-    """Sweep alpha over [0, 1] and pick the alpha that maximises NDCG@k."""
+    """Sweep alpha over [0, 1] and pick the alpha that maximises the objective."""
 
     row_type: ClassVar[type[FusionRow]] = GoldenDataset
     default_dir: ClassVar[Path] = Path("data/golden")
@@ -230,10 +245,11 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
     def __init__(
         self,
         strategy: WeightedFusionStrategy,
+        *,
+        objective: Objective | None = None,
         alpha_step: float = 0.1,
-        top_k: int = 10,
     ) -> None:
-        super().__init__(strategy, top_k)
+        super().__init__(strategy, objective=objective)
         self.alpha_step = alpha_step
 
     def build_row(
@@ -244,14 +260,14 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
         gold_qrel: dict[str, int],
         dataset_name: str,
     ) -> GoldenDataset:
-        best_alpha, best_ndcg, best_ranking = 0.0, -1.0, []
+        best_alpha, best_score, best_ranking = 0.0, -1.0, []
         for alpha in np.arange(0.0, 1.0 + self.alpha_step / 2, self.alpha_step):
             merged = self.strategy.rank(query, 1.0 - float(alpha), float(alpha))
-            score = ndcg_score(merged, gold_qrel, self.top_k)
-            if score > best_ndcg:
-                best_ndcg = score
+            score = self.objective.score(merged, gold_qrel)
+            if score > best_score:
+                best_score = score
                 best_alpha = float(alpha)
-                best_ranking = top_k_ids(merged, self.top_k)
+                best_ranking = self.objective.ordered(merged)
 
         return GoldenDataset(
             id=row_id,
@@ -259,9 +275,8 @@ class GoldenSetBuilder(FusionBuilder[GoldenDataset]):
             dataset_name=dataset_name,
             query=query,
             qdrant_answer=best_ranking,
-            gold_qrel=gold_qrel,
-            metric=best_ndcg,
-            metric_name=f"NDCG@{self.top_k}",
+            metric=best_score,
+            metric_name=self.objective.name,
             alpha=best_alpha,
             strategy_name=self.strategy.name,
         )
@@ -277,9 +292,10 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
         self,
         strategy: WeightedFusionStrategy,
         client: LLMScoreClient | None = None,
-        top_k: int = 10,
+        *,
+        objective: Objective | None = None,
     ) -> None:
-        super().__init__(strategy, top_k)
+        super().__init__(strategy, objective=objective)
         self._client = client or LLMScoreClient()
 
     def build_row(
@@ -292,18 +308,15 @@ class LLMFusionBuilder(FusionBuilder[LLMFusionDataset]):
     ) -> LLMFusionDataset:
         alpha = self._client.score(query) / LLMScoreClient.SCORE_MAX
         merged = self.strategy.rank(query, 1.0 - alpha, alpha)
-        metric = ndcg_score(merged, gold_qrel, self.top_k)
-        ranking = top_k_ids(merged, self.top_k)
 
         return LLMFusionDataset(
             id=row_id,
             query_id=query_id,
             dataset_name=dataset_name,
             query=query,
-            qdrant_answer=ranking,
-            gold_qrel=gold_qrel,
-            metric=metric,
-            metric_name=f"NDCG@{self.top_k}",
+            qdrant_answer=self.objective.ordered(merged),
+            metric=self.objective.score(merged, gold_qrel),
+            metric_name=self.objective.name,
             alpha=alpha,
             strategy_name=self.strategy.name,
         )
@@ -324,9 +337,10 @@ class BaselineBuilder(FusionBuilder[BaselineDataset]):
         strategy: FusionStrategy,
         dense_weight: float = 0.5,
         sparse_weight: float = 0.5,
-        top_k: int = 10,
+        *,
+        objective: Objective | None = None,
     ) -> None:
-        super().__init__(strategy, top_k)
+        super().__init__(strategy, objective=objective)
         self.dense_weight = dense_weight
         self.sparse_weight = sparse_weight
 
@@ -339,18 +353,15 @@ class BaselineBuilder(FusionBuilder[BaselineDataset]):
         dataset_name: str,
     ) -> BaselineDataset:
         merged = self.strategy.rank(query, self.dense_weight, self.sparse_weight)
-        metric = ndcg_score(merged, gold_qrel, self.top_k)
-        ranking = top_k_ids(merged, self.top_k)
 
         return BaselineDataset(
             id=row_id,
             query_id=query_id,
             dataset_name=dataset_name,
             query=query,
-            qdrant_answer=ranking,
-            gold_qrel=gold_qrel,
-            metric=metric,
-            metric_name=f"NDCG@{self.top_k}",
+            qdrant_answer=self.objective.ordered(merged),
+            metric=self.objective.score(merged, gold_qrel),
+            metric_name=self.objective.name,
             alpha=self.sparse_weight,
             strategy_name=self.strategy.name,
         )
@@ -377,11 +388,12 @@ class GoldenRoutingBuilder(FusionBuilder[GoldenRoutingDataset]):
         dense_strategy: FusionStrategy,
         hybrid_strategy: FusionStrategy,
         sparse_strategy: FusionStrategy,
-        top_k: int = 10,
+        *,
+        objective: Objective | None = None,
     ) -> None:
         # Base needs *a* strategy; hybrid is the natural default and self.strategy
         # is not read by this builder (build_row picks per-route below).
-        super().__init__(hybrid_strategy, top_k)
+        super().__init__(hybrid_strategy, objective=objective)
         self._routes: list[tuple[FusionStrategy, float]] = [
             (dense_strategy, 0.0),
             (hybrid_strategy, 0.5),
@@ -396,28 +408,33 @@ class GoldenRoutingBuilder(FusionBuilder[GoldenRoutingDataset]):
         gold_qrel: dict[str, int],
         dataset_name: str,
     ) -> GoldenRoutingDataset:
-        best_strategy, best_alpha = self._routes[0]
-        best_ndcg, best_ranking = -1.0, []
-        for strategy, effective_alpha in self._routes:
+        scores: dict[str, float] = {}
+        rankings: dict[str, list[str]] = {}
+        for strategy, _ in self._routes:
             merged = strategy.rank(query, 0.0, 0.0)  # routing endpoints ignore weights
-            score = ndcg_score(merged, gold_qrel, self.top_k)
-            if score > best_ndcg:
-                best_ndcg = score
-                best_strategy = strategy
-                best_alpha = effective_alpha
-                best_ranking = top_k_ids(merged, self.top_k)
+            scores[strategy.name] = self.objective.score(merged, gold_qrel)
+            rankings[strategy.name] = self.objective.ordered(merged)
+
+        # Strict `>` over routes in [dense, hybrid, sparse] order, so a tie
+        # resolves to the cheapest route to serve. Deliberate: hybrid pays for
+        # two retrievals plus fusion and should not win on an exact tie.
+        best_strategy, best_alpha = max(
+            self._routes,
+            key=lambda route: scores[route[0].name],
+        )
 
         return GoldenRoutingDataset(
             id=row_id,
             query_id=query_id,
             dataset_name=dataset_name,
             query=query,
-            qdrant_answer=best_ranking,
-            gold_qrel=gold_qrel,
-            metric=best_ndcg,
-            metric_name=f"NDCG@{self.top_k}",
+            qdrant_answer=rankings[best_strategy.name],
+            metric=scores[best_strategy.name],
+            metric_name=self.objective.name,
             alpha=best_alpha,
             strategy_name=best_strategy.name,
+            route_scores=scores,
+            route_rankings=rankings,
         )
 
 
@@ -445,7 +462,8 @@ class HybridRoutingBuilder(FusionBuilder[HybridRoutingDataset]):
         dense_max: int = 2,
         hybrid_max: int = 6,
         client: LLMScoreClient | None = None,
-        top_k: int = 10,
+        *,
+        objective: Objective | None = None,
     ) -> None:
         if not 0 <= dense_max < hybrid_max <= LLMScoreClient.SCORE_MAX:
             raise ValueError(
@@ -454,7 +472,7 @@ class HybridRoutingBuilder(FusionBuilder[HybridRoutingDataset]):
             )
         # The base needs *a* strategy; hybrid is the natural default and self.strategy
         # is not read by this builder (routing picks per-query below).
-        super().__init__(hybrid_strategy, top_k)
+        super().__init__(hybrid_strategy, objective=objective)
         self._dense = dense_strategy
         self._hybrid = hybrid_strategy
         self._sparse = sparse_strategy
@@ -481,18 +499,15 @@ class HybridRoutingBuilder(FusionBuilder[HybridRoutingDataset]):
         score = self._client.score(query)
         strategy, alpha = self._route(score)
         merged = strategy.rank(query, 0.0, 0.0)  # all routed strategies ignore weights
-        metric = ndcg_score(merged, gold_qrel, self.top_k)
-        ranking = top_k_ids(merged, self.top_k)
 
         return HybridRoutingDataset(
             id=row_id,
             query_id=query_id,
             dataset_name=dataset_name,
             query=query,
-            qdrant_answer=ranking,
-            gold_qrel=gold_qrel,
-            metric=metric,
-            metric_name=f"NDCG@{self.top_k}",
+            qdrant_answer=self.objective.ordered(merged),
+            metric=self.objective.score(merged, gold_qrel),
+            metric_name=self.objective.name,
             alpha=alpha,
             strategy_name=strategy.name,
         )

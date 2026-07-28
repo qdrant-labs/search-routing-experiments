@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
 
 import ir_datasets
@@ -48,7 +49,9 @@ class TrecDL2022(RetrievalDataset):
     _CORPUS_ID = "msmarco-passage-v2"
     _TEST_ID = "msmarco-passage-v2/trec-dl-2022"
 
-    def __init__(self, corpus_limit: int) -> None:
+    def __init__(self, corpus_limit: int | None = None) -> None:
+        """`corpus_limit` is only required by `materialize()`; callers that
+        only need queries + qrels via `load_metadata()` can leave it None."""
         self.corpus_limit = corpus_limit
         self._corpus_ds = ir_datasets.load(self._CORPUS_ID)
         self._test_ds = ir_datasets.load(self._TEST_ID)
@@ -71,7 +74,42 @@ class TrecDL2022(RetrievalDataset):
     def qrels(self) -> pd.DataFrame:
         return self._qrels_df
 
+    def load_metadata(self) -> None:
+        """Load queries + qrels only. Cheap (seconds) — no corpus touch.
+        For pipelines that need specific docs, follow with `fetch_docs`."""
+        self._qrels_df = pd.DataFrame(
+            [{"query_id": r.query_id, "doc_id": r.doc_id, "relevance": r.relevance}
+             for r in self._test_ds.qrels_iter()]
+        )
+        self._queries_df = pd.DataFrame(
+            [{"query_id": q.query_id, "text": q.text}
+             for q in self._test_ds.queries_iter()]
+        )
+
+    def fetch_docs(self, doc_ids: Iterable[str]) -> dict[str, str]:
+        """Return `{doc_id: text}` for a specific list of doc_ids.
+
+        Iterates the ~138M-passage corpus with early termination once
+        every requested id is found. Wall-clock depends on where the
+        ids land in ir_datasets' iteration order.
+        """
+        target = set(doc_ids)
+        found: dict[str, str] = {}
+        with tqdm(total=len(target), desc=f"docs:{self.name}") as bar:
+            for d in self._corpus_ds.docs_iter():
+                if d.doc_id in target and d.doc_id not in found:
+                    found[d.doc_id] = d.text
+                    bar.update(1)
+                    if len(found) == len(target):
+                        break
+        return found
+
     def materialize(self) -> None:
+        if self.corpus_limit is None:
+            raise ValueError(
+                "materialize() needs a corpus_limit; use "
+                "load_metadata() + fetch_docs() for targeted lookup"
+            )
         qrels_df = pd.DataFrame(
             [{"query_id": r.query_id, "doc_id": r.doc_id, "relevance": r.relevance}
              for r in self._test_ds.qrels_iter()]
@@ -139,7 +177,9 @@ class MSMarcoDev(RetrievalDataset):
     _CORPUS_ID = "msmarco-passage"
     _TEST_ID = "msmarco-passage/dev/judged"
 
-    def __init__(self, n_queries: int, seed: int = 0) -> None:
+    def __init__(self, n_queries: int | None = None, seed: int = 0) -> None:
+        """`n_queries` is only required by `materialize()`; callers that
+        only need queries + qrels via `load_metadata()` can leave it None."""
         self.n_queries = n_queries
         self.seed = seed
         self._corpus_ds = ir_datasets.load(self._CORPUS_ID)
@@ -163,7 +203,34 @@ class MSMarcoDev(RetrievalDataset):
     def qrels(self) -> pd.DataFrame:
         return self._qrels_df
 
+    def load_metadata(self) -> None:
+        """Load queries + qrels only. Cheap; no corpus touch.
+        For pipelines that need specific docs, follow with `fetch_docs`."""
+        self._qrels_df = pd.DataFrame(
+            [{"query_id": r.query_id, "doc_id": r.doc_id, "relevance": r.relevance}
+             for r in self._test_ds.qrels_iter()]
+        )
+        self._queries_df = pd.DataFrame(
+            [{"query_id": q.query_id, "text": q.text}
+             for q in self._test_ds.queries_iter()]
+        )
+
+    def fetch_docs(self, doc_ids: Iterable[str]) -> dict[str, str]:
+        """Return `{doc_id: text}` via the corpus docs_store — random
+        access, O(1) per lookup after the store is built."""
+        store = self._corpus_ds.docs_store()
+        ids = list(doc_ids)
+        return {
+            did: store.get(did).text
+            for did in tqdm(ids, desc=f"docs:{self.name}", unit="doc")
+        }
+
     def materialize(self) -> None:
+        if self.n_queries is None:
+            raise ValueError(
+                "materialize() needs n_queries; use load_metadata() + "
+                "fetch_docs() for targeted lookup"
+            )
         queries_df = pd.DataFrame(
             [{"query_id": q.query_id, "text": q.text}
              for q in tqdm(
