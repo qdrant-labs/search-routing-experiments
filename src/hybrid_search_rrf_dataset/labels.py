@@ -17,6 +17,7 @@ import pandas as pd
 
 from hybrid_search_rrf_dataset.fusion import FusionStrategy
 from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
+from hybrid_search_rrf_dataset.lanes import LANES
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
 from hybrid_search_rrf_dataset.retrieval import QuerySubset, RetrievalDataset
@@ -105,8 +106,17 @@ class RouteLabels:
             return existing[existing["dataset"] == key]
 
         subset = QuerySubset(source, wanted["query_id"])
+        excluded_df = subset.excluded()
+        exclusions = (
+            {
+                str(query_id): frozenset(group["doc_id"].astype(str))
+                for query_id, group in excluded_df.groupby("query_id")
+            }
+            if not excluded_df.empty
+            else None
+        )
         rows = GoldenRoutingBuilder(
-            dense, hybrid, sparse, objective=self.objective
+            dense, hybrid, sparse, objective=self.objective, excluded=exclusions
         ).build(subset, qrels=qrels)
 
         labelled = pd.DataFrame(
@@ -146,9 +156,11 @@ class RouteLabels:
     def coverage(self) -> pd.DataFrame:
         """Per-dataset progress: selected rows vs labelled, and the shape split.
 
-        `unlabelled` is just `selected - labelled`; it asserts no cause. In
-        practice the reason is that the dataset's corpus is not indexed or its
-        qrels were dropped by the registry's queries-only ingest.
+        `qrels_ready` counts selected rows whose lane has qrels on disk but no
+        label yet — the corpus-pending state between pass 1 and pass 2 (SPEC
+        d39b). `unlabelled` is just `selected - labelled`; it asserts no
+        cause. In practice a row is unlabelled because its lane's qrels are
+        not fetched, its corpus is not indexed, or the source never judged it.
         """
         labels = self.load()
         counts = (
@@ -166,6 +178,7 @@ class RouteLabels:
                     "dataset": dataset,
                     "selected": int(selected),
                     "labelled": done,
+                    "qrels_ready": self._qrels_ready(dataset, done),
                     "unlabelled": int(selected) - done,
                     ROUTES_DIFFER: int(shapes.get(ROUTES_DIFFER, 0)),
                     ALL_TIED: int(shapes.get(ALL_TIED, 0)),
@@ -175,3 +188,22 @@ class RouteLabels:
         return pd.DataFrame(rows).sort_values(
             ["labelled", "selected"], ascending=False, ignore_index=True
         )
+
+    def _qrels_ready(self, dataset: str, labelled: int) -> int:
+        """Selected rows joinable against the lane's on-disk qrels, minus the
+        already-labelled ones. 0 when the lane is unknown or not yet fetched."""
+        lane = LANES.get(dataset)
+        if lane is None:
+            return 0
+        qrels_path = self._out_dir.parent / lane.source.name / "qrels.parquet"
+        if not qrels_path.exists():
+            return 0
+        judged = set(
+            pd.read_parquet(qrels_path, columns=["query_id"])["query_id"].astype(str)
+        )
+        selected_ids = set(
+            self.selection.loc[
+                self.selection["dataset"] == dataset, "query_id"
+            ].astype(str)
+        )
+        return max(len(selected_ids & judged) - labelled, 0)

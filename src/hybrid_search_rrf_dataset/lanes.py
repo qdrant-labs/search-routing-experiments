@@ -1,0 +1,69 @@
+"""The lane table (SPEC d39c): composition key → acquisition owner.
+
+One entry per QQ-grounded composition dataset — 20 of the 21 (ORCAS is the
+parked click lane). Done lanes sit in the table and skip via `label()`'s
+idempotency; trec-dl-2022 is parked (d39g) but keeps its entry so coverage
+reads it honestly. `min_relevance` binarizes graded qrels per d37(a)/d39(d);
+the corpus policy is not a column — one threshold rule decides it (d39e).
+"""
+
+from typing import NamedTuple
+
+from hybrid_search_rrf_dataset.retrieval import (
+    BrightLane,
+    CrumbLane,
+    DBPediaLane,
+    LimitLane,
+    MiraclLane,
+    MSMarcoDev,
+    NFCorpus,
+    QuestLane,
+    RarbLane,
+    RetrievalDataset,
+    TrecDL2022,
+)
+
+
+class Lane(NamedTuple):
+    source: RetrievalDataset
+    min_relevance: int = 1
+    corpus_target: int | None = None
+    """Explicit exception to the computed 20/80 recipe (`CorpusRecipe` in
+    retrieval.py — answer_share/floor/ceiling are THE tunable parameters).
+    Set only when the recipe cannot decide: relevant docs exceed its
+    ceiling, or the lane's design requires the full corpus. None = the
+    target is computed from the lane's own qrels at materialize time."""
+
+
+LANES: dict[str, Lane] = {
+    "beir-nfcorpus": Lane(NFCorpus()),
+    "msmarco-passage-dev": Lane(MSMarcoDev()),
+    "trec-dl-2022": Lane(TrecDL2022(), min_relevance=2),
+    "rarb-math": Lane(RarbLane("math")),
+    # rarb-code: indexed at 100K before the 20/80 recipe — kept, cost paid
+    "rarb-code": Lane(RarbLane("code")),
+    "bright-aops": Lane(BrightLane("aops")),
+    "bright-leetcode": Lane(BrightLane("leetcode")),
+    "bright-theoremqa-questions": Lane(BrightLane("theoremqa_questions")),
+    "crumb-clinical-trial": Lane(CrumbLane("clinical_trial")),
+    # exception: 108,782 relevant (median 23 relevant docs/query — the
+    # benchmark's design) > recipe ceiling. Floor-plus-pad: every answer
+    # force-included + ~11K distractors. Was full-232K; shrunk 2026-07-29
+    # for embedding budget — the hard confusables (other queries' answers)
+    # are all in the forced set either way.
+    "crumb-code-retrieval": Lane(CrumbLane("code_retrieval"), corpus_target=120_000),
+    "crumb-legal-qa": Lane(CrumbLane("legal_qa")),
+    "crumb-paper-retrieval": Lane(CrumbLane("paper_retrieval")),
+    "crumb-set-operation-entity-retrieval": Lane(
+        CrumbLane("set_operation_entity_retrieval")
+    ),
+    "crumb-stack-exchange": Lane(CrumbLane("stack_exchange")),
+    "crumb-theorem-retrieval": Lane(CrumbLane("theorem_retrieval")),
+    "crumb-tip-of-the-tongue": Lane(CrumbLane("tip_of_the_tongue")),
+    "quest": Lane(QuestLane()),
+    # exception: full 50K by design — 46 relevant docs would compute to the
+    # floor and delete the stress test the dataset exists for
+    "limit": Lane(LimitLane(), corpus_target=50_000),
+    "dbpedia-entity": Lane(DBPediaLane()),
+    "miracl-en-dev": Lane(MiraclLane()),
+}
