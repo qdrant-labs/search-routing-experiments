@@ -11,7 +11,11 @@ import requests
 from pydantic import BaseModel, ConfigDict, Field
 from tqdm.auto import tqdm
 
-from hybrid_search_rrf_dataset.fusion import FusionStrategy, StrategyName
+from hybrid_search_rrf_dataset.fusion import (
+    FusionStrategy,
+    StrategyName,
+    derive_route,
+)
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
 from hybrid_search_rrf_dataset.retrieval import RetrievalDataset
@@ -280,12 +284,9 @@ class SingleStrategyBuilder(FusionBuilder[T], ABC):
 class RoutingBuilder(FusionBuilder[T], ABC):
     """Base for builders that choose among the three routes per query.
 
-    Route order is load-bearing: `_routes` is ordered [dense, hybrid, sparse]
-    and `max()` returns the first maximal element, so an exact tie resolves to
-    `dense_only`. That is currently a consequence of list order rather than a
-    deliberate cost rule — making it deliberate is tracked in TODOS (SPEC d37i),
-    and note `dense_only` is likely *not* the cheapest route to serve, since
-    BM25 needs no query-side transformer pass.
+    Route order in `_routes` is iteration order only — selection among
+    tied-best routes belongs to `fusion.derive_route` (SPEC d41), never to
+    list position.
     """
 
     def __init__(
@@ -333,6 +334,11 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
 
     The hybrid endpoint should be `PureRRFStrategy` to match production; pass
     anything else only for ablation.
+
+    `strategy_name` is the serving choice from `derive_route` (SPEC d41):
+    the cheapest route among the tied-best. On all-zero rows it degenerates
+    to the cheapest route overall and names the ranking the row carries, not
+    a label — labels.py stores route = null there.
     """
 
     row_type: ClassVar[type[FusionRow]] = GoldenRoutingDataset
@@ -345,14 +351,15 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
             )
             for strategy in self._routes
         }
-        best = max(self._routes, key=lambda s: assessed[s.name][0])
-        score, top_k = assessed[best.name]
+        scores = {name: s for name, (s, _) in assessed.items()}
+        serve = derive_route(scores)
+        score, top_k = assessed[serve]
         return self._row(
             ctx,
             score=score,
             top_k=top_k,
-            strategy_name=best.name,
-            route_scores={name: s for name, (s, _) in assessed.items()},
+            strategy_name=serve,
+            route_scores=scores,
             route_rankings={name: r for name, (_, r) in assessed.items()},
         )
 

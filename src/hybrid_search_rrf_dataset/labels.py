@@ -15,7 +15,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from hybrid_search_rrf_dataset.fusion import FusionStrategy
+from hybrid_search_rrf_dataset.fusion import (
+    TIE_TOLERANCE,
+    FusionStrategy,
+    derive_route,
+)
 from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
 from hybrid_search_rrf_dataset.lanes import LANES
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
@@ -29,15 +33,14 @@ ALL_TIED = "all_tied"
 ALL_ZERO = "all_zero"
 
 
-def outcome_shape(scores: dict[str, float], tolerance: float = 1e-9) -> str:
+def outcome_shape(scores: dict[str, float], tolerance: float = TIE_TOLERANCE) -> str:
     """Classify a query by whether its routes disagree.
 
     `ROUTES_DIFFER` is the only shape that teaches the router about
-    dense-vs-sparse. `ALL_TIED` says any route works, so the cheapest should be
+    dense-vs-sparse. `ALL_TIED` says any route works, so the cheapest is
     served — signal for the speed requirement, not the quality one. `ALL_ZERO`
-    means no route surfaced anything relevant, so **no valid label exists**: the
-    builder's argmax falls through to tie-break order and reports whichever
-    route is listed first, which is a fabricated label.
+    means no route surfaced anything relevant, so **no valid label exists**
+    and `route` is stored null (SPEC d41b).
     """
     if not scores:
         return ALL_ZERO
@@ -47,6 +50,15 @@ def outcome_shape(scores: dict[str, float], tolerance: float = 1e-9) -> str:
     if max(values) - min(values) <= tolerance:
         return ALL_TIED
     return ROUTES_DIFFER
+
+
+def route_label(scores: dict[str, float]) -> str | None:
+    """The stored label for one row: `derive_route` over the score vector,
+    null when no route retrieved anything (SPEC d41 — the scores are the
+    record, this is the derived serving decision)."""
+    if outcome_shape(scores) == ALL_ZERO:
+        return None
+    return str(derive_route(scores))
 
 
 class RouteLabels:
@@ -125,7 +137,7 @@ class RouteLabels:
                     "dataset": key,
                     "query_id": row.query_id,
                     "query": row.query,
-                    "route": str(row.strategy_name),
+                    "route": route_label(row.route_scores),
                     "score": row.metric,
                     **{f"score_{name}": value for name, value in row.route_scores.items()},
                     "shape": outcome_shape(row.route_scores),
@@ -152,6 +164,31 @@ class RouteLabels:
         self.labels_path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_parquet(self.labels_path, index=False)
         return labelled
+
+    def rederive(self) -> pd.DataFrame:
+        """Recompute `route` and `shape` for every stored row from the score
+        columns and rewrite the artifact — the d41 migration, and the standing
+        repair after any rule change (a cost-order flip, a tolerance change).
+        A re-derivation, never a re-run: no retrieval is involved.
+        """
+        labels = self.load()
+        if labels.empty:
+            return labels
+        names = [
+            c.removeprefix("score_")
+            for c in labels.columns
+            if c.startswith("score_")
+        ]
+
+        def derived(row: pd.Series) -> pd.Series:
+            scores = {name: row[f"score_{name}"] for name in names}
+            return pd.Series(
+                {"route": route_label(scores), "shape": outcome_shape(scores)}
+            )
+
+        labels[["route", "shape"]] = labels.apply(derived, axis=1)
+        labels.to_parquet(self.labels_path, index=False)
+        return labels
 
     def coverage(self) -> pd.DataFrame:
         """Per-dataset progress: selected rows vs labelled, and the shape split.
