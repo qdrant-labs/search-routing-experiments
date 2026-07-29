@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -131,8 +131,27 @@ class FusionBuilder(ABC, Generic[T]):
     row_type: ClassVar[type[FusionRow]]
     default_dir: ClassVar[Path] = Path("data/fusion")
 
-    def __init__(self, *, objective: Objective | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        objective: Objective | None = None,
+        excluded: Mapping[str, Collection[str]] | None = None,
+    ) -> None:
         self.objective = objective or RouterObjective()
+        self._excluded = {
+            str(qid): frozenset(str(d) for d in docs)
+            for qid, docs in (excluded or {}).items()
+        }
+
+    def _ranked(self, strategy: FusionStrategy, ctx: QueryContext) -> dict[str, float]:
+        """Rank, then drop the query's excluded docs before scoring. Exclusion is per-query: a doc excluded here
+        can be another query's gold, so the corpus keeps it and the fetch
+        depth (1000) refills the cutoff."""
+        ranking = strategy.rank(ctx.query)
+        banned = self._excluded.get(ctx.query_id)
+        if not banned:
+            return ranking
+        return {doc: score for doc, score in ranking.items() if doc not in banned}
 
     def _iter_queries(
         self,
@@ -252,8 +271,9 @@ class SingleStrategyBuilder(FusionBuilder[T], ABC):
         strategy: FusionStrategy,
         *,
         objective: Objective | None = None,
+        excluded: Mapping[str, Collection[str]] | None = None,
     ) -> None:
-        super().__init__(objective=objective)
+        super().__init__(objective=objective, excluded=excluded)
         self.strategy = strategy
 
 
@@ -275,8 +295,9 @@ class RoutingBuilder(FusionBuilder[T], ABC):
         sparse_strategy: FusionStrategy,
         *,
         objective: Objective | None = None,
+        excluded: Mapping[str, Collection[str]] | None = None,
     ) -> None:
-        super().__init__(objective=objective)
+        super().__init__(objective=objective, excluded=excluded)
         self._routes = [dense_strategy, hybrid_strategy, sparse_strategy]
 
     def _by_name(self, name: StrategyName) -> FusionStrategy:
@@ -296,7 +317,7 @@ class BaselineBuilder(SingleStrategyBuilder[BaselineDataset]):
 
     def build_row(self, ctx: QueryContext) -> BaselineDataset:
         score, top_k = self.objective.assess(
-            self.strategy.rank(ctx.query), ctx.gold_qrel
+            self._ranked(self.strategy, ctx), ctx.gold_qrel
         )
         return self._row(
             ctx, score=score, top_k=top_k, strategy_name=self.strategy.name
@@ -320,7 +341,7 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
     def build_row(self, ctx: QueryContext) -> GoldenRoutingDataset:
         assessed = {
             strategy.name: self.objective.assess(
-                strategy.rank(ctx.query), ctx.gold_qrel
+                self._ranked(strategy, ctx), ctx.gold_qrel
             )
             for strategy in self._routes
         }
@@ -383,7 +404,7 @@ class HybridRoutingBuilder(RoutingBuilder[HybridRoutingDataset]):
     def build_row(self, ctx: QueryContext) -> HybridRoutingDataset:
         strategy = self._route(self._client.score(ctx.query))
         score, top_k = self.objective.assess(
-            strategy.rank(ctx.query), ctx.gold_qrel
+            self._ranked(strategy, ctx), ctx.gold_qrel
         )
         return self._row(
             ctx, score=score, top_k=top_k, strategy_name=strategy.name
