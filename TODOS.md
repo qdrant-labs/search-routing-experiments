@@ -24,16 +24,20 @@ Next actions, in order — (1) and (2) block everything else:
       so it does not touch `FusionBuilder`. `_iter_queries`' skip-on-no-
       qrels guard is correct and stays — removing it would fabricate a
       `dense_only` label per unlabelable query.
-- [ ] Unanswerable-query outcome, remaining half (d37i): the `shape`
-      column ships (`labels.py` `outcome_shape`; nfcorpus anchor: 77/323
-      all_zero), but the `route` column still fabricates a label for
-      all_zero rows via tie-break list order.
-- [ ] Deliberate tie-break rule, replacing incidental list order. Note
-      `dense_only` is likely not the cheapest route — BM25 needs no
-      query-side transformer pass.
+- [x] Unanswerable-query outcome, remaining half (d37i) — RESOLVED by
+      d41 (2026-07-29): all_zero rows carry `route = null` in
+      labels.parquet; the shape column already shipped.
+- [x] Deliberate tie-break rule, replacing incidental list order —
+      RESOLVED by d41 (2026-07-29): route = cheapest among the
+      tied-best (sparse < dense < rrf); quality first, cost only
+      between exact ties. Implementation tracked in the d41 section.
 - [ ] Retrieval latency benchmark for the three routes. Speed is one of
       three stated requirements and is entirely unmeasured;
       `data/engines.csv` benchmarks taxonomy extractors, not retrieval.
+      Now also validates d41(c)'s assumed sparse < dense cost order
+      (rrf > both components is structural); a flip re-derives the
+      route column in seconds, touching only all_tied + dense+sparse
+      tie rows.
 - [ ] Per-dataset corpus sizing. Indexing cost is uncorrelated with row
       yield: trec-dl needs 138M docs for 79 rows, miracl ~33M for 530,
       dbpedia ~4.6M for 400, while msmarco is 8.8M for 15,678.
@@ -59,12 +63,82 @@ Next actions, in order — (1) and (2) block everything else:
       84% dense). Finding: 53% of routes_differ rows are top-two ties
       whose label is argmax list order — feeds the tie-rule and
       label-form decisions.
-- [ ] Label form: argmax one-hot vs per-route score vector as training
-      target — decide after msmarco margins land (d38g).
+- [x] Label form: argmax one-hot vs per-route score vector — RESOLVED
+      by d41 (2026-07-29): score vector canonical (regression lean),
+      `route` a derived serving decision, decisive parameter-free
+      (margin ≥ 0.4 ≡ winner hit@1 ∧ runner-up missed).
 - [ ] msmarco corpus scale-up past 100K if margins look corpus-limited;
       recipe is a parameter, embedding cache amortizes the retry.
 - [ ] ORCAS click-lane labeling (other 31% of composition): clicks are
       `source='click'` relevance (d37d) — own decision, own session.
+
+## From generated-rows grill (2026-07-29, SPEC decision 40)
+
+- [ ] Coherence-gate pilot (d40e): LLM meaning-gate for doc-consistent
+      injections, validated against a human-audited sample (d34b audit
+      pattern) before any injected row enters the golden set.
+      d37(f)-compatible: need-identity is a function of the two query
+      texts — no information gap.
+- [ ] Generation-lane creation contract (d40c), when the lane opens:
+      (provenance, home_lane, grounding_doc_id, parent_query_id) required
+      at row birth; qrels minted mechanically with source='constructed';
+      undeclared operators ⇒ feature-stock.
+- [ ] QrelStore.source: add 'constructed' to the enum + priority
+      human > constructed > click > llm (d40b) — schema touch, do
+      together with the first constructed rows.
+- [ ] Multi-doc grounding for logical-structure features (d40g hard
+      case): set-operation/conditional queries whose answer is a doc
+      *set*, QUEST-style construction from category structure. Deferred —
+      harvest quest (928) and crumb-set-op (423) natural rows first;
+      generate only for cells they leave empty.
+- [ ] Generation-batch quality gauge (d40h): wire the per-batch
+      `all_zero` rate into the generation lane's verification loop once
+      the lane opens — construction failures surface as label-less rows,
+      no embedding metric anywhere in the gate.
+
+## From augmentation-loop grill (2026-07-29, SPEC decision 42)
+
+- [ ] Pass 1 (code-implementer): `src/augmentation` package — operator
+      registry + declaration schema (d42c/d), Augmenter agentic
+      tool-loop engine with bounded retries and final LOCAL verify
+      (d42g, closes the d2 gap), Decorate operator end-to-end over the
+      marker floors (the only gate-free family — earns credit day one).
+- [ ] Supply index build: one-time bank profile per lane corpus →
+      `data/<lane>/surfaces.parquet` (floor keys via floors.py mapping);
+      finish the augmentation_supply.ipynb readout (3 cells) → assign
+      each hungry id floor its ladder rung (d42f).
+- [ ] Mini-fill start-from-base mode on WeakestFirstFill +
+      `generated_from` column in the selection schema + minimum
+      natural-share recipe value (d42i/j; d33 binding now — number at
+      recipe review).
+- [ ] Declaration pilots (d42h, d34b audit pattern):
+      OperatorSyntaxRewrite and StatRewrite(length, up); credit unlocks
+      per entry on pass.
+- [ ] Inject: blocked on the d40e coherence-gate pilot (existing d40
+      item) + the supply index. Constructed-docs lane (d42k) built when
+      the synthetic rung first fires — never index new docs into an
+      existing collection.
+- [ ] Renames: Enricher → Augmenter, enrichment_supply.ipynb →
+      augmentation_supply.ipynb (user's Jupyter may hold the notebook
+      open — rename at implementation, not mid-session).
+- [ ] taxonomy_generators name dialect: registry/catalog use
+      group-prefixed feature names ("sentence_markers:politeness") while
+      verify counts bare bank names ("politeness") — bit the first live
+      Augmenter run 2026-07-29 (LLM passed a bare name to
+      generate_surface → KeyError). Engine now returns tool errors to
+      the LLM (self-corrects), but align the two dialects at the source.
+
+## From label-form grill (2026-07-29, SPEC decision 41)
+
+- [ ] Implement (code-implementer): `derive_route` + cost order in
+      fusion.py next to `StrategyName` (one place, no import cycles);
+      `GoldenRoutingBuilder` drops the list-order `max()`; labels.py
+      writes `route` via the rule with null on all_zero; decisive
+      readouts switch to margin ≥ 0.4.
+- [ ] Migration after wave 1 completes: one pandas re-derivation pass
+      over labels.parquet (route recomputed from the stored score
+      columns — no retrieval); §15/§17 readout cells re-read under the
+      new rule (quality headlines over decisive rows only).
 
 ## From qrels-acquisition grill (2026-07-29, SPEC decision 39)
 
@@ -101,18 +175,18 @@ cause, and the do-not-reuse warning for the cached judgments).
       2026-07-27); `datetime` (samples bare epoch seconds, "since
       1523759459") and `ip_address` (leading-zero octets, "0.4.251.255")
       — both observed in the enricher prototype run 2026-07-27.
-- [ ] Enrichment grounding layer (doc consistency + provenance of
-      augmented rows) — own grill-me session (d34a).
-- [ ] Corruption operators' home (taxonomy-generators vs parent lane) —
-      decide together with the R5 dark-matter work (d34d).
-- [ ] Orchestrator-LLM batch lane over the d34e tool registry — when the
-      order sheet demands volume. First prototype shipped 2026-07-27:
-      `src/check_generator.ipynb` Enricher (litellm tool loop over the
-      trio + instructor structured parse). Known d2 gap to fix before
-      production: the final text is never re-measured locally —
-      `features_used` is the LLM's self-report, and the instructor pass
-      can reword after the last in-loop verify. End the lane with a
-      local `verify()` on the returned text; raise or retry on FAIL.
+- [x] Enrichment grounding layer (d34a) — RESOLVED: golden-set half by
+      d40, generation-side design by d42 (supply index, Inject ladder,
+      operator declarations). Implementation lives in the d42 section.
+- [x] Corruption operators' home (d34d) — RESOLVED by d42(b): the
+      operator registry in `src/augmentation`; taxonomy_generators
+      stays grounding-blind surfaces + verify.
+- [x] Orchestrator-LLM batch lane (d34e) — SUPERSEDED by d42(g): the
+      Augmenter agentic tool loop IS the lane; the d2 gap (final text
+      never locally re-measured; instructor pass can reword after the
+      last in-loop verify — confirmed in code 2026-07-29) is closed by
+      the final-local-verify acceptance rule. Implementation in the d42
+      section.
 
 ## From feature-review of extractor-model generalization, 2026-07-16
 - [ ] Watch: edify ignore_case() flag scope if phrase_alternation is ever
@@ -170,8 +244,10 @@ cause, and the do-not-reuse warning for the cached judgments).
 - [ ] Provisional recipe values to revisit after the first fill's order
       sheet + lane split: ambiguity discounts (MODERATE 0.75,
       AMBIGUOUS 0.5), 1,000-weight floor size / slack margin.
-- [ ] Minimum natural share — becomes binding when the generation lane
-      starts filling order-sheet items.
+- [ ] Minimum natural share — BINDING now (d42 opens the lane). Home
+      decided by d42(i): a recipe value, enforced by the mini-fill,
+      never by the loop's own accounting. Remaining: set the number at
+      recipe review.
 - [ ] Near-duplicate gate. Finding (2026-07-27, `composition_embeddings`
       Act 3): the 50K carries ~5.5% near-duplicate pairs at cos > 0.95,
       concentrated in template-heavy sources (crumb-legal-qa, rarb-code)
@@ -220,8 +296,10 @@ cause, and the do-not-reuse warning for the cached judgments).
 - [ ] Floor precision target — one number (±points per cell → n via
       1/√n); decide together with the recipe values.
 - [ ] R2 label schema: pin (dense_model, sparse_model, fusion, k, depth)
-      tuple in the label artifact; set tie margin ε; two-dense-model
-      kappa pilot on ~500 rows (low-kappa cells = stack artifacts).
+      tuple in the label artifact; two-dense-model kappa pilot on ~500
+      rows (low-kappa cells = stack artifacts). Tie margin ε resolved
+      by d41(e): ε = 0 — ties are exact, near-ties are thin-margin
+      routes_differ.
 - [ ] R3 corpus covariate: store corpus id with every label; measure
       per-cell cross-corpus score variance in the pilot — high variance
       un-defers corpus-relative features (vocabulary mismatch first).

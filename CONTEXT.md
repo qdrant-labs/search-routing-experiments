@@ -180,10 +180,52 @@ _Avoid_: labeling (labels = dense/sparse/hybrid ground truth, a later stage)
 
 **Augmentation**:
 Deriving new queries from existing ones by injecting or altering feature
-values (e.g. inserting identifiers to strengthen sparse signal). The
-LLM-with-tools edition weaves surfaces into an existing query, iterating
-against verify().
-_Avoid_: enrichment (same act — say augmentation)
+values (e.g. inserting identifiers to strengthen sparse signal). Since
+d42 the act is owned by the **augmentation loop**: order-sheet floors
+dispatch to declared [[operator-family]] classes (`src/augmentation`);
+the LLM only weaves, inside a bounded tool loop with the measuring tools
+and a range target; acceptance is always a fresh local re-measure of the
+returned text.
+_Avoid_: enrichment (same act — say augmentation), Enricher (the class
+is Augmenter since d42)
+
+**Operator family**:
+One augmentation operator class plus its declaration: floors served,
+selection rule (tables, never an LLM), grounding requirement, answer-key
+path (inherit parent qrels vs minted from the grounding doc), meaning
+preservation, and what re-measurement verifies it. Families: Decorate
+(markers), OperatorSyntaxRewrite, StatRewrite(axis, band) — one generic
+operator with per-(axis, direction) declaration entries, each piloted
+before earning credit — Inject (identifiers), Corrupt (programmatic, no
+LLM). Undeclared or unverifiable ⇒ feature-stock.
+_Avoid_: Expand/Compress as operators (they are StatRewrite entries),
+one generic enrich() endpoint
+
+**Supply index**:
+The one-time bank profile of a lane corpus — (doc_id, floor key, surface
+span) in composition floor-key units (the floors.py mapping) — so
+Inject's find_pair is a parquet join and demand (order sheet) and supply
+share units. `augmentation_supply.ipynb` is its readout.
+_Avoid_: LLM fit-scoring (selection is deterministic)
+
+**Constructed-docs lane**:
+The separate store for generated documents — (doc_id, source_dataset,
+for_query, text) — materialized as its own collection: constructed docs
+forced, distractors borrowed by value from `source_dataset`'s corpus.
+Never indexed into an existing lane collection: one added doc can steal
+rank-1 and silently falsify that lane's already-paid labels. Only the
+synthetic rung writes documents; every other operator is query-side
+only.
+_Avoid_: appending docs to an existing collection or corpus
+
+**Lineage (generated_from)**:
+Selection column on every row: null for natural rows, the parent
+query_id for constructed rows (d40c's parent_query_id landing in the
+selection schema). The parent-side "superseded" filter (has offspring →
+ignorable in diversity-focused cuts) is a derived view, never a stored
+column — one parent may have many children, and frozen rows are not
+mutated.
+_Avoid_: forward pointers written onto parent rows
 
 **Surface**:
 A generated text snippet exhibiting exactly one taxonomy feature — a valid
@@ -314,14 +356,19 @@ low-trust flag (d30d).
 _Avoid_: treating qrels-bearing rows as unbiased samples of anything
 
 **Strategy label**:
-The ground-truth retrieval strategy for a query — `dense_only`, `pure_rrf`,
-or `sparse_only` — determined empirically by running all three and scoring
-each with the [[router-objective]] (d37a; was "which strategy wins NDCG").
-Computed from retrieval outcomes, never asked of an LLM: dense-vs-sparse
-depends on corpus vocabulary and IDF, which are not in the query (d37f).
-The Strategy Router's target variable; not computed by the taxonomy.
-_Avoid_: class, category (overloaded with identifier types), continuous
-alpha (not a value the router can emit)
+The per-query record is the three per-route objective scores (d41),
+measured by running `dense_only`, `pure_rrf`, `sparse_only` and scoring
+each with the [[router-objective]] (d37a). The single-route `route`
+column is a *derived serving decision*: the cheapest route among those
+achieving the maximal score — quality first, cost only between exact
+ties (cost order sparse < dense < rrf) — and null when all scores are
+zero. Computed from retrieval outcomes, never asked of an LLM:
+dense-vs-sparse depends on corpus vocabulary and IDF, which are not in
+the query (d37f). The Strategy Router's target variable; not computed by
+the taxonomy.
+_Avoid_: treating `route` as the record (it is a view over the scores),
+argmax list order (dead, d41), class, category (overloaded with
+identifier types), continuous alpha (not a value the router can emit)
 
 **Router objective**:
 `0.7·HitRate@1 + 0.3·NDCG@10`, with a per-dataset `min_relevance`
@@ -340,8 +387,8 @@ Which of three situations a query's per-route scores fall into (d37i): all
 routes tied above zero (equivalent — send to the cheapest, the signal for
 the speed requirement), routes differ (the quality signal), or all routes
 zero (unanswerable — **no valid label exists**). Two of the three are
-usable; the all-zero case currently fabricates a label by falling through
-to tie-break order.
+usable; the all-zero case carries `route = null` (d41 — no label exists,
+so none is stored).
 _Avoid_: treating an all-zero tie as a `dense_only` label
 
 **Qrel hole**:
@@ -444,8 +491,32 @@ A lane directory holding `queries.parquet` + `qrels.parquet` but no
 corpus indexing (pass 2). Coverage reports its rows as `qrels_ready`.
 
 **Decisive label**:
-A `routes_differ` row whose winner hit rank 1 and leads the runner-up by
-≥ 0.06 — a label that is a fact about retrieval rather than a tie broken by
-argmax list order. The honest trainable count.
-_Avoid_: trainable rows (routes_differ alone overcounts — 53% of msmarco's
-were top-two ties)
+A `routes_differ` row whose winner hit rank 1 AND whose runner-up missed
+it — parameter-free, and under the lexicographic objective exactly
+margin ≥ 0.4 (d41; replaced the hand 0.06 band, which approximated this
+rule on all but 5 of 1,673 rows on disk). The honest trainable count,
+and the only rows quality-dominance headlines are read over.
+_Avoid_: trainable rows (routes_differ alone overcounts — 47% are exact
+top-two ties), margin ≥ 0.06 (dead)
+
+**Feature-stock**:
+A composition row without an answer key valid by construction — it serves
+feature diversity but is never argmax-labelled (d40a). Includes rows from
+undeclared augmentation operators and generations without grounding
+metadata.
+_Avoid_: unlabelled (that is a coverage state of labelable rows, not a
+category)
+
+**Meaning-preserving augmentation**:
+An augmentation operator declared to keep the original sentence meaning —
+typos, case damage, word-order corruption, politeness filler. Its rows
+inherit the parent query's qrels. The declaration is a required, explicit
+property on every operator; undeclared ⇒ feature-stock.
+_Avoid_: need-preserving (same concept, non-canonical phrasing)
+
+**Doc-consistent injection**:
+A need-narrowing augmentation whose injected surface is copied from the
+parent query's gold document, so that document still answers by
+construction. Golden only after the row-level coherence test passes
+(mechanism pending the d40e pilot).
+_Avoid_: grounded injection (grounding already means answerability)

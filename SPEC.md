@@ -869,7 +869,37 @@ breadth; strategy labeling is explicitly a later stage.
     decisions; the table records measured size and which branch fired.
     Expected: rarb/bright/crumb full; quest, dbpedia-entity,
     miracl-en-dev capped. Embedding budget ≈ 500–800K docs total,
-    cached.
+    cached. **Amended 2026-07-29 (i)**: the rule presumes relevant ≪ cap,
+    and crumb-code-retrieval breaks it (108,782 judged-relevant of a
+    232,444 corpus — 47% answer-dense intrinsically). `Lane.corpus_cap`
+    is the deliberate per-lane override for exactly this case; set to
+    250K there, so the lane indexes its full real corpus. A global
+    raise was rejected: it would drag five ~1M-passage crumb corpora
+    to the new cap for ~15h of embedding nobody asked for.
+    **Amended 2026-07-29 (ii): flat 100K default replaced by the 20/80
+    recipe, and the recipe is computed, not hand-written** —
+    `CorpusRecipe(answer_share=0.2, floor=10_000, ceiling=100_000)` in
+    retrieval.py; `target = clamp(relevant / answer_share, floor,
+    ceiling)` evaluated from each lane's own qrels at materialize time.
+    `LANES` carries only pinned exceptions with reasons
+    (`Lane.corpus_target`): crumb-code 120K (its 108,782 relevant — a
+    median of 23 relevant docs per query, the benchmark's design —
+    exceed the ceiling; floor-plus-pad chosen over full-232K for the
+    embedding budget, the hard confusables being in the forced set
+    either way), limit 50K (the recipe would compute the floor and
+    delete its stress-test design), rarb-code kept at its
+    already-embedded 100K. Rationale
+    (user-argued, measurement-backed): the label is an argmax over
+    three routes on the same index, and the corpus-room diagnostic
+    showed 9.3× corpus growth flips only 13.6% of labels while
+    `all_zero` only grows — distractor mass buys difficulty, not route
+    signal. The three recipe parameters are the tunable surface; floor
+    keeps every corpus above the strategies' fetch depth (trivial
+    ranking otherwise), ceiling stops answer-heavy lanes ballooning
+    (clinical computes to 198K unbounded). Wave-1 embedding ~25h →
+    ~11h. Caveat carried: lanes differ in corpus size, so cross-lane
+    margin comparisons pick up a size term; per-lane labels stay
+    internally valid.
     (f) *Pass-2 order: sparse signal first.* Wave 1, the ≤100K
     technical lanes — rarb-code, crumb-code-retrieval, bright-leetcode/
     aops/theoremqa, crumb-theorem/legal/clinical/stack-exchange/paper,
@@ -889,6 +919,233 @@ breadth; strategy labeling is explicitly a later stage.
     decision lands.
     — *The registry catalogs queries; lanes own their judgments. The
     distribution question is answered when the technical lanes land.*
+
+40. **Generated and augmented rows: golden only with an answer key valid
+    by construction** (grill-me 2026-07-29; resolves the golden-set half
+    of d34a; gates the generation lane before its first row exists —
+    measured: the current 50K is 100% natural, label_lane
+    {qrels: 34,256, deferred: 15,744 = ORCAS}).
+    (a) *The admission rule.* A row enters `labels.parquet` only when
+    its answer key follows from how the query was made: natural →
+    source qrels/clicks; doc_grounded → the grounding doc (a 1-known-
+    answer key — msmarco's regime, holes acknowledged per d37k);
+    augmented → only meaning-preserving operators (parent qrels
+    inherit) or doc-consistent injection (surface copied from the
+    parent's gold doc) that also passes the row-level coherence test;
+    synthetic → own closed-world lane with generator-emitted complete
+    qrels (LIMIT is the shipped precedent — 46 invented docs, 1,000
+    queries, enumerated key). Everything else is **feature-stock**:
+    composition-diversity value, never argmax-labelled. Fabricating a
+    label was rejected for the same reason `unlabelled` exists.
+    (b) *`constructed` is a first-class judgment source.*
+    QrelStore.source grows to {human, constructed, click, llm},
+    priority in that order — construction is definitional, clicks are
+    noisy behavior, the llm lane is unvalidated (ADR 0001). Filed
+    under llm it could never be filtered apart again.
+    (c) *Creation-time metadata contract.* Every non-natural row is
+    born carrying (provenance, home lane, grounding doc_id, parent
+    query_id where applicable); its qrels are minted mechanically from
+    that. A row without the metadata has nothing to mint from —
+    feature-stock by definition, no post-hoc debates.
+    (d) *Operators declare meaning preservation.* Every augmentation
+    operator states explicitly whether it preserves the original
+    sentence meaning (typos/case/word-order/politeness: yes;
+    identifier/date/constraint injection: no — those need (a)'s
+    doc-consistent path). Undeclared operator ⇒ its rows are
+    feature-stock. Default-deny, auditable in code review — same
+    spirit as the banks' ambiguity tiers.
+    (e) *Coherence test for injected rows, mechanism deferred to a
+    pilot.* Doc-sourced surfaces keep the answer valid but not the
+    query readable; user requirement: semantic sense must be tested,
+    not assumed. An LLM meaning-gate is d37(f)-compatible here — need-
+    identity between parent and augmented query is a function of the
+    two texts, no information gap — but ships only after validation
+    against a human-audited sample (d34b audit pattern). Until then,
+    injected rows stay feature-stock.
+    (f) *Label validity ≠ query realism.* Routes score the (query,
+    corpus, index) triple regardless of who wrote the query; what
+    generation risks is distributional realism, which is d34(b)'s
+    concern, not the label's.
+    (g) *Construction-order rule: if the sentence must adapt to the
+    surface, invert — the surface's document becomes the grounding doc
+    and the row is doc_grounded.* Injection is only safe when the
+    surface comes from the parent's own gold doc, because a document's
+    vocabulary fits its own topic (a MAC address from a networking doc
+    reads naturally in the networking query it grounds); a foreign
+    surface (a DrugBank id into an internet sentence) is simply
+    unavailable to inject, and "adapting the sentence until it fits"
+    is generation wearing augmentation's clothes — parent qrels void.
+    Splice-then-adapt is banned. Grounding docs are drawn **from the
+    existing lane corpora** (`<lane>_routes`), so the generated row's
+    answer sits among its natural distractors, pre-indexed and
+    pre-embedded, and the row declares that `home_lane` per (c). For
+    logical-structure features, prefer harvesting natural supply first
+    (quest, crumb-set-op own those cells); generate only for cells no
+    dataset fills.
+    (h) *Construction success is read from retrieval outcomes, never
+    from an embedding metric.* Cosine similarity as a (query, doc)
+    validity check is rejected twice over: circular (the dense encoder
+    validating data that will judge the dense route) and directionally
+    biased (it would pre-filter the dataset toward dense-friendly
+    rows). The non-assumptive gauge already exists: run the three
+    routes and read the shape — a mis-constructed row comes back
+    `all_zero`, which d37(i) already declares label-less, and
+    rejection by all_zero is symmetric across routes (a row no route
+    can answer carries no routing signal). The per-batch `all_zero`
+    rate is the generation lane's construction-quality metric, free
+    and model-free.
+    — *No answer key by construction, no route label. The golden set
+    stays a measurement, not a guess.*
+
+41. **Label form: the score vector is the record; the route column is a
+    derived serving decision** (grill-me 2026-07-29; resolves d37i's
+    tie-break + all_zero halves and d38's label-form deferral. Measured
+    over the 15,413 rows on disk mid-wave-1: 73% of `route` values were
+    decided by Python list position — 3,769 exact top-two ties inside
+    routes_differ, 5,688 all_tied, 1,745 all_zero — not by retrieval).
+    (a) *Canonical label = the three per-route objective scores*,
+    already stored on every row. A tie is honest by construction — two
+    equal numbers assert no winner. Training leans regression over the
+    vector; any classifier target is derived from it by (b)'s rule,
+    never stored as a separate truth.
+    (b) *Route derivation — quality first, cost second:* `route` = the
+    cheapest route among those achieving the maximal score; null when
+    the max is 0 (all_zero: no route worked ⇒ no label — ends the 1,745
+    fabricated `dense_only`). Cost never overrides quality: sparse at
+    0.0 cannot take a row whose tied-best is {dense 1.0, rrf 1.0}. A
+    tied row's route is the operationally correct decision, not a
+    tie-break hack — when quality is equal, serve the cheapest — so the
+    column encodes production's actual job.
+    (c) *Cost order `sparse_only < dense_only < pure_rrf`.* rrf costlier
+    than each component is structural (it runs both plus fusion) and
+    settles 3,744 of the 3,769 pair ties assumption-free; sparse <
+    dense (no query-side transformer pass) is the single assumption,
+    pending the latency benchmark (TODOS), load-bearing only for
+    all_tied rows + 25 dense+sparse ties, reversible by re-derivation
+    in seconds.
+    (d) *Decisive redefined parameter-free:* winner hit rank-1 AND
+    runner-up missed rank-1 — under the lexicographic objective exactly
+    margin ≥ 0.4. Replaces the hand 0.06 band, which was unknowingly
+    approximating it (1,673 vs 1,668 on the rows on disk; the 5 lost
+    rows are both-hit tail differences, not route separations).
+    (e) *Ties are exact* (`outcome_shape`'s 1e-9 tolerance). Near-ties
+    stay routes_differ with a thin margin; margin and winner-set are
+    read-time derivations, never stored columns. Resolves d33/R2's "set
+    tie margin ε": ε = 0.
+    (f) *One rule, one place:* `derive_route` + the cost order live
+    where `StrategyName` lives (fusion.py), importable by golden.py and
+    labels.py without cycles. `GoldenRoutingBuilder.strategy_name` = the
+    serving choice (non-null; all-zero degenerates to cheapest overall
+    — it names the ranking the row carries, not a label);
+    labels.parquet `route` = the label (null on all_zero). The
+    list-order `max()` dies at the source.
+    (g) *Migration is a re-derivation, not a re-run:* one pandas pass
+    over labels.parquet after wave 1 lands rewrites `route` from the
+    stored scores; notebook readouts switch to (d)'s decisive. Reading
+    rule: quality-dominance headlines are read over decisive rows only
+    — the raw route column now mixes quality winners with cost policy
+    on tied rows (sparse inherits the all_tied mass by design).
+    — *The scores are the measurement; the route is a decision computed
+    from them. Nothing in the golden set is a coin flip anymore.*
+
+42. **The augmentation loop: order-sheet floors filled by declared
+    operators over the composition's own rows** (grill-me 2026-07-29;
+    opens the d40-gated generation lane; resolves d34a's generation half
+    and d34d; makes d33's minimum-natural-share binding. Canonical term:
+    augmentation — enrichment stays an Avoid word; Enricher → Augmenter,
+    enrichment_supply.ipynb → augmentation_supply.ipynb).
+    (a) *One loop, one demand source.* While the order sheet has missing
+    credit: take the hungriest floor (stat bands drawn with probability
+    ∝ missing), dispatch to its operator, produce → verify → write.
+    Demand is never re-estimated from a fitted distribution — the
+    sheet's floors and bands (floors.py) are the computed truth.
+    (b) *Operator registry in a new `src/augmentation` package.*
+    Operators are grounding-aware (they mint qrels and read the order
+    sheet), so they cannot live in grounding-blind taxonomy_generators
+    (d34a); that package stays surfaces + verify. Corrupt operators
+    live in this registry too — d34d resolved. Sanity note: the new
+    machinery is flat — the registry is small classes; the supply index
+    is one parquet per lane plus a join; the mini-fill is one mode on
+    the existing fill.
+    (c) *Declaration schema, default-deny (d40d extended).* Every
+    operator declares: floors served, selection rule, grounding
+    requirement, answer-key path, meaning preservation, and
+    verifiable-by-what. Undeclared or unverifiable ⇒ feature-stock —
+    enforced for free by credit accounting, since floor credit is
+    computed from re-measured features only.
+    (d) *The families.* **Decorate** (markers; any parent; inherits
+    parent qrels). **OperatorSyntaxRewrite** — meaning-preserving
+    RESTRICTED: may restructure existing conjuncts and drop function
+    words, may not add content words; verify = operator span present +
+    content tokens unchanged; inherits. **StatRewrite(axis, band)** —
+    one generic operator for every stat floor, any axis, any direction;
+    near-parents preferred (smallest move = least meaning risk,
+    computed from the stats table); a per-(axis, direction) declaration
+    TABLE, each entry human-audit-piloted before earning credit — today
+    only (length, up) has demand; (length, down) or (nl_shape, down)
+    become declaration rows + pilots the day a band demands them, zero
+    new code (Compress is not a concept). **Inject** (identifiers; pair
+    from the supply index where the parent's gold doc contains the
+    surface; ONE surface per row; answer minted from the grounding doc,
+    source='constructed'). **Corrupt** (programmatic damage, no LLM —
+    R5).
+    (e) *Selection is deterministic — tables, never an LLM.* Span side:
+    the **supply index**, a one-time bank profile of each lane corpus
+    (doc_id, floor key, surface span), floor keys via the
+    composition/floors.py mapping so demand and supply share units.
+    Stat side: the feature table's scalars (eligibility rules like
+    widest_list_size ≥ 2 are stat rules). Side effect: the d34b realism
+    problem (garbage datetime/uri samples) never touches Inject —
+    doc-copied surfaces are real by construction; generated surfaces
+    survive only in the synthetic rung.
+    (f) *Inject's supply ladder*: parent's own gold doc → d40g
+    inversion (a lane doc carrying the surface becomes the grounding
+    doc; row doc_grounded) → synthetic closed-world rung. The rung is
+    read per floor from the supply index at run time — never assumed;
+    augmentation_supply.ipynb is the standing readout.
+    (g) *Inside every LLM operator: an agentic tool loop.* The LLM gets
+    the operator's measuring tools, the metric explained, and the
+    target as a RANGE (bands natively), iterating while the goal is
+    unreached under a bounded retry budget (exhaustion drops the row —
+    parents are plentiful). In-loop measurements steer and are never
+    the record: acceptance is a fresh LOCAL verify() on the returned
+    text — closes the Augmenter prototype's confirmed d2 gap (the
+    final instructor pass can reword after the last in-loop verify;
+    features_used was LLM self-report).
+    (h) *Admission sequencing (d40 applied).* Decorate earns credit
+    immediately (politeness-class declaration). OperatorSyntaxRewrite
+    and each StatRewrite entry: after their one-time human-audited
+    declaration pilots (d34b pattern). Inject: after the d40e per-row
+    coherence gate ships its pilot. Until their gate, rows bank as
+    feature-stock.
+    (i) *Integration: frozen base + deficit-only mini-fill.* The
+    existing 50K rows stay byte-identical — their labels are paid.
+    WeakestFirstFill gains a start-from-base mode: only the generated
+    pool, only the hungry floors, current credits as the opening
+    balance; caps and the minimum natural share enforced by the fill,
+    never by the loop's own accounting. The natural-share number lives
+    in the recipe (set at recipe review — d33 binding now). The
+    composition grows past 50K; slice-proportion drift is an eval-time
+    weighting concern (d30).
+    (j) *Lineage on every row*: `generated_from` — null for natural
+    rows, the parent query_id for constructed rows (d40c's
+    parent_query_id in the selection schema). The parent-side
+    "superseded" filter is a derived view: one parent may have many
+    children, and frozen rows are never mutated.
+    (k) *Constructed docs are a separate store, never an in-place index
+    write*: `constructed_docs` (doc_id, source_dataset, for_query,
+    text). Invariant: adding a doc to an existing lane collection
+    silently falsifies that lane's already-computed labels (a new doc
+    can steal rank-1). The synthetic rung therefore materializes its
+    OWN collection — constructed docs forced, distractors borrowed by
+    value from source_dataset's corpus (seeded, CorpusRecipe reused).
+    Only the synthetic rung writes documents; every other operator is
+    query-side only.
+    (l) *Batch gauge*: the per-batch all_zero rate at labeling time is
+    the construction-quality metric (d40h) — no embedding metric
+    anywhere in the loop.
+    — *Demand from the sheet, supply from the tables, meaning by
+    declaration, truth by re-measurement. The LLM only weaves.*
 
 ## Deferred questions
 
@@ -913,19 +1170,16 @@ breadth; strategy labeling is explicitly a later stage.
   dataset's doc_ids are currently dropped on ingest.
 - Strategy labeling stage: empirical dense/sparse/hybrid labels in
   `src/hybrid_search_rrf_dataset`, scored by d37(a)'s objective (was "via
-  NDCG"). Remaining: pool extraction and the unanswerable-query outcome
-  (d37i); corpus sizing settled composition-wide by d39(e)'s threshold
-  rule. Anchor yield (d37j) measured 2026-07-28, msmarco lane 2026-07-29:
+  NDCG"). Remaining: pool extraction; the unanswerable-query outcome
+  (d37i) resolved by d41 (route = null); corpus sizing settled
+  composition-wide by d39(e)'s threshold rule. Anchor yield (d37j)
+  measured 2026-07-28, msmarco lane 2026-07-29:
   `data/route_labels/labels.parquet` (8,020 rows).
 - Pass-1 reality check (d39): per-lane qrels_ready counts are unknown
   until the fetches run — msmarco's 49.1% says declared QQ grounding
   does not guarantee per-query coverage. Re-price wave order if a lane
   comes back thin. Qrels dialects (RAR-b tsv, BRIGHT gold_ids +
   excluded_ids, crumb/quest/limit lists) verified at implementation.
-- Label form: argmax one-hot vs the per-route score vector as the training
-  target (a classifier can sit on top of regression, not vice versa; near-
-  ties then teach "equivalent" instead of a fabricated winner). Leaning
-  score-vector; decide after msmarco margins land (d38g context).
 - msmarco corpus scale-up past 100K if margins look corpus-limited —
   recipe is a parameter (d38c), embedding cache amortizes the retry.
 - ORCAS click-lane labeling (the other 31% of the composition): clicks are
@@ -935,13 +1189,20 @@ breadth; strategy labeling is explicitly a later stage.
 - Next acquisitions: CLERC, the 9 unregistered BRIGHT splits, further BEIR
   subsets (ORCAS with `recommended_sample=100K` + 3 BRIGHT splits
   registered 2026-07-20, d21/d31).
-- Enrichment grounding layer: how augmented rows keep answerability (doc
-  consistency; provenance of natural-query + injected-surface rows) — own
-  session (d34a).
+- Enrichment grounding layer (d34a) — resolved: d40 (admission rules) +
+  d42 (generation-side design: supply index, Inject ladder, operator
+  declarations). Implementation tracked in TODOS d42.
+- StatRewrite entries beyond (length, up) — reopen when a band goes
+  hungry; a "telegram queries feel underrepresented" instinct is a
+  recipe/band question first, demand second (d42d).
+- Augmenter LLM model + cost envelope; retry-budget size — set at d42
+  implementation, informed by the Decorate pilot batches.
+- Hungry-floor rung assignment (d42f) — pending the supply-scan readout
+  (augmentation_supply.ipynb, three cells left to run).
 - Corruption operators' home (R5 programmatic damage):
   taxonomy-generators later wave vs parent-repo lane (d34d).
-- Orchestrator-LLM batch lane (d10's scripted loop) as a consumer of the
-  d34e tool registry — build when the order sheet demands volume.
+- Orchestrator-LLM batch lane (d10/d34e) — superseded by d42's Augmenter
+  (the agentic tool loop with local-verify acceptance IS that lane).
 - Realism overrides over the d34b defaults: which features need them is
   discovered empirically from seeded round-trip samples, not decided up
   front.
