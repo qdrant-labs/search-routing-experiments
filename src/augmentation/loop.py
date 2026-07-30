@@ -94,9 +94,10 @@ class AugmentationLoop:
                 break
             attempted += 1
             outcome = self.engine.run(
-                operator.instruction(floor),
+                operator.instruction(floor, parent),
                 f"Query: {parent['query']}",
                 operator.targets(floor),
+                tool_loop=operator.declaration.tool_loop,
             )
             if outcome.accepted:
                 candidate = operator.candidate(

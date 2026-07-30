@@ -30,9 +30,12 @@ for exactly these."""
 
 
 _FORMAL_FLOORS = ("logical:math_expression", "logical:code_fragment")
-"""Parents carrying embedded formal content are not decorated — a greeting
-on a geometry problem statement is register-incompatible (user-ruled
-2026-07-29); the floors column already knows who they are."""
+"""Parents carrying embedded formal content get help-request framing in the
+instruction instead of a bolted-on phrase (arch-validator 2026-07-30: the
+observed absurdity was the weave, not the parent class — "could someone
+help me with: <problem>" is attested register). Hard exclusion was
+reverted; it returns only as a computed rule if the d34b audit measures a
+high failure rate on these parents."""
 
 
 class DecorateOperator(Operator):
@@ -47,6 +50,7 @@ class DecorateOperator(Operator):
         meaning_preserved=True,
         verifiable_by="target marker span present on local re-measure",
         credit_gate=CreditGate.NONE,
+        tool_loop=False,   # the model hits marker targets blind — d42n
     )
 
     def __init__(self, seed: int = 0) -> None:
@@ -60,31 +64,36 @@ class DecorateOperator(Operator):
         return super().serves(floor) and self.marker(floor) in _DECORATIONS
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Checkable parents not already carrying the marker and free of
-        embedded formal content — filters on the selection's own `floors`
-        column, no bank run (d42e)."""
+        """Checkable parents not already carrying the marker — a filter on
+        the selection's own `floors` column, no bank run (d42e)."""
         lacks = ~selection["floors"].map(lambda floors: floor in floors)
-        conversational = selection["floors"].map(
-            lambda floors: not any(f in floors for f in _FORMAL_FLOORS)
-        )
-        return selection[lacks & conversational & selection["checkable"]]
+        return selection[lacks & selection["checkable"]]
 
-    def instruction(self, floor: str) -> str:
+    def instruction(self, floor: str, parent: pd.Series) -> str:
         """Per-call seeded vocabulary examples — variety is supplied by the
-        bank's own phrase list, never left to the LLM's favorite opener."""
+        bank's own phrase list, never left to the LLM's favorite opener.
+        Parent-aware: formal-content parents get help-request framing."""
         marker = self.marker(floor)
         sampled = generator_for(f"sentence_markers:{marker}").sample(self._rng, 4)
         examples = ", ".join(repr(s) for s in dict.fromkeys(sampled))
+        framing = (
+            (
+                "This query contains formal content (math or code): frame the "
+                "decoration as a real person bringing the problem somewhere "
+                "for help — like a forum post — never a phrase bolted onto a "
+                "bare statement. "
+            )
+            if any(f in parent["floors"] for f in _FORMAL_FLOORS)
+            else ""
+        )
         return (
             "Rewrite the user's search query by weaving in "
             f"{_DECORATIONS[marker]}. Vocabulary inspirations (adapt freely): "
             f"{examples}. Pick a phrasing that fits the query's tone and "
             "world, and vary it — never default to one stock opener; it may "
-            "sit at the start, middle, or end. Keep every content word and "
-            "the meaning unchanged. Add no other information: no names, "
-            "numbers, dates, or identifiers. Check your text with the "
-            f"verify tool (span feature {marker!r}), then return the final "
-            "query text."
+            f"sit at the start, middle, or end. {framing}Keep every content "
+            "word and the meaning unchanged. Add no other information: no "
+            "names, numbers, dates, or identifiers."
         )
 
     def targets(self, floor: str) -> Targets:

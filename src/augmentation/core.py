@@ -51,6 +51,10 @@ class Declaration(BaseModel):
     meaning_preserved: bool
     verifiable_by: str
     credit_gate: CreditGate
+    tool_loop: bool
+    """Engine mode (d42n): False = single-shot (one completion, local
+    accept, retry on feedback); True = agentic tool loop for operators
+    that chase ranges and need in-loop measuring."""
 
 
 class AugmentedCandidate(BaseModel):
@@ -88,8 +92,9 @@ class Operator(ABC):
         """Parents that fit — a table filter (d42e), never an LLM."""
 
     @abstractmethod
-    def instruction(self, floor: str) -> str:
-        """System prompt: what to weave and what must not change."""
+    def instruction(self, floor: str, parent: pd.Series) -> str:
+        """System prompt: what to weave and what must not change. Receives
+        the parent row so operators can adapt framing to its profile."""
 
     @abstractmethod
     def targets(self, floor: str) -> Targets:
