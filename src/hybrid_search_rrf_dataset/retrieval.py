@@ -258,9 +258,16 @@ class MaterializedDataset(RetrievalDataset, ABC):
         forced: list[dict[str, str]] = []
         pool: list[dict[str, str]] = []
         others = 0
+        # Source corpora can repeat rows (crumb code_retrieval ships 3,702
+        # exact-duplicate passages); duplicates would collapse onto one uuid5
+        # point at upload, so first occurrence wins here.
+        seen: set[str] = set()
         for doc in tqdm(
             self._iter_corpus(), desc=f"materialize:{self.name}", unit="doc"
         ):
+            if doc["doc_id"] in seen:
+                continue
+            seen.add(doc["doc_id"])
             if doc["doc_id"] in relevant:
                 forced.append(doc)
             else:

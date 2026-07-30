@@ -194,11 +194,20 @@ class BaseIndexer(ABC, Generic[T]):
                 wait=True,
             )
 
+        # Duplicate ids collapse onto one point under upsert, so the
+        # completeness check must count unique ids, not rows.
+        expected = len({str(p.id) for p in points})
+        if expected < len(points):
+            logger.warning(
+                "%s: %d duplicate point ids in this upload were collapsed by upsert.",
+                self.collection_name,
+                len(points) - expected,
+            )
         actual = self.client.count(self.collection_name, exact=True).count
-        if actual < len(points):
+        if actual < expected:
             raise RuntimeError(
                 f"Upload incomplete for {self.collection_name!r}: "
-                f"expected >={len(points)} points, got {actual}."
+                f"expected >={expected} points, got {actual}."
             )
 
     def upload_points_iter(
