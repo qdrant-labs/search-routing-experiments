@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from hybrid_search_rrf_dataset.fusion import (
@@ -189,6 +190,105 @@ class RouteLabels:
         labels[["route", "shape"]] = labels.apply(derived, axis=1)
         labels.to_parquet(self.labels_path, index=False)
         return labels
+
+    def _scored(self) -> tuple[pd.DataFrame, list[str]]:
+        """Stored labels plus two derived columns: `oracle` (best of the three
+        route scores) and `margin` (oracle minus runner-up). Returns the frame
+        and the score column names."""
+        labels = self.load()
+        score_cols = [c for c in labels.columns if c.startswith("score_")]
+        if labels.empty or not score_cols:
+            raise ValueError("No labelled rows on disk — nothing to read out.")
+        ordered = np.sort(labels[score_cols].to_numpy(), axis=1)
+        labels = labels.assign(
+            oracle=ordered[:, -1], margin=ordered[:, -1] - ordered[:, -2]
+        )
+        return labels, score_cols
+
+    def headroom_decomposition(self) -> pd.DataFrame:
+        """The headline three-level readout (SPEC d44a): what a single global
+        route earns, what picking the best route per collection earns, and
+        what a perfect per-query choice (the oracle) earns — each level's gain
+        relative to the previous one. The two gaps are the value of
+        collection-level and per-query routing respectively.
+        """
+        labels, score_cols = self._scored()
+        global_constant = max(labels[c].mean() for c in score_cols)
+        global_name = max(score_cols, key=lambda c: labels[c].mean())
+        lane_best = labels.groupby("dataset")[score_cols].mean().max(axis=1)
+        lane_n = labels.groupby("dataset").size()
+        per_collection = float((lane_best * lane_n).sum() / lane_n.sum())
+        oracle = float(labels["oracle"].mean())
+
+        levels = pd.DataFrame(
+            {
+                "level": [
+                    f"one global constant ({global_name.removeprefix('score_')})",
+                    "best constant per collection",
+                    "per-query oracle (ceiling)",
+                ],
+                "score": [float(global_constant), per_collection, oracle],
+            }
+        )
+        levels["gain_vs_previous_pct"] = (
+            levels["score"].pct_change().mul(100).round(1)
+        )
+        return levels
+
+    def headroom(self) -> pd.DataFrame:
+        """Per-lane routing-value ceiling (SPEC d44a), POOLED row last.
+
+        `headroom` = mean oracle minus the lane's best constant route — what a
+        perfect router would add over never routing at all. A ceiling, not an
+        achievement; the mandatory caveats live beside the table wherever it
+        is shown.
+        """
+        labels, score_cols = self._scored()
+        decisive = self.objective.decisive_margin
+
+        def one(group: pd.DataFrame, name: str) -> dict[str, object]:
+            means = {c: group[c].mean() for c in score_cols}
+            best = max(means, key=means.get)  # type: ignore[arg-type]
+            constant = float(means[best])
+            oracle = float(group["oracle"].mean())
+            gap = oracle - constant
+            return {
+                "dataset": name,
+                "labelled": len(group),
+                "oracle": round(oracle, 3),
+                "best_constant": best.removeprefix("score_"),
+                "constant": round(constant, 3),
+                "headroom": round(gap, 3),
+                "headroom_pct": round(100 * gap / constant, 1) if constant else 0.0,
+                "decisive_share": round((group["margin"] >= decisive).mean(), 3),
+                "all_zero_share": round((group["oracle"] <= 0).mean(), 3),
+            }
+
+        rows = [one(group, str(name)) for name, group in labels.groupby("dataset")]
+        rows.append(one(labels, "POOLED"))
+        return pd.DataFrame(rows)
+
+    def decisive_winners(self) -> pd.DataFrame:
+        """Winner counts over decisive rows only (winner hit rank 1, runner-up
+        missed — SPEC d41d), per lane plus a POOLED row. One-sided lanes show
+        why decisive share alone is not headroom: a single route can win every
+        decisive row and leave the constant nothing to improve on.
+        """
+        labels, score_cols = self._scored()
+        rows = labels[labels["margin"] >= self.objective.decisive_margin]
+        winners = (
+            rows[score_cols]
+            .idxmax(axis=1)
+            .str.removeprefix("score_")
+            .rename("winner")
+        )
+        table = pd.crosstab(rows["dataset"], winners)
+        table = table.reindex(
+            columns=sorted(c.removeprefix("score_") for c in score_cols),
+            fill_value=0,
+        )
+        table.loc["POOLED"] = table.sum()
+        return table.reset_index().rename(columns={"index": "dataset"})
 
     def coverage(self) -> pd.DataFrame:
         """Per-dataset progress: selected rows vs labelled, and the shape split.
