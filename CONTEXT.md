@@ -197,7 +197,10 @@ preservation, and what re-measurement verifies it. Families: Decorate
 (markers), OperatorSyntaxRewrite, StatRewrite(axis, band) — one generic
 operator with per-(axis, direction) declaration entries, each piloted
 before earning credit — Inject (identifiers), Corrupt (programmatic, no
-LLM). Undeclared or unverifiable ⇒ feature-stock.
+LLM). Operators also declare parent-relative structural checks
+(`structural(parent, text)`: no-new-spans, content tokens unchanged,
+literal surface containment), run after local accept (d43b). Undeclared
+or unverifiable ⇒ feature-stock.
 _Avoid_: Expand/Compress as operators (they are StatRewrite entries),
 one generic enrich() endpoint
 
@@ -479,11 +482,16 @@ qrels and documents for them.
 _Avoid_: dataset (ambiguous — the composition is *the* dataset), subset
 
 **Judgment source**:
-Where a relevance judgment came from: `human`, `click`, or `llm`
-(`QrelStore.source`, conflict priority in that order). Orthogonal to Lane —
-one lane's rows may eventually carry several sources.
+Where a relevance judgment came from: `human`, `constructed`, `click`, or
+`llm` (`QrelStore.source`, conflict priority in that order — d40b).
+Inherit-path augmented children copy the parent's judgments keeping
+`source='human'` — the judgment is still a human's, only the query changed
+under a declared meaning-preserving operator; the transfer is recorded in
+`inherited_from` (d43d). Orthogonal to Lane — one lane's rows may
+eventually carry several sources.
 _Avoid_: judgment lane (collides with Lane), label_lane (that column is the
-composition's provenance field, not the QrelStore source)
+composition's provenance field, not the QrelStore source), 'constructed'
+for inherited copies (the human judged the doc, not the construction)
 
 **Corpus-pending snapshot**:
 A lane directory holding `queries.parquet` + `qrels.parquet` but no
@@ -498,6 +506,64 @@ rule on all but 5 of 1,673 rows on disk). The honest trainable count,
 and the only rows quality-dominance headlines are read over.
 _Avoid_: trainable rows (routes_differ alone overcounts — 47% are exact
 top-two ties), margin ≥ 0.06 (dead)
+
+**Headroom**:
+The measured value of routing: mean per-query oracle (best of the three
+route scores) minus the best constant route's mean, same rows. Measured
+2026-07-30 (24,338 rows): +15.8% total ceiling, decomposing into the
+[[per-collection-constant]] gain (+6.3%) and the per-query residual
+(+9.0%). A ceiling — what a perfect router would capture, not what a
+trained one will (published QPP-driven selection achieved ≤~4%). Always
+quoted with d44(a)'s caveats: arbitrary lane mix, feature-diversity
+composition, holes unmeasured, stack-pinned.
+_Avoid_: quoting pooled headroom bare, reading decisive share as
+headroom (limit: 43% decisive, 0.3% headroom — one-sided decisiveness
+is already captured by the constant)
+
+**Per-collection constant**:
+The best single route for a whole collection (nfcorpus → rrf, msmarco →
+dense). Picking it right — a collection-level decision needing no
+per-query intelligence — captures +6.3% over one global constant; the
+tier-one product and d44(c)'s side test (16 predictions from collection
+statistics alone).
+_Avoid_: conflating with per-query routing, "default route" (that is
+the production classifier's fallback, not this)
+
+**Collection statistics**:
+The six per-(query, lane) scalars of d44(b): avg/max query-term IDF in
+the lane corpus, OOV share, collection size N, avgdl, query-vocabulary
+overlap share. The router's corpus eyes — computed offline from
+`corpus.parquet` after labeling, stored in
+`collection_features.parquet` beside the frozen labels. Lineage:
+resource selection (CORI/ReDDE/Taily) — stats transfer to unseen
+collections; query-only predictors do not.
+_Avoid_: corpus features (vague), computing them at labeling time
+(router features, never label inputs), editing labels.parquet to hold
+them
+
+**Transfer pilot**:
+d44(c)'s two-protocol experiment. Protocol (i): hide a random 20% of
+every lane's queries, train on the rest — "new queries on a known
+collection". Protocol (ii): hide one entire lane, train on the other
+15, rotate through all 16 — "a collection never seen". Each runs with
+and without collection statistics; the (i)−(ii) gap IS the
+corpus-dependence measurement, and the statistics succeed iff they
+shrink it. Random splits must be near-duplicate-aware (~5.5% cos>0.95
+pairs).
+_Avoid_: "leave-one-lane-out" without unpacking it, running only one
+protocol, reading protocol-(i) success as transfer
+
+**List-preference judge**:
+An LLM shown the query plus each route's retrieved top-10 and asked
+which list answers best — pairwise, order swapped between two askings,
+ties allowed. Sees corpus evidence, so d37(f)'s information gap does
+not apply; still a judge, so it is calibrated against the empirical
+spine and never trusted raw. Scope today: the d44(d) spike (500 rows,
+3 lanes, agreement vs empirical routes on decisive rows; thresholds
+80/60).
+_Avoid_: judging bare queries (d37f), graded pointwise scales
+(ADR 0001), conflating with [[llm-as-judge]] (that term is per-document
+relevance; this one prefers between result lists)
 
 **Feature-stock**:
 A composition row without an answer key valid by construction — it serves

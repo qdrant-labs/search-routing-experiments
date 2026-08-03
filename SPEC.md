@@ -1144,8 +1144,487 @@ breadth; strategy labeling is explicitly a later stage.
     (l) *Batch gauge*: the per-batch all_zero rate at labeling time is
     the construction-quality metric (d40h) — no embedding metric
     anywhere in the loop.
+    (m) *Decorate pilot amendments (arch-validator 2026-07-30, first
+    live batch as evidence).* Diversity: seeded bank-vocabulary
+    exemplars vary per call — instruction-only pressure was refuted by
+    the observed mode collapse ("Hi there," on every row) and is
+    literature-consistent (typicality bias); a per-batch
+    surface-concentration readout (bank-measured, model-free) is the
+    check, escalating to a rejection cap only if the readout proves the
+    exemplars insufficient. Register fit: the hard exclusion of
+    formal-content parents was REVERTED — the failure was the weave,
+    not the parent class ("could someone help me with: <problem>" is
+    attested register); the instruction is parent-aware instead
+    (help-request framing when the parent carries
+    logical:math_expression / logical:code_fragment), and exclusion
+    returns only as a computed rule if the d34b audit measures a high
+    failure rate on these parents. Pool persistence: per-acceptance
+    append (crash loss ≤ 1 row ≈ 5s vs ~1.2h of paid calls end-of-batch
+    on a greeting-size run; parameter-free — a chunk size would be a
+    hand number; partial pool is harmless, the mini-fill is the door).
+    Verdicts keep/switch/keep, confidence HIGH/MEDIUM/HIGH.
+    (n) *Engine interaction modes (runtime session 2026-07-30).* The
+    Augmenter runs one of two modes per the operator's declared
+    `tool_loop` field. Single-shot (False, Decorate): one completion,
+    no tools, local accept, retry-on-feedback — ~10s/row measured under
+    the old three-call flow drops to one call (~3s). Tool loop (True,
+    the range-chasing operators): the taxonomy_generators trio plus a
+    `submit_text` control tool — the model ends by CALLING submit_text,
+    so extraction is the tool call's arguments and the instructor
+    completion is gone (one round-trip saved per attempt, and with it
+    the d2 reword window). Operators describe the task; the engine owns
+    the interaction-protocol lines. Local accept() stays the only gate
+    in both modes. Batch concurrency and prompt caching deliberately
+    deferred to the 861-row batches.
     — *Demand from the sheet, supply from the tables, meaning by
     declaration, truth by re-measurement. The LLM only weaves.*
+
+43. **The full-loop build-out: three passes, measured supply first**
+    (grill-me 2026-07-30; sequences the remaining d42 machinery so
+    every pseudocode branch goes live. Decorate + engine + pool already
+    piloted — 28 politeness rows staged awaiting admission).
+    (a) *Pass 2 = the mini-fill (d42i), before any new operator.* It is
+    the only piece that closes the loop: admits staged rows into the
+    frozen-base selection, re-computes credits, enforces the natural
+    share, re-emits the order sheet. Until it exists `missing` never
+    moves and every batch only grows the queue — observed live with the
+    politeness pilot. Pass 3 = the corpus-free operators
+    (OperatorSyntaxRewrite, StatRewrite) plus the structural hook —
+    gated only by their one-time declaration audits. Pass 4 = the
+    Inject stack (supply index, InjectOperator, minted qrels, d40e
+    coherence pilot) — double-gated, so last.
+    (b) *Structural checks are an operator hook.*
+    `structural(parent, text) -> failure reasons` (default none), run
+    by the loop after accept(); any failure drops the row, reason
+    logged. Needed because the remaining checks compare child against
+    PARENT — no-new-spans (StatRewrite), content tokens unchanged
+    (OperatorSyntaxRewrite), literal surface containment (Inject) —
+    which absolute Targets cannot express. Comparative Targets in
+    taxonomy_generators rejected (grounding-blind package would grow an
+    augmentation-only concept); ad-hoc in-operator checks rejected
+    (undeclared). When the d34b audit rules on the observed Decorate
+    restructurings, a Decorate content-word check is a one-line
+    addition here. Refined at the 2026-07-30 arch/clean-code pass:
+    `structural` and `serves` are ABSTRACT — an operator with no
+    parent-relative check declares `return []` with its reason, never
+    inherits silence (d42c default-deny applied to the hook itself);
+    Declaration.floor_prefix became `floors`, a human-readable
+    statement, dispatch lives in serves().
+    (c) *Supply index = full per-lane artifact.*
+    `data/<lane>/surfaces.parquet` (doc_id, floor key, bank, surface) —
+    one idempotent regex pass per corpus, user-triggered like every
+    corpus job. Serves all three consumers: rung-1 pair joins, rung-2
+    inversion lookup, and the rung-assignment readout — per-floor
+    capacities measured BEFORE any LLM spend ("id:datetime: N direct
+    pairs, M inversion docs; id:logistics: 0/0 → synthetic"). Lazy
+    scans rejected: re-pay every batch, cannot produce the readout.
+    (d) *Answer keys are born with the row.*
+    `data/augmentation/qrels.parquet`, written at candidate creation
+    (d40c born-with), columns (query_id, doc_id, relevance, source,
+    inherited_from). Source semantics refine d40b: minted keys
+    (Inject, synthetic) carry source='constructed'; inherit-path
+    children COPY the parent's judgments keeping source='human' — the
+    judgment is still a human's, only the query changed under a
+    declared operator — with inherited_from recording the transfer.
+    QrelStore merges by its existing priority at labeling. Per-lane
+    qrels_constructed files rejected (lane dirs stay pure source
+    snapshots); minting at admission rejected (key-less pool rows are
+    unauditable).
+    (e) *Substrate facts pinned.* The stats table exists —
+    `data/feature_table/catalog.parquet` (225,752 × 60) carries the
+    scalars for StatRewrite/OperatorSyntaxRewrite eligibility
+    (selection ⋈ catalog, near-parents first); stat-band floor keys
+    parse against composition.catalog_axes band definitions, never
+    re-derived; child-side stat verify needs the spaCy extractor
+    (FeatureExtractor(engines=None) + the pinned en_core_web_sm),
+    wired per operator via the Augmenter's extractor parameter.
+    — *The sheet moves only through the fill; supply is measured
+    before it is spent; every key is born with its row.*
+
+44. **Corpus-conditioned routing: the headroom readout is recorded, the
+    router gains collection eyes, and two pilots gate every scale-out
+    claim** (grill-me 2026-07-30; informed by the 10-thread labeling-
+    strategy research in `docs/research/route-label-sourcing.md` and by
+    arXiv:2504.01101's negative results; resolves d37(l)'s blocker with
+    a concrete feature list).
+    (a) *The headroom readout is a recorded fact with mandatory
+    caveats.* Measured 2026-07-30 over the 24,338 labelled rows
+    (16 lanes): always-dense 0.481 mean objective; best constant PER
+    collection 0.511 (+6.3%); per-query oracle 0.557 (+9.0% further,
+    +15.8% total). Decisive rows 2,510 (10.3%); their winner split:
+    dense 1,858 / sparse 507 / rrf 145 — equal class thirds are
+    structurally impossible under the top-1-primacy objective; the skew
+    is the finding. Per-lane ceiling runs 0.3% (limit — 43% decisive
+    but one-sided, so the constant already captures it) to 28.7%
+    (crumb-theorem); technical/entity lanes carry 20–29%, msmarco 6.6%.
+    Caveats travel with the numbers, always: oracle is a ceiling, not
+    an achievement (published QPP-driven selective processing *achieved*
+    ≤~4%, arXiv:2504.01101, whose Fig. 4 single-predictor selection
+    "seldom outperform[s] the individual system"); the pooled figure
+    depends on an arbitrary lane mix (msmarco alone is 32% of rows and
+    drags it toward its 6.6%); the composition optimizes feature
+    diversity (d32), never routing signal — **this dataset is not an
+    optimal routing dataset and the readout must say so wherever it is
+    shown**; qrel holes unmeasured (d37k); stack-pinned to bge-small
+    (R2 pilot queued). Lands as a permanent route_labels.ipynb section
+    that prints the caveats beside the table (closes d39's "re-read the
+    distribution" item), re-runnable as lanes land.
+    (b) *Six collection statistics as a side artifact; labeling
+    untouched.* Per (query, lane): avg-IDF and max-IDF of the query's
+    terms in the lane corpus, OOV share (query terms absent from the
+    collection vocabulary), collection size N, avgdl, query-vocabulary
+    overlap share. One offline counting pass over each lane's existing
+    `corpus.parquet` (tokenizer declared and pinned in the artifact);
+    written to `data/route_labels/collection_features.parquet` keyed
+    (dataset, query_id). labels.parquet stays frozen — paid labels are
+    never edited; the stats are router features computed after
+    labeling, so golden-set creation gains zero extra cost (the only
+    standing obligation, corpus.parquet on disk per lane, is already
+    the snapshot layout). Mechanism lineage: resource selection
+    (CORI/ReDDE/Taily; TREC FedWeb 2013–14) — collection statistics
+    transfer to unseen collections, while query-only predictors do not
+    ("with collections as the main factor and rankers next",
+    arXiv:2504.01101, ANOVA-backed; see
+    docs/research/federated-search-resource-selection.md).
+    (c) *Transfer pilot: two protocols, and the gap between them is the
+    measurement.* One simple classifier (the five signals + span
+    features), evaluated under (i) a random 20% mask within every lane
+    — the existing-deployment question, near-duplicate-aware (the
+    ~5.5% cos>0.95 pairs must not straddle the split) — and (ii) a
+    hide-one-dataset rotation, each of the 16 lanes taking one turn
+    fully unseen during training — the new-customer question. Each
+    protocol runs with and without (b)'s features, raw and
+    per-collection-normalized. Metrics: share of held-out headroom
+    captured against the d37(h) best-constant bar; the (i)−(ii) gap
+    reported as the corpus-dependence measurement — (b) succeeds iff
+    it shrinks that gap. Side test, nearly free: can (b)'s six numbers
+    alone predict each lane's best constant (16 predictions — the
+    +6.3% tier, a collection-level product needing no per-query
+    router).
+    (d) *List-preference judge spike — promoted from deferred to now.*
+    ~500 stratified rows from three contrasting lanes (nfcorpus /
+    crumb-legal-qa / rarb-math); the judge sees the query plus each
+    route's stored top-10 (route_rankings, d37e — zero new retrieval,
+    docs read from the lane corpus parquets); strongest current model;
+    every comparison asked twice with list order swapped, ties allowed;
+    agreement vs the empirical route read over decisive rows.
+    Thresholds: ≥80% agreement → the scalable-labeling path opens
+    (hole-filling d37k, then real-query labeling); 60–80% → judge-panel
+    design; <60% → that number goes into the CTO conversation as-is.
+    d37(f) is not violated: the judge sees retrieved lists — corpus
+    evidence — never the bare query; it stays calibrated against the
+    empirical spine, never trusted raw.
+    (e) *Named-deferred with reopen triggers.* Per-deployment
+    auto-benchmark (SEARA pattern: generate style-diversified queries
+    from a customer corpus via taxonomy-generators, label empirically
+    on their own index; d40's admission rules already fit): reopens
+    when (c) reads positive AND a per-customer consumer exists.
+    Interleaving on page-search (production click truth, aggregate
+    first): reopens with the log acquisition already in TODOS. Evidence
+    map for both: docs/research/route-label-sourcing.md.
+    — *The labels stay measurements; the router learns to read the
+    collection it serves; every scale-out claim now has a number to
+    beat.*
+
+45. **Measure the distance before collecting: two cheap experiments on
+    existing data drive everything downstream** (grill-me 2026-07-30;
+    executes d44's pilot as a build plan; human-readable twin at
+    `PLAN.md`). Standing finding this decision acts on: the composition
+    is selected for *feature diversity* (d32, serves the taxonomy demo),
+    which is a weak proxy for *routing signal* — measured, slices A/B
+    (feature-targeted) yield 8.5% / 8.2% decisive vs feature-blind C/D
+    at 13.4% / 12.6%. The labeling method is sound; the selection target
+    half-fits the golden set. So distance-to-a-usable-router is unknown
+    and is *measured*, not assumed, by two runs on data already on disk.
+    (a) *The classifier baseline (a day).* Decisive rows only (margin ≥
+    0.4 = winner hit rank 1, runner-up missed — d41d) become a
+    hard-label set: 2,510 rows, dense 1,858 / sparse 507 / rrf 145. Two
+    one-vs-rest binaries — P(dense-decisive), P(sparse-decisive) — and
+    the serving rule *both below threshold ⇒ pure_rrf*, which is not a
+    scarcity hack but the correct semantics: rrf is the hedge (d41's
+    "runs both", production's 3–6 band), so "neither component
+    confidently wins ⇒ fuse" is the right call, and it sidesteps the
+    145-row rrf class that is structurally unlearnable (fusion artifact,
+    d37g). If both fire, higher probability wins. rrf is never a trained
+    class; it is the residual.
+    (b) *Train on decisive, threshold on the full distribution.* The
+    model fits on clean decisive rows but its abstention thresholds are
+    set against a validation set that INCLUDES all_tied/thin-margin rows,
+    so ambiguous queries fall through to rrf instead of drawing a
+    confident wrong route. Training-only-on-decisive is otherwise
+    overconfident on the ambiguous rows it never saw.
+    (c) *Model ladder: instrument → workhorse → (not) NN.* v1 = logistic
+    regression, kept for its coefficients — the readout of WHICH
+    features carry routing signal is the instrument that validates or
+    refutes the taxonomy's founding bet, and a black box cannot give it.
+    v2 = gradient-boosted trees (LightGBM): captures the feature
+    interactions a linear model cannot, handles class imbalance and the
+    null/sparse features (corpus stats absent for unindexed lanes,
+    zero-span rows) natively, stays interpretable via importances. Deep
+    NN is REJECTED for this feature profile (~70 engineered tabular
+    features, thousands of rows): trees beat nets on tabular at this
+    scale (Grinsztajn 2022; Shwartz-Ziv & Armon 2021) and a
+    text-fine-tuned NN re-hits the d37f query-only ceiling. If query
+    text ever enters, it enters as a FROZEN bge-small embedding as extra
+    columns into the tree, never end-to-end fine-tuning. The v1→v2 swap
+    is one implementation change behind (d) 's API.
+    (d) *Stable API, swappable model.* A `predict(query, *,
+    collection_stats=None) -> StrategyName` surface (the two-binary +
+    rrf-fallback rule is the contract; logistic/LightGBM is the
+    implementation). The signature carries `collection_stats` from day
+    one even though v1 ignores it, so the d44(b) corpus features graft
+    in without an interface break.
+    (e) *Two validation protocols (d44c), the gap between them is the
+    measurement.* (i) random 20% within-lane mask — new queries on known
+    collections, near-duplicate-aware (the ~5.5% cos>0.95 pairs must not
+    straddle the split). (ii) hold ONE lane fully out — new collection
+    never seen. The (i)−(ii) gap is corpus-dependence. Hold-out lane =
+    **rarb-math**: the only lane with all three classes substantial and
+    a real dense/sparse balance (dense 334 / sparse 191 / rrf 61, ratio
+    0.57), so it tests transfer across every class. Cost recorded: it
+    holds 38% of all sparse-decisive rows, so the *transfer estimate*
+    trains on the other 15 lanes while the *shipped* model retrains on
+    all 16 — the hold-out measures generalization, it does not define the
+    deployed model. crumb-set-op (ratio 0.95, 47 rows) rejected as
+    hold-out: too small for a stable estimate.
+    (f) *Six-column eval, over decisive rows.* constant-dense /
+    constant-sparse / constant-rrf / production classifier / our router /
+    oracle ceiling. The bar is the best CONSTANT (d37h), not production
+    alone — a router that loses to `always-dense` is worthless whatever
+    it does against the incumbent.
+    (g) *The judge spike runs in parallel (d44d), not after.* It is a
+    different axis (labeling, not modeling) and blocks nothing, but its
+    result decides whether step-(5) redesign can be labeled at scale.
+    List-preference judge over stored top-10s (route_rankings, d37e —
+    zero retrieval), ~500 rows across nfcorpus / crumb-legal-qa /
+    rarb-math, calibrated against the ~24K empirical spine; thresholds
+    ≥80% agreement on decisive rows opens scale-labeling, 60–80% ⇒ panel,
+    <60% ⇒ the number goes to the CTO conversation. The ~24K empirical
+    labels are re-scoped: their first-class use is the judge's
+    calibration/validation spine, not router training data (they are
+    feature-curated, weak for that).
+    (h) *Results drive (5) and (6), which stay plans not builds.* (5)
+    composition redesign — the target becomes (query, corpus) signal,
+    not query-features alone; opened only by the experiments' failure
+    modes (loses on sparse ⇒ minority-class volume; loses everywhere ⇒
+    information gap ⇒ corpus stats). (6) augmentation into the pipeline —
+    collapses to Inject-only for the sparse class, gated behind the
+    realism validation that needs the orcas natural baseline (d44e), and
+    fires only if harvest leaves sparse starved. Both deliberately
+    unbuilt until the two experiments report.
+    — *Nobody in the room knows the distance yet; a day of logistic
+    regression and a day of judge spike replace the argument with a
+    number, and the number names the next data to collect.*
+
+46. **Track A build spec: three-representation ablation, encoder decoupled
+    from the label stack** (grill-me 2026-07-31; turns d45's classifier
+    into a build; human twin PLAN.md). Features already exist and join
+    clean: `data/feature_table/catalog.parquet` (57 numeric query
+    features — 8 continuous signals + 49 span counts, no nulls) covers
+    all 24,338 labelled rows on (dataset, query_id).
+    (a) *v1 ships the serving API, not just the experiment* (user, Q1):
+    `StrategyRouter` in `hybrid_search_rrf_dataset/router.py` with
+    `fit(features, labels)` / `predict_batch(df)` for the experiment AND
+    `predict(query, *, collection_stats=None) -> StrategyName` that
+    extracts features inline for serving. `collection_stats` present from
+    day one though v1 ignores it (d44b grafts in without a break).
+    (b) *Three feature configs, one pipeline, run as an ablation:*
+    (1) the 57 engineered features (interpretable, English, regex/spaCy);
+    (2) a frozen **intfloat/multilingual-e5-small** query embedding
+    (via sentence-transformers — added dep, user's call over fastembed
+    for speed/availability; e5 needs the `query: ` prefix), PCA-reduced
+    to ~50 dims; (3) both concatenated. The three headroom-captured
+    numbers ARE the finding — does the embedding add signal past the
+    taxonomy (3>1), can a free multilingual vector match it alone (2 vs
+    1).
+    (c) *The encoder is deliberately NOT bge-small-en* — the label
+    stack's dense retriever (user caught the bias). Feeding the
+    label-generating encoder back as a feature lets the classifier learn
+    a shortcut through bge's own quirks ("queries in region R of bge
+    space are dense-wins"), which inflates the score and collapses when
+    the dense encoder is swapped (R2). A different model breaks the
+    shared-representation shortcut and is the multilingual serving
+    candidate; the engineered features (regex/spaCy) are encoder-free by
+    construction, a second hedge. Labels stay bge-pinned (they are
+    retrieval outcomes) — decoupling the FEATURES means an encoder swap
+    moves only the label side, which R2 can then isolate. Multilingual
+    is future-proofing, not enabling-today: every labelled lane is
+    English (incl. miracl-en-dev), and a query encoder does NOT escape
+    the d37f corpus ceiling — it generalizes across languages, not past
+    the corpus blind spot; both representations still need d44b.
+    (d) *Model + rule.* Two one-vs-rest logistic binaries (dense, sparse),
+    `class_weight='balanced'`, standardized (fit on train only), L2.
+    Serving rule (d45a): both below threshold ⇒ pure_rrf, both fire ⇒
+    higher probability; rrf never a trained class (145 rows, fusion
+    artifact). v2 = LightGBM behind the same API once v1's ceiling is
+    read; NN ruled out (d45c).
+    (e) *Honest plumbing.* Hard label on a decisive row = argmax of its
+    three route scores. Thresholds tuned by cross-validation WITHIN the
+    training rows (incl. all_tied/thin so abstention calibrates); the
+    six-column comparison reported ONLY on the held-out split, never the
+    tuning rows (user: evaluate on the validation set only). seed 0.
+    (f) *Two validation protocols (d45e), the gap is the measurement.*
+    (i) random 20% within-lane, near-dup-aware (~5.5% cos>0.95 pairs must
+    not straddle); (ii) hold **rarb-math** out (all three classes: dense
+    334 / sparse 191 / rrf 61 — trains on the other 15, ships on all 16;
+    holds 38% of sparse so the transfer estimate ≠ the shipped model).
+    (g) *Six-column eval (d45f), production last and cheap* (user): call
+    `fusion.qdrant.tech/classify` once per unique HELD-OUT query and
+    cache (query-only → a few thousand calls, not 24K); table ships
+    five-column (constant-dense/-sparse/-rrf / router / oracle) first,
+    production appended as the sixth. Headline = share of headroom
+    captured = (router − best_constant)/(oracle − best_constant), read
+    over held-out decisive rows.
+    (h) *Deps:* add scikit-learn + sentence-transformers; e5-small
+    (~470MB) downloads on first embed — a user-initiated step (cache
+    fills are never smoke-triggered).
+    — *One configurable model, three representations, an encoder chosen
+    so the features aren't a mirror of the labels; the ablation says
+    which representation carries routing signal and whether it needs the
+    multilingual vector at all.*
+
+47. **Router improvement plan: setup pass, corpus eyes in the taxonomy,
+    side-test gate** (grill-me 2026-08-03; responds to d46's ablation
+    losing to constant-dense — router 0.678 vs 0.738 on random-within-lane
+    with `t_sparse` tuned to 0.9, tied at 0.608 vs 0.604 on rarb-math
+    holdout, embedding+engineered at 0.707 still below the constant.
+    Sequences the fixes so each intervention's contribution is measurable
+    and adds an early gate that abandons the corpus-stats path cheaply if
+    the mechanism doesn't discriminate our 16-lane mix).
+    (a) *Setup pass — impl-only, no SPEC amendment. F1 attempted and
+    dropped; F2 stands.* Original design bundled two fixes; F1 was tried,
+    measured against baseline, and reverted — kept here as documented
+    negative result. **F1 (dropped 2026-08-03)** — `tune_thresholds`
+    weighted by `1/freq(winner_class)` was intended to close the observed
+    `t_sparse=0.9` degeneracy, framed as parity with the LR loss's own
+    `class_weight="balanced"`. Measured: two variants tried
+    (naive 1/freq over full-frame argmax with rrf at 16.7×; decisive-only
+    with rrf as residual at 2.33×) — router dropped from baseline 0.678
+    to 0.300–0.326 on random-within-lane, 0.608 to 0.342–0.371 on
+    holdout. Diagnosis: `t_sparse=0.9` was not a degeneracy — it was the
+    tuner correctly reading a poor sparse-binary separator (AUC ~0.65)
+    where any threshold below ~0.9 has false-positive cost exceeding
+    true-positive gain regardless of class weighting. The unweighted
+    tuner's `(0.45, 0.9)` is near-optimal for the current LR
+    probabilities; class-balanced weighting shifts thresholds away from
+    firing well-behaved routes and the hedge rule sweeps more rows into
+    rrf, scoring worse. **F1's premise treated a symptom that wasn't the
+    disease** — the LR needs better features (F2), not different
+    thresholds. **F2** — three derived columns computed at fit time in
+    `FeatureSpace.transform`: `identifier_density =
+    sum(structured_identifiers.*) / max(length_words, 1)`,
+    `avg_word_length = length_chars / max(length_words, 1)`,
+    `short_id_query = (identifier_density > 0) & (length_words ≤ 5)`;
+    drop `length.length_words` after `avg_word_length` lands (redundant
+    with length_chars once the informative diff is exposed as a feature).
+    No feature-table rebuild — additions live inside FeatureSpace, not
+    the catalog. Applied once as a shortlist, ablation re-runs on both
+    protocols, numbers recorded, move to (b) regardless — setup is
+    de-confounding, not optimizing. Reopen trigger for a tuner change:
+    F2 + (b) land a better-discriminating LR, then a class-balanced
+    tuner variant (e.g., per-class recall floor per Q4 option B) may
+    earn its keep on top; not now.
+    (b) *Corpus-relative features land in query_taxonomy, aligned with
+    the CSV's Query-Corpus group.* The Airtable/CSV taxonomy has
+    committed Query-Corpus as a first-class group with multiple members
+    (Answerability, Specificity, Ambiguity, Vocabulary mismatch — all
+    `Corpus Relative: Yes`); the code twin hadn't caught up, and d47 is
+    that catch-up. New package `query_taxonomy/corpus_relative/`:
+    `CorpusRelativeBank` base + six concrete banks (`AvgIDFBank`,
+    `MaxIDFBank`, `OOVShareBank`, `CollectionSizeBank`,
+    `AvgDocLengthBank`, `VocabOverlapBank`); `CorpusIndex` a plain
+    dataclass (df counts dict + N + avgdl), no parquet/tokenizer deps
+    inside query_taxonomy. Banks take `(tokens, CorpusIndex)` — the BM25
+    tokenizer used by the sparse route lives in the parent repo and
+    pre-tokenizes queries before dispatch (symmetric with how spaCy
+    banks receive pre-tokenized docs from the shared pipeline cache).
+    Six CSV rows added to `query_taxonomy/query-taxonomy.csv` under
+    Query-Corpus, `Method: ALGO`, `Corpus Relative: Yes`. Amends d18's
+    implicit "corpus-relative features live in the parent repo"
+    assumption: taxonomy owns the definition AND the compute; parent
+    repo owns the data plumbing.
+    (c) *No new Engine value.* `FeatureExtractor` gains
+    `resolve(text, *, corpus: CorpusIndex | None = None)`;
+    corpus-relative banks dispatch on **corpus presence**, not on
+    `Engine`. Rationale: `Engine`'s purpose is "what heavy runtime does
+    this bank drag in" (REGEX = nothing, SPACY = the pinned pipeline);
+    corpus-relative banks drag stdlib arithmetic — a caller-provided
+    CorpusIndex isn't a heavy import. Adding `Engine.CORPUS_RELATIVE`
+    would misuse the axis: someone constructing the regex-only default
+    extractor (`FeatureExtractor()`) can still ask for
+    `resolve(text, corpus=idx)` and get corpus features without
+    installing spaCy. Two orthogonal axes: engine filtering (mechanism/
+    deps), corpus presence (input signature). `CorpusRelativeBank` has
+    no `Engine` ClassVar. Rejected alternatives: tagging under
+    `Engine.SPACY` (misleading — banks don't use spaCy; regex-only
+    users forced to install spaCy for stat lookups), tagging under
+    `Engine.REGEX` (equally misleading), a new `CorpusFeatureExtractor`
+    class (splits the extractor surface for one feature family).
+    (d) *Tokenizer: BM25 index-native.* The stats' purpose is predicting
+    when sparse wins; sparse is BM25; if the router's IDF/OOV/overlap
+    signal comes from BM25's own tokenization, the feature aligns with
+    the retriever's actual behavior with zero translation gap.
+    Alternatives rejected: spaCy tokenizer (drifts from BM25's lens),
+    naive whitespace (out of sync with both retrievers). Tokenizer lives
+    in the parent repo alongside the sparse route, not in query_taxonomy
+    — keeps taxonomy dependency-clean.
+    (e) *Parent repo owns the data plumbing.*
+    `hybrid_search_rrf_dataset/collection_features.py`: one offline
+    counting pass per lane's existing `corpus.parquet` builds a
+    `CorpusIndex`; per-query stat extraction dispatches to the six
+    banks; output at `data/route_labels/collection_features.parquet`
+    keyed (dataset, query_id). `labels.parquet` stays frozen — paid
+    labels are never edited; stats join in at router train/serve time,
+    consistent with d44(b)'s "router features computed after labeling".
+    Subsumes the outstanding d44(b) builder TODO.
+    (f) *Early gate: 16-row side test BEFORE the full ablation.* Once
+    CorpusIndex artifacts exist for all 16 lanes, compute per-lane mean
+    stats (16 rows × 6 stats) and train a tiny classifier predicting
+    each lane's best-constant route (3-class target). Read: **≥12/16
+    correct ⇒ d47's mechanism has real signal on our mix, proceed to
+    (g)**; 8–11/16 ⇒ modest expected gains, ablation still worth
+    running; ≤7/16 (~chance for a 3-class target) ⇒ the stats don't
+    discriminate our 16 lanes, escalate to d45(h) branches without
+    paying for the transfer pilot. Rationale: the +6.3%
+    per-collection-constant tier (d44a) is the mechanism's literature-
+    grounded ceiling (CORI/ReDDE/Taily; arXiv:2504.01101 achieved
+    ~4%), and the side test IS that tier — if the six numbers can't
+    recover it on 16 lanes, they won't rescue a per-query router
+    either. Cheap (minutes of code after (e) lands), and honest — a
+    failed hypothesis costs minutes not weeks. Runs before spending on
+    the full 6-config pilot.
+    (g) *Six-config ablation, per-collection normalized.* Contingent on
+    (f) reading positive. Ablation axis becomes 3 base representations
+    (engineered / embedding / both) × {with_stats, without_stats} = 6
+    configs per protocol, both random-within-lane and rarb-math
+    holdout. Stats z-scored **within each lane** using training-row
+    means/stds — raw IDF magnitudes are not comparable across corpora
+    (msmarco IDF vs nfcorpus IDF live on different scales); per-
+    collection normalization strips the corpus-magnitude and leaves
+    the query-relative signal that transfers. Reads: (1 vs 2) does
+    d47 add signal to engineered features; (5 vs 6 on holdout − 5 vs 6
+    on random) shrinks the (i)−(ii) gap iff stats transfer.
+    Realistic expected outcome: random-within-lane router lifts 3–5
+    points from F1+F2 + 1–3 more from stats (~0.73–0.75, parity with
+    constant); holdout is where the stats leverage lives (0.608 →
+    0.63–0.66 realistic, first protocol where router visibly beats
+    constant). Both guesses; (f) makes them cheaper to falsify.
+    (h) *Deferred, with reopen triggers.* **F3** (relax decisive-only
+    training toward all `routes_differ` or full score-vector regression
+    per d41a's canonical path): own grill if (a)+(b–e) still lose to
+    constant on random-within-lane after (g). SPEC-touching — amends
+    d45(a)'s clean-label decision. **d45(h) branches** (composition
+    redesign to (query, corpus) targets; Inject-only sparse
+    augmentation): triggered by (g)'s outcome per d45(h)'s pre-
+    committed decision tree. **d44(d) judge spike**: continues on its
+    own track (d45g), not gated by this decision. **Notebook
+    presentation** (how the failing d46 baseline is portrayed alongside
+    the fixed router): impl detail, not a design call. **Ship-
+    criterion** for the router product: CTO conversation per d44(d)'s
+    <60% escalation clause, not this decision.
+    — *One setup pass, one taxonomy home, one early gate, one ablation.
+    The side test replaces guessing with a number cheaply enough that a
+    failed hypothesis costs minutes, not weeks.*
 
 ## Deferred questions
 
@@ -1164,10 +1643,11 @@ breadth; strategy labeling is explicitly a later stage.
   GLiNER2 — revisit when non-English profiling matters.
 - Corpus-relative features (IDF profile, vocabulary mismatch, ambiguity,
   specificity, answerability): requires explicitly reopening the registry's
-  queries-only decision. **Promoted from deferral to blocker by d37(l)** —
-  the router cannot beat a query-only LLM without them. The registry cache
-  is `[query_id, text]` for all 21 datasets, so ORCAS clicks and every
-  dataset's doc_ids are currently dropped on ingest.
+  queries-only decision. **Promoted from deferral to blocker by d37(l)**;
+  **resolved by d44(b) 2026-07-30** — six collection statistics computed
+  from lane corpus parquets, registry untouched (consistent with d39a).
+  The richer candidates (vocabulary mismatch, ambiguity, specificity)
+  reopen only if the d44(c) transfer pilot's captured headroom stalls.
 - Strategy labeling stage: empirical dense/sparse/hybrid labels in
   `src/hybrid_search_rrf_dataset`, scored by d37(a)'s objective (was "via
   NDCG"). Remaining: pool extraction; the unanswerable-query outcome
