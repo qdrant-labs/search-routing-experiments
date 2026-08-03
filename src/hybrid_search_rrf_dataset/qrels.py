@@ -26,7 +26,15 @@ class QrelSource(StrEnum):
     at the right rank rather than appending."""
 
     HUMAN = "human"
-    """Assessor judgments shipped with the dataset."""
+    """Assessor judgments shipped with the dataset. Inherit-path augmented
+    children carry copies of these under their own query_id — the judgment
+    is still a human's, only the query changed under a declared operator
+    (d43d; the transfer is recorded in the augmentation qrels artifact)."""
+
+    CONSTRUCTED = "constructed"
+    """The answer key exists by construction (d40b): Inject rows minted
+    against their grounding doc, synthetic closed-world rows. Definitional
+    rather than judged — below HUMAN, above behavioral CLICK."""
 
     CLICK = "click"
     """A user clicked this doc for this query — ORCAS's 18.8M pairs over

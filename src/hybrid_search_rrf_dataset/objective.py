@@ -32,6 +32,13 @@ class Objective(BaseModel, metaclass=ABCMeta):
         """Stored on every row as `metric_name`; must be stable, since
         `evaluation.compare` refuses to mix rows scored differently."""
 
+    @property
+    @abstractmethod
+    def decisive_margin(self) -> float:
+        """Smallest winner-vs-runner-up score gap that certifies the winner
+        hit rank 1 while the runner-up missed it (SPEC d41d). `inf` when the
+        objective's score ranges cannot certify a top-1 separation at all."""
+
     @abstractmethod
     def assess(
         self, ranking: dict[str, float], gold_qrel: dict[str, int]
@@ -104,6 +111,16 @@ class RouterObjective(Objective):
     def name(self) -> str:
         return f"{self.hit_weight:g}*HitRate@1+{self.ndcg_weight:g}*NDCG@{self.top_k}"
 
+    @property
+    def decisive_margin(self) -> float:
+        # Lexicographic regime only: a rank-1 hit scores >= hit_weight, a miss
+        # <= ndcg_weight, so a gap of hit_weight - ndcg_weight is reachable
+        # exactly when the winner hit and the runner-up missed. With
+        # hit_weight <= ndcg_weight the ranges overlap and no gap certifies it.
+        if self.hit_weight <= self.ndcg_weight:
+            return float("inf")
+        return self.hit_weight - self.ndcg_weight
+
     def assess(
         self, ranking: dict[str, float], gold_qrel: dict[str, int]
     ) -> tuple[float, list[str]]:
@@ -127,6 +144,10 @@ class NDCGObjective(Objective):
     @property
     def name(self) -> str:
         return f"NDCG@{self.top_k}"
+
+    @property
+    def decisive_margin(self) -> float:
+        return float("inf")
 
     def assess(
         self, ranking: dict[str, float], gold_qrel: dict[str, int]
