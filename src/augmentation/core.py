@@ -15,6 +15,7 @@ from typing import ClassVar
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from augmentation.config import AugmentationConfig
 from taxonomy_generators.verify import Targets
 
 
@@ -45,7 +46,10 @@ class Declaration(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     operator: str
-    floor_prefix: str
+    floors: str
+    """Human-readable statement of the floors served — the dispatch
+    itself lives in `Operator.serves()` (band parsing, membership
+    checks), never in string prefixes."""
     grounding: Grounding
     answer_key: AnswerKeyPath
     meaning_preserved: bool
@@ -76,6 +80,10 @@ class AugmentedCandidate(BaseModel):
     meaning_preserved: bool
     answer_key: AnswerKeyPath
     attempts: int
+    credit_gate: str = "none"
+    """The operator's gate at creation (d42h): rows born behind an open
+    gate ('none') are admissible; gated rows are feature-stock until
+    their audit passes and flips them."""
 
 
 class Operator(ABC):
@@ -84,12 +92,28 @@ class Operator(ABC):
 
     declaration: ClassVar[Declaration]
 
+    def __init__(self, config: AugmentationConfig) -> None:
+        self.first_generation_only = config.first_generation_only
+        """d43-review guard: augmented rows are never parents — no
+        second-generation drift — unless deliberately switched off."""
+
+    def parent_pool(self, selection: pd.DataFrame) -> pd.DataFrame:
+        """The rows eligibility may draw from, honoring the
+        first-generation guard. Every eligible() starts here."""
+        if self.first_generation_only and "generated_from" in selection.columns:
+            return selection[selection["generated_from"].isna()]
+        return selection
+
+    @abstractmethod
     def serves(self, floor: str) -> bool:
-        return floor.startswith(self.declaration.floor_prefix)
+        """Whether this operator serves the floor — every operator states
+        its own dispatch (the declaration's `floors` field is the
+        human-readable twin)."""
 
     @abstractmethod
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Parents that fit — a table filter (d42e), never an LLM."""
+        """Parents that fit, in preference order — a table filter (d42e),
+        never an LLM."""
 
     @abstractmethod
     def instruction(self, floor: str, parent: pd.Series) -> str:
@@ -97,8 +121,19 @@ class Operator(ABC):
         the parent row so operators can adapt framing to its profile."""
 
     @abstractmethod
-    def targets(self, floor: str) -> Targets:
-        """The postcondition local verify re-measures (d42g)."""
+    def targets(self, floor: str, parent: pd.Series) -> Targets:
+        """The postcondition local verify re-measures (d42g). Receives the
+        parent because some postconditions are pair-specific (Inject's
+        target bank is the chosen surface's bank)."""
+
+    @abstractmethod
+    def structural(self, parent: pd.Series, text: str) -> list[str]:
+        """Parent-relative checks Targets cannot express (d43b):
+        no-new-spans, content tokens unchanged, literal containment.
+        Returns failure reasons; empty = pass. Run by the loop after
+        accept(); any failure drops the row. Abstract on purpose (d42c
+        default-deny): an operator with no such check DECLARES that with
+        an explicit `return []` and its reason — never inherits silence."""
 
     def candidate(
         self, parent: pd.Series, floor: str, text: str, attempts: int
@@ -117,4 +152,5 @@ class Operator(ABC):
             meaning_preserved=self.declaration.meaning_preserved,
             answer_key=self.declaration.answer_key,
             attempts=attempts,
+            credit_gate=str(self.declaration.credit_gate),
         )

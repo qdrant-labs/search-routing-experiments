@@ -122,7 +122,10 @@ class WeakestFirstFill:
             floors, list(names), recipe.floor_rules.cap_frac,
         )
 
-    def run(self, budget: int) -> FillResult:
+    def run(self, budget: int, *, top_up: bool = True) -> FillResult:
+        """`top_up=False` is the start-from-base mode (d42i/d43a): budget
+        is a ceiling, not a target — picks happen only while they feed an
+        open floor, never as a blind budget-spending draw."""
         selected = np.zeros(len(self._pool), dtype=bool)
         picked: list[int] = []
         lanes: list[str] = []
@@ -130,10 +133,11 @@ class WeakestFirstFill:
             budget = self._fill_lane(
                 lane, lane_mask, selected, budget, picked, lanes,
             )
-        for lane, lane_mask in self._lanes():
-            budget = self._top_up(
-                lane, lane_mask, selected, budget, picked, lanes,
-            )
+        if top_up:
+            for lane, lane_mask in self._lanes():
+                budget = self._top_up(
+                    lane, lane_mask, selected, budget, picked, lanes,
+                )
         return FillResult(
             picked=picked,
             lanes=lanes,

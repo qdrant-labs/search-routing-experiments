@@ -24,11 +24,10 @@ import json
 from litellm import completion
 from pydantic import BaseModel, ConfigDict
 
+from augmentation.config import EngineSettings
 from query_taxonomy.features import FeatureExtractor
 from taxonomy_generators.tools import build_tools
 from taxonomy_generators.verify import TargetCheck, Targets, VerifyReport, verify
-
-DEFAULT_MODEL = "anthropic/claude-haiku-4-5-20251001"
 
 _SUBMIT_TOOL = {
     "type": "function",
@@ -66,24 +65,23 @@ class AugmentationOutcome(BaseModel):
 class Augmenter:
     """Bounded attempts + local-verify acceptance, in either mode.
 
-    `max_attempts` bounds revise-after-local-failure cycles; `max_rounds`
-    bounds tool-call rounds per attempt (tool-loop mode only). Exhaustion
-    returns an unaccepted outcome — the caller drops the row, parents are
-    plentiful (d42g).
+    Spend is `EngineSettings`: `max_attempts` bounds revise-after-local-
+    failure cycles; `max_rounds` bounds tool-call rounds per attempt
+    (tool-loop mode only). Exhaustion returns an unaccepted outcome — the
+    caller drops the row, parents are plentiful (d42g).
     """
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
+        settings: EngineSettings | None = None,
         *,
         seed: int = 0,
         extractor: FeatureExtractor | None = None,
-        max_rounds: int = 6,
-        max_attempts: int = 2,
     ) -> None:
-        self.model = model
-        self.max_rounds = max_rounds
-        self.max_attempts = max_attempts
+        settings = settings or EngineSettings()
+        self.model = settings.model
+        self.max_rounds = settings.max_rounds
+        self.max_attempts = settings.max_attempts
         self._extractor = extractor or FeatureExtractor()
         tools = build_tools(seed=seed, extractor=self._extractor)
         self._runners = {tool.name: tool.run for tool in tools}

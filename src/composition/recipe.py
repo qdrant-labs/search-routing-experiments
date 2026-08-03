@@ -115,6 +115,15 @@ class Recipe(BaseModel):
     """d33a floor mechanics — see `FloorRules`."""
     champions: Mapping[str, float] = _CHAMPIONS
     """d33d: dark-forest sources and their shares of that slice."""
+    min_natural_share: float = Field(
+        default=0.85,
+        description=(
+            "d42i/d43 review: minimum share of the composition that is "
+            "natural provenance. Enforced by the mini-fill as an admission "
+            "ceiling — natural_rows*(1-m)/m augmented rows at most (8,824 "
+            "over the 50K base; the full current order sheet ~7.4K fits)."
+        ),
+    )
 
     @property
     def span_target_rows(self) -> int:

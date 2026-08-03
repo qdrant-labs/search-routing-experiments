@@ -9,30 +9,36 @@ calls on parents that already have a child for the floor.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import pandas as pd
 
+from augmentation.config import AugmentationPaths
 from augmentation.core import AugmentedCandidate
 
-DEFAULT_POOL_DIR = Path("data") / "augmentation"
-
-_COLUMNS = list(AugmentedCandidate.model_fields)
+_COLUMNS: Final[tuple[str, ...]] = tuple(AugmentedCandidate.model_fields)
+"""Schema and order both come from the candidate model — each column is
+documented on its field in `core.AugmentedCandidate`."""
 
 
 class GeneratedPool:
-    """Owns `<dir>/pool.parquet`."""
+    """Owns `paths.pool`."""
 
-    def __init__(self, out_dir: Path | str = DEFAULT_POOL_DIR) -> None:
-        self._out_dir = Path(out_dir)
+    def __init__(self, paths: AugmentationPaths | None = None) -> None:
+        self._paths = paths or AugmentationPaths()
 
     @property
     def path(self) -> Path:
-        return self._out_dir / "pool.parquet"
+        return self._paths.pool
 
     def load(self) -> pd.DataFrame:
         if not self.path.exists():
             return pd.DataFrame(columns=_COLUMNS)
-        return pd.read_parquet(self.path)
+        pool = pd.read_parquet(self.path)
+        if "credit_gate" not in pool.columns:
+            # rows written before d42h gating landed were Decorate — gate-free
+            pool["credit_gate"] = "none"
+        return pool
 
     def parents_used(self, floor: str) -> set[str]:
         """Parents that already have a child for this floor — excluded from

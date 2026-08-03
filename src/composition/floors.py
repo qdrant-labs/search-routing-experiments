@@ -5,6 +5,8 @@ into the package."""
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
@@ -13,6 +15,24 @@ from query_taxonomy.banks import BANKS
 from query_taxonomy.taxonomy import Domain, FeatureGroup
 
 from composition.recipe import Recipe
+
+
+@lru_cache(maxsize=1)
+def _bank_domains() -> dict[str, Domain]:
+    return {bank().name.value: bank().domain for bank in BANKS}
+
+
+def identifier_floor_key(bank_name: str) -> str:
+    """The id-floor key for one identifier bank (d33a grouping): `*_like`
+    banks pool into id:shape_guess, GENERAL-domain banks split out as
+    id:<bank>, field-domain banks aggregate as id:<domain>. The single
+    home of this mapping — the supply index and the derivers share it."""
+    if bank_name.endswith("_like"):
+        return "id:shape_guess"
+    domain = _bank_domains()[bank_name]
+    if domain is Domain.GENERAL:
+        return f"id:{bank_name}"
+    return f"id:{domain.value}"
 
 SPAN_PREFIXES: tuple[str, ...] = tuple(
     f"{group.value}."
@@ -81,12 +101,7 @@ class SpanFloorDeriver:
             if group == FeatureGroup.STRUCTURED_IDENTIFIERS.value:
                 bank = by_name[type_]
                 discount = self._recipe.floor_rules.discounts[bank.ambiguity]
-                if type_.endswith("_like"):
-                    key = "id:shape_guess"
-                elif bank.domain is Domain.GENERAL:
-                    key = f"id:{type_}"
-                else:
-                    key = f"id:{bank.domain.value}"
+                key = identifier_floor_key(type_)
             elif group == FeatureGroup.SENTENCE_MARKERS.value:
                 key, discount = f"marker:{type_}", 1.0
             elif group == FeatureGroup.LOGICAL_STRUCTURES.value:

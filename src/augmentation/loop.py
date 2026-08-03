@@ -10,12 +10,21 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
+from augmentation.config import AugmentationConfig
 from augmentation.core import AugmentedCandidate, CreditGate, Operator
 from augmentation.engine import Augmenter
-from augmentation.operators import OPERATORS
+from augmentation.operators import default_operators
 from augmentation.pool import GeneratedPool
+from augmentation.qrels import AugmentationQrels
 
-DEFAULT_SHEET = Path("data") / "composition" / "order_sheet.parquet"
+
+def _pair_line(sign: str, parent: dict, text: str, note: str) -> str:
+    tag = "after: " if sign == "+" else "tried: "
+    return (
+        f"{sign} {parent['query_id']}{note}\n"
+        f"    before: {str(parent['query'])[:80]!r}\n"
+        f"    {tag} {text[:80]!r}"
+    )
 
 
 class AugmentationLoop:
@@ -25,18 +34,24 @@ class AugmentationLoop:
         self,
         selection: pd.DataFrame,
         *,
+        config: AugmentationConfig | None = None,
         engine: Augmenter | None = None,
-        operators: tuple[Operator, ...] = OPERATORS,
-        sheet_path: Path | str = DEFAULT_SHEET,
+        operators: tuple[Operator, ...] | None = None,
+        sheet_path: Path | str | None = None,
         pool: GeneratedPool | None = None,
-        seed: int = 0,
+        qrels: AugmentationQrels | None = None,
     ) -> None:
         self.selection = selection
-        self.engine = engine or Augmenter(seed=seed)
-        self.operators = operators
-        self.pool = pool or GeneratedPool()
-        self._sheet_path = Path(sheet_path)
-        self._seed = seed
+        self.config = config or AugmentationConfig()
+        self.engine = engine or Augmenter(
+            self.config.engine, seed=self.config.seed
+        )
+        self.operators = (
+            operators if operators is not None else default_operators(self.config)
+        )
+        self.pool = pool or GeneratedPool(self.config.paths)
+        self.qrels = qrels or AugmentationQrels(self.config.paths)
+        self._sheet_path = Path(sheet_path or self.config.paths.order_sheet)
 
     def order_sheet(self) -> pd.DataFrame:
         sheet = pd.read_parquet(self._sheet_path)
@@ -71,20 +86,28 @@ class AugmentationLoop:
         if operator is None:
             raise ValueError(f"No registered operator serves {floor!r}.")
         if operator.declaration.credit_gate is not CreditGate.NONE:
-            raise ValueError(
-                f"{operator.declaration.operator!r} is gated by "
-                f"{operator.declaration.credit_gate} (d42h) — its rows would "
-                "be feature-stock. Run the gate's pilot first."
+            print(
+                f"NOTE: {operator.declaration.operator!r} is gated by "
+                f"{operator.declaration.credit_gate} (d42h) — rows are "
+                "produced as feature-stock (no floor credit; skipped by the "
+                "mini-fill) until the gate's pilot passes."
             )
 
         sheet = self.order_sheet()
         missing = sheet.loc[sheet["floor"] == floor, "missing"]
+        if missing.empty:
+            raise ValueError(
+                f"{floor!r} is not hungry on the order sheet — nothing to "
+                "produce. Re-read loop.hungry() after the last admission."
+            )
         need = n if n is not None else math.ceil(float(missing.iloc[0]))
 
+        # eligibility arrives in the operator's declared preference order
+        # (d42c) — near-parents for StatRewrite, seeded shuffle elsewhere
         parents = operator.eligible(self.selection, floor)
         parents = parents[
             ~parents["query_id"].astype(str).isin(self.pool.parents_used(floor))
-        ].sample(frac=1.0, random_state=self._seed)
+        ]
 
         accepted: list[AugmentedCandidate] = []
         attempted = 0
@@ -96,28 +119,36 @@ class AugmentationLoop:
             outcome = self.engine.run(
                 operator.instruction(floor, parent),
                 f"Query: {parent['query']}",
-                operator.targets(floor),
+                operator.targets(floor, parent),
                 tool_loop=operator.declaration.tool_loop,
             )
-            if outcome.accepted:
+            problems = (
+                operator.structural(parent, outcome.text)
+                if outcome.accepted
+                else []
+            )
+            if outcome.accepted and not problems:
                 candidate = operator.candidate(
                     parent, floor, outcome.text, outcome.attempts
                 )
                 accepted.append(candidate)
                 self.pool.append([candidate])   # banked immediately — paid spend
+                self.qrels.mint(candidate)      # answer key born with the row (d43d)
                 bar.update(1)
-                bar.write(
-                    f"+ {parent['query_id']} ({outcome.attempts} attempt(s))\n"
-                    f"    before: {str(parent['query'])[:80]!r}\n"
-                    f"    after:  {outcome.text[:80]!r}"
-                )
+                bar.write(_pair_line(
+                    "+", parent, outcome.text,
+                    f" ({outcome.attempts} attempt(s))",
+                ))
+            elif outcome.accepted:
+                bar.write(_pair_line(
+                    "-", parent, outcome.text,
+                    f": dropped — structural: {problems}",
+                ))
             else:
                 failed = [c.target for c in outcome.checks if not c.passed]
-                bar.write(
-                    f"- {parent['query_id']}: dropped — failed {failed}\n"
-                    f"    before: {str(parent['query'])[:80]!r}\n"
-                    f"    tried:  {outcome.text[:80]!r}"
-                )
+                bar.write(_pair_line(
+                    "-", parent, outcome.text, f": dropped — failed {failed}",
+                ))
             bar.set_postfix(attempted=attempted, dropped=attempted - len(accepted))
         bar.close()
         print(
