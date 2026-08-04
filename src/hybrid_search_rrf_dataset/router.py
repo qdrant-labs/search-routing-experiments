@@ -23,7 +23,7 @@ from enum import StrEnum
 from query_taxonomy.features import FeatureExtractor as _FE
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -35,6 +35,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from hybrid_search_rrf_dataset.fusion import StrategyName
+from hybrid_search_rrf_dataset.golden import LLMScoreClient
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
 if TYPE_CHECKING:
@@ -539,6 +540,69 @@ def _production_route(score: int) -> StrategyName:
     return StrategyName.SPARSE_ONLY
 
 
+class AutoFusionRouter:
+    """The auto-fusion HTTP classifier as a router: `LLMScoreClient.score`
+    per query, mapped to `StrategyName` via the production hard bands
+    (`_production_route`). Skips retrieval entirely — evaluation uses the
+    per-route scores already stored on `labels.parquet`. Deterministic per
+    query text, so `(dataset, query_id) -> score` is cached to disk and
+    re-runs are free."""
+
+    CACHE_PATH: ClassVar[Path] = (
+        DATA_DIR / "route_labels" / "autofusion_cache.parquet"
+    )
+
+    def __init__(
+        self,
+        client: LLMScoreClient | None = None,
+        cache_path: Path | None = None,
+    ) -> None:
+        self._client = client or LLMScoreClient()
+        self._cache_path = cache_path or self.CACHE_PATH
+        self._cache: dict[tuple[str, str], int] = self._load_cache()
+
+    def _load_cache(self) -> dict[tuple[str, str], int]:
+        if not self._cache_path.exists():
+            return {}
+        df = pd.read_parquet(self._cache_path)
+        return {
+            (str(r.dataset), str(r.query_id)): int(r.score)
+            for r in df.itertuples(index=False)
+        }
+
+    def _save_cache(self) -> None:
+        if not self._cache:
+            return
+        df = pd.DataFrame(
+            [
+                {"dataset": ds, "query_id": qid, "score": score}
+                for (ds, qid), score in sorted(self._cache.items())
+            ]
+        )
+        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(self._cache_path, index=False)
+
+    def route_batch(
+        self, frame: pd.DataFrame, desc: str = "auto-fusion classify"
+    ) -> list[StrategyName]:
+        """Route every row of `frame` (needs `dataset`, `query_id`, `query`).
+        Cache hits skip the network; only misses trigger a POST. Saves cache
+        once at end iff any miss fired."""
+        routes: list[StrategyName] = []
+        misses = 0
+        for _, row in tqdm(
+            frame.iterrows(), total=len(frame), desc=desc, leave=False
+        ):
+            key = (str(row["dataset"]), str(row["query_id"]))
+            if key not in self._cache:
+                self._cache[key] = self._client.score(str(row["query"]))
+                misses += 1
+            routes.append(_production_route(self._cache[key]))
+        if misses:
+            self._save_cache()
+        return routes
+
+
 def _phase(bar: tqdm | None, label: str) -> None:
     """Show the current sub-step of a round on the progress bar's postfix."""
     if bar is not None:
@@ -589,6 +653,8 @@ class RouterExperiment:
         *,
         all_rows: bool = False,
         max_class_share: float | None = None,
+        autofusion: bool | AutoFusionRouter = False,
+        autofusion_sample: int | float | None = None,
     ) -> pd.DataFrame:
         representations = list(representations or Representation)
         if self._encoder is None:
@@ -626,7 +692,54 @@ class RouterExperiment:
                 headroom=f"{result['headroom_captured']:.3f}",
                 n=result["n_test_decisive"],
             )
+        if autofusion:
+            af_router = (
+                autofusion if isinstance(autofusion, AutoFusionRouter)
+                else AutoFusionRouter()
+            )
+            for protocol, (_, test) in splits.items():
+                rows.append(
+                    {
+                        "protocol": protocol,
+                        "representation": "auto_fusion",
+                        "all_rows": None,
+                        "max_class_share": None,
+                    }
+                    | self._run_autofusion(
+                        af_router, test, protocol, sample=autofusion_sample
+                    )
+                )
         return pd.DataFrame(rows)
+
+    def _run_autofusion(
+        self,
+        af_router: AutoFusionRouter,
+        test: pd.DataFrame,
+        protocol: str,
+        *,
+        sample: int | float | None = None,
+    ) -> dict[str, object]:
+        """One auto-fusion row per protocol: no fit, no tune — classify each
+        held-out decisive query, look up the chosen route's stored score, and
+        report the same six-column table (SPEC d47 auto-fusion baseline).
+        `sample` truncates the decisive frame for cheap smoke runs: int =
+        absolute count, float in (0, 1] = fraction of the decisive slice."""
+        decisive_margin = RouterObjective().decisive_margin
+        decisive = test[_margin(test) >= decisive_margin]
+        if sample is not None and len(decisive) > 0:
+            if isinstance(sample, float) and 0 < sample < 1:
+                n = max(1, int(len(decisive) * sample))
+            else:
+                n = min(int(sample), len(decisive))
+            decisive = decisive.sample(n=n, random_state=self._seed)
+        routes = af_router.route_batch(
+            decisive, desc=f"{protocol}·auto_fusion classify"
+        )
+        return _six_column(decisive, routes) | {
+            "n_test_decisive": len(decisive),
+            "t_dense": None,
+            "t_sparse": None,
+        }
 
     def split(self, protocol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         """The (train, test) frames for one protocol — exposed so a notebook can
