@@ -278,9 +278,17 @@ class StrategyRouter:
         return self
 
     def tune_thresholds(self, tune: pd.DataFrame) -> StrategyRouter:
-        """Pick (t_dense, t_sparse) that maximise the router's mean objective on
-        an all-shapes validation frame — so ambiguous queries abstain to rrf
-        rather than draw a confident wrong route (SPEC d46e)."""
+        """Pick (t_dense, t_sparse) that maximise the router's mean objective
+        on the routes_differ rows of an all-shapes frame — where the threshold
+        actually changes the outcome. Amends SPEC d45(b)/d46(e) via d47(a)
+        F1': measured on 2026-08-03, tuning on the full frame diluted the
+        objective (67% of tune was all_tied/all_zero, threshold-invariant),
+        landing the argmax at `t_sparse=0.9` (sparse never fires) while the
+        empirical optimum on routes_differ was `t_sparse=0.6` (+0.05 on the
+        eval-decisive mean). All_tied and all_zero rows have no route
+        distinction to make, so excluding them aligns the tuner objective
+        with the eval slice."""
+        tune = tune[_routes_differ(tune)]
         grid = np.linspace(
             THRESHOLD_GRID_MIN, THRESHOLD_GRID_MAX, THRESHOLD_GRID_STEPS
         )
