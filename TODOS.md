@@ -1,50 +1,71 @@
 # TODOS
 
-## From router-improvement grill (2026-08-03, SPEC decision 47)
+## From router-improvement work (SPEC decision 47)
 
-Ordered passes; each pass's finding informs whether to proceed. Subsumes
-the outstanding d44(b) collection_features builder item.
+Current state (2026-08-04): setup pass shipped (F2 + F1'); router beats
+constant on both protocols (0.751 / 0.611). d47(b) inference-time corpus
+stats retired — deployment target unknown at ship time. See PLAN.md for
+the current-state summary.
 
-- [ ] Pass 1 — Setup pass, **F2 only** (F1 dropped 2026-08-03 as a
-      documented negative result — see d47(a) amendment). Add three
-      derived columns in `FeatureSpace.transform`: `identifier_density
-      = sum(structured_identifiers.*) / max(length_words, 1)`,
-      `avg_word_length = length_chars / max(length_words, 1)`,
-      `short_id_query = (identifier_density > 0) & (length_words ≤ 5)`;
-      drop `length.length_words` after `avg_word_length` lands. No
-      feature-table rebuild — additions live inside FeatureSpace, not
-      the catalog. Re-run the d46 ablation on both protocols, record
-      numbers, move to pass 2 regardless of outcome.
-- [ ] Pass 2 — `query_taxonomy/corpus_relative/` package. New
-      `CorpusRelativeBank` base + six concrete banks (`AvgIDFBank`,
-      `MaxIDFBank`, `OOVShareBank`, `CollectionSizeBank`,
-      `AvgDocLengthBank`, `VocabOverlapBank`). `CorpusIndex` dataclass
-      (df counts dict + N + avgdl). Banks take `(tokens, CorpusIndex)`;
-      no tokenizer or parquet deps in query_taxonomy. Six rows added to
-      `query_taxonomy/query-taxonomy.csv` under Query-Corpus (Method:
-      ALGO, Corpus Relative: Yes). `FeatureExtractor.resolve` gains
-      `corpus=None` parameter; dispatch is on corpus presence, NOT on
-      Engine (no new Engine value).
-- [ ] Pass 3 — Parent-repo CorpusIndex builder.
-      `hybrid_search_rrf_dataset/collection_features.py`: BM25 index-
-      native tokenizer (same as the sparse route), one offline
-      counting pass per lane's `corpus.parquet` → `CorpusIndex`; per-
-      query dispatch writes `data/route_labels/
-      collection_features.parquet` keyed (dataset, query_id).
-      labels.parquet stays frozen.
-- [ ] Pass 4 — 16-row side test (early gate). Per-lane mean stats (16
-      rows × 6 stats), tiny classifier predicts best-constant route
-      per lane (3-class target). ≥12/16 correct → proceed to pass 5;
-      8–11/16 → proceed but expect modest gains; ≤7/16 (~chance) →
-      abort pass 5, escalate to d45(h) branches.
-- [ ] Pass 5 — Six-config ablation (3 base × {with_stats,
-      without_stats}), per-collection z-scored using training-row
-      means/stds within each lane. Both protocols (random-within-lane,
-      rarb-math holdout). Six-column table + headroom-captured per
-      config. Contingent on pass 4.
-- [ ] F3 deferred to own grill: relax decisive-only training toward
-      routes_differ or full score-vector regression (d41a's canonical
-      path). SPEC-touching. Only if (F1+F2)+(d47b–g) still lose.
+Done:
+
+- [x] Pass 1 — Setup pass. **F2 landed**: three derived columns in
+      `FeatureSpace.transform` (`identifier_density`, `avg_word_length`,
+      `short_id_query`); `length.length_words` dropped. **F1' landed**:
+      `tune_thresholds` filters input to `routes_differ` rows only.
+      **F1 tried and reverted** as documented negative result. Numbers
+      after F2 + F1': random_within_lane 0.751 (+0.057 headroom),
+      holdout_lane 0.611 (+0.017). First positive headroom on either
+      protocol. Auto-fusion added to the ablation table via
+      `AutoFusionRouter` + `LLMScoreClient` (`RouterExperiment.run(
+      autofusion=True)`); cache at
+      `data/route_labels/autofusion_cache.parquet`.
+
+Retired:
+
+- [x] d47(b) — corpus stats as router inference features — RETIRED
+      2026-08-04. Deployment target unknown; `query → route` surface is
+      a hard constraint. Corpus stats stay in the offline labelling /
+      diagnostic toolkit. `CorpusRelativeBank` design preserved in
+      SPEC d47(b) for offline use if needed. Passes 2–5 (build corpus
+      index / side test / six-config ablation) all fall under this
+      retirement.
+
+Open (priority order):
+
+- [ ] Per-archetype eval. Group held-out decisive rows by feature
+      signature (`has_uri`, `has_uuid`, `is_short`, `is_math`,
+      `is_natural_language`). Report LR router vs auto-fusion per group.
+      Surfaces coverage gaps in the composition. Cheap; belongs in
+      `route_baseline.ipynb` as a new section.
+- [ ] Score-vector regression target (SPEC d41a canonical path). Replace
+      the two argmax-hard-label binaries with a multi-output regression
+      on `(score_dense, score_pure_rrf, score_sparse)`. Same input, same
+      serving API, richer training signal. Derive `route` via existing
+      cost-order rule + margin-based hedge to `pure_rrf`.
+- [ ] LightGBM v2 (SPEC d45c). Query-only ceiling test with a learner
+      that captures interactions. Behind the same `predict(query) →
+      StrategyName` API. If it beats the LR meaningfully, LR is a
+      distillation target; if not, LR sits at the query-only ceiling.
+- [ ] LUPI prototype (PLAN.md option B — auxiliary corpus
+      reconstruction). Small MLP encoder on query features, two heads
+      (one predicts corpus features as auxiliary loss during training,
+      dropped at inference; one predicts route). First real test of
+      whether privileged corpus features at training lift the query-only
+      ceiling. Options A (dropout on corpus features) and C (teacher-
+      student distillation) documented as fallback / heavier variants.
+- [ ] Composition + augmentation loops (SPEC d45h5, d45h6). Driven by
+      the per-archetype failure map. Fill the coverage holes named in
+      PLAN.md issues #1–3 and #7. Not gated by modeling work; each
+      iteration compounds.
+
+Deferred:
+
+- [ ] F3 (relax decisive-only training) — F1' subsumed the tuner half of
+      this concern. The training-set half (loosen the decisive filter to
+      routes_differ) still SPEC-touching; the F3 experimental flag on
+      `StrategyRouter.fit` stays in the code for future testing but the
+      default keeps decisive-only per d45(a).
 
 Gates / next actions:
 

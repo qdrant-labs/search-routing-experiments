@@ -586,3 +586,30 @@ parent query's gold document, so that document still answers by
 construction. Golden only after the row-level coherence test passes
 (mechanism pending the d40e pilot).
 _Avoid_: grounded injection (grounding already means answerability)
+
+**Auto-fusion baseline**:
+The LLM query router this project is replacing — a Rust HTTP service
+(`POST /v1/classify`) returning a 0–9 score mapped to a route via the
+production hard bands (0–2 dense, 3–6 rrf, 7–9 sparse). Corpus-blind
+surface classifier that asks "does this query look identifier-shaped?"
+Runs as a row in `RouterExperiment.run(autofusion=True)` via
+`AutoFusionRouter` + `LLMScoreClient`.
+_Avoid_: LLM baseline (ambiguous with the list-preference judge),
+auto-classifier
+
+**Privileged corpus features**:
+Corpus features (avg-IDF, OOV share, N, avgdl, vocab overlap) that enter
+the model at training but are masked at inference — the deployment target
+is unknown at ship time, so a `query → route` surface is a hard
+constraint. Learning Using Privileged Information (Vapnik 2015). Lets the
+model learn corpus effects it never sees at serve time.
+_Avoid_: `collection_stats` at inference (that was d47(b), retired
+2026-08-04)
+
+**Per-archetype eval**:
+Grouping held-out decisive rows by feature signature (`has_uri`,
+`has_uuid`, `is_short`, `is_math`, `is_natural_language`) and reporting
+headroom captured per group. Surfaces coverage gaps in the composition —
+the aggregate metric hides archetype-level failures where a small
+fraction of rows carries a big qualitative gap (URL case: 0.1% of eval,
+invisible in the mean).

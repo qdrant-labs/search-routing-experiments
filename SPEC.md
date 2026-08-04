@@ -1524,8 +1524,26 @@ breadth; strategy labeling is explicitly a later stage.
     F2 + (b) land a better-discriminating LR, then a class-balanced
     tuner variant (e.g., per-class recall floor per Q4 option B) may
     earn its keep on top; not now.
-    (b) *Corpus-relative features land in query_taxonomy, aligned with
-    the CSV's Query-Corpus group.* The Airtable/CSV taxonomy has
+    **F1' (landed 2026-08-04)** — the actual working tuner fix. Filters
+    `tune_thresholds`'s input to `routes_differ` rows only. Measurement:
+    67% of the tune frame is threshold-invariant (all-tied and all-zero
+    rows contribute constants regardless of threshold, diluting the
+    argmax). After filtering, sparse fires at `t_sparse ≈ 0.6–0.8` on
+    identifier-bearing queries. Numbers after F2 + F1': random_within_lane
+    `router 0.751` (+0.057 headroom captured), holdout_lane `router 0.611`
+    (+0.017). First positive headroom on either protocol.
+    (b) *Corpus-relative features — RETIRED as router inference feature
+    (2026-08-04).* Deployment target for the router is unknown at ship
+    time; the router's API surface stays `query → route`, no
+    `collection_stats` input. The `CorpusRelativeBank` design below is
+    preserved for offline labelling analysis and dataset diagnostics,
+    but does not enter the router at inference. The corpus-signal-at-
+    training direction (LUPI: privileged features at training, masked at
+    inference) supersedes the original (b) framing — three implementations
+    (dropout / auxiliary reconstruction / teacher-student distillation)
+    documented in PLAN.md, own grill before implementation.
+    *Original (b) design, retained for the query_taxonomy work:* The
+    Airtable/CSV taxonomy has
     committed Query-Corpus as a first-class group with multiple members
     (Answerability, Specificity, Ambiguity, Vocabulary mismatch — all
     `Corpus Relative: Yes`); the code twin hadn't caught up, and d47 is
