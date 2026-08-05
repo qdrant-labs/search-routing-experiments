@@ -1,26 +1,36 @@
 """The lane table (SPEC d39c): composition key → acquisition owner.
 
-One entry per QQ-grounded composition dataset — 20 of the 21 (ORCAS is the
-parked click lane). Done lanes sit in the table and skip via `label()`'s
-idempotency; trec-dl-2022 is parked (d39g) but keeps its entry so coverage
+One entry per composition dataset that ships a relevance signal — qrels,
+clicks (ORCAS), or an answer passage doubling as the gold doc (GooAQ).
+Done lanes skip via `label()`'s idempotency; trec-dl-2022 is parked (d39g) but keeps its entry so coverage
 reads it honestly. `min_relevance` binarizes graded qrels per d37(a)/d39(d);
 the corpus policy is not a column — one threshold rule decides it (d39e).
 """
 
 from typing import NamedTuple
 
+from dataset_registry.core import DatasetName
+
 from hybrid_search_rrf_dataset.retrieval import (
+    AntiqueLane,
     BrightLane,
+    ClercLane,
     CrumbLane,
     DBPediaLane,
     LimitLane,
+    FreshStackLane,
+    GooaqLane,
+    LotteLane,
     MiraclLane,
     MSMarcoDev,
     NFCorpus,
+    OrcasLane,
     QuestLane,
     RarbLane,
     RetrievalDataset,
+    ScirgenGeoLane,
     TrecDL2022,
+    WebFaqLane,
 )
 
 
@@ -45,6 +55,16 @@ LANES: dict[str, Lane] = {
     "bright-aops": Lane(BrightLane("aops")),
     "bright-leetcode": Lane(BrightLane("leetcode")),
     "bright-theoremqa-questions": Lane(BrightLane("theoremqa_questions")),
+    # spelled out, not generated: this package does not import dataset_registry
+    "bright-biology": Lane(BrightLane("biology")),
+    "bright-earth-science": Lane(BrightLane("earth_science")),
+    "bright-economics": Lane(BrightLane("economics")),
+    "bright-pony": Lane(BrightLane("pony")),
+    "bright-psychology": Lane(BrightLane("psychology")),
+    "bright-robotics": Lane(BrightLane("robotics")),
+    "bright-stackoverflow": Lane(BrightLane("stackoverflow")),
+    "bright-sustainable-living": Lane(BrightLane("sustainable_living")),
+    "bright-theoremqa-theorems": Lane(BrightLane("theoremqa_theorems")),
     "crumb-clinical-trial": Lane(CrumbLane("clinical_trial")),
     # exception: 108,782 relevant (median 23 relevant docs/query — the
     # benchmark's design) > recipe ceiling. Floor-plus-pad: every answer
@@ -66,4 +86,21 @@ LANES: dict[str, Lane] = {
     "limit": Lane(LimitLane(), corpus_target=50_000),
     "dbpedia-entity": Lane(DBPediaLane()),
     "miracl-en-dev": Lane(MiraclLane()),
+    "orcas": Lane(OrcasLane()),
+    "freshstack-angular": Lane(FreshStackLane("angular")),
+    "freshstack-godot": Lane(FreshStackLane("godot")),
+    "freshstack-langchain": Lane(FreshStackLane("langchain")),
+    "freshstack-laravel": Lane(FreshStackLane("laravel")),
+    "freshstack-yolo": Lane(FreshStackLane("yolo")),
+    # levels 1-4; level 2 is "does not answer the question"
+    "antique": Lane(AntiqueLane(), min_relevance=3),
+    "lotte-technology-search": Lane(LotteLane("technology", "search")),
+    "lotte-technology-forum": Lane(LotteLane("technology", "forum")),
+    "webfaq-eng": Lane(WebFaqLane()),
+    "scirgen-geo-en": Lane(ScirgenGeoLane()),
+    "clerc": Lane(ClercLane()),
+    "gooaq": Lane(GooaqLane()),
 }
+
+LANELESS: frozenset[DatasetName] = frozenset()
+"""Registered datasets with no lane yet — a gap, not a design choice."""

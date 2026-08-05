@@ -65,9 +65,14 @@ def route_label(scores: dict[str, float]) -> str | None:
 class RouteLabels:
     """Builds and owns `data/route_labels/labels.parquet`."""
 
-    CARRIED = ["slice", "checkable", "label_lane"]
-    """Selection columns copied onto every label, so outcome shapes can be read
-    per composition slice rather than only in aggregate."""
+    CARRIED = ["slice", "checkable", "label_lane", "cell", "stage", "route"]
+    """Selection columns copied onto every label where the selection has them,
+    so outcome shapes can be read per group rather than only in aggregate."""
+
+    @property
+    def carried(self) -> list[str]:
+        """The carried columns this selection actually has."""
+        return [column for column in self.CARRIED if column in self.selection.columns]
 
     def __init__(
         self,
@@ -153,10 +158,20 @@ class RouteLabels:
                 f"{key!r}: no rows produced. Every selected query lacked "
                 f"judgments — check that the qrels cover this selection."
             )
+        # one label per (dataset, query_id): a query in several cells appears
+        # once in wanted per cell, so dedup before the merge or it fans out.
+        # Per-cell readouts join labels back to the selection on query_id.
+        carry = (
+            wanted[["query_id", *self.carried]]
+            .astype({"query_id": str})
+            .drop_duplicates("query_id")
+        )
+        # a carried selection column can share a name with a label column
+        # (cell_selection's planned `route` vs the labelled `route`): keep the
+        # label authoritative and suffix the selection's copy.
+        clash = {c: f"{c}_selected" for c in self.carried if c in labelled.columns}
         labelled = labelled.merge(
-            wanted[["query_id", *self.CARRIED]].astype({"query_id": str}),
-            on="query_id",
-            how="left",
+            carry.rename(columns=clash), on="query_id", how="left"
         )
 
         merged = pd.concat(

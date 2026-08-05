@@ -51,6 +51,11 @@ class QrelSource(StrEnum):
 _PRIORITY = {source: rank for rank, source in enumerate(QrelSource)}
 """Derived from declaration order so a new `QrelSource` cannot desync it."""
 
+_LANE_SOURCES: dict[str, QrelSource] = {"orcas": QrelSource.CLICK}
+"""Lanes whose shipped judgments are not assessor judgments, by dataset name.
+ORCAS ships clicks (positive-only, position-biased, ~1 judged doc per query);
+every other lane defaults to HUMAN."""
+
 
 class QrelStore:
     """Long-format qrels across any number of datasets."""
@@ -83,11 +88,17 @@ class QrelStore:
     def from_dataset(
         cls,
         dataset: RetrievalDataset,
-        source: QrelSource = QrelSource.HUMAN,
+        source: QrelSource | None = None,
     ) -> QrelStore:
-        """Wrap a `RetrievalDataset`'s own qrels, tagged with `dataset.name`."""
+        """Wrap a `RetrievalDataset`'s own qrels, tagged with `dataset.name`.
+
+        `source` defaults to the lane's own provenance (`_LANE_SOURCES`), so
+        the default labeling path — `GoldenRoutingBuilder` building the store
+        itself — cannot record ORCAS clicks as assessor judgments.
+        """
+        provenance = source or _LANE_SOURCES.get(dataset.name, QrelSource.HUMAN)
         return cls(
-            dataset.qrels().assign(dataset=dataset.name, source=str(source))
+            dataset.qrels().assign(dataset=dataset.name, source=str(provenance))
         )
 
     @classmethod
