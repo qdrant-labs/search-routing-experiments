@@ -50,6 +50,13 @@ class AxisBand(BaseModel):
         return self.column.rpartition(".")[2]
 
     @property
+    def demands_presence(self) -> bool:
+        """A span band asking for MORE of a feature. The only kind an additive
+        operator can satisfy: a `below`-only band asks for fewer, and minting
+        into it pushes the row further out."""
+        return self.is_span and self.at_least is not None and self.at_least >= 1
+
+    @property
     def expressions(self) -> list[str]:
         """The band as `column<op>value` strings — one per finite bound."""
         out = []
@@ -103,9 +110,7 @@ class ArchetypeCell(BaseModel):
         """Span banks the cell requires PRESENT. A `below`-only band forbids
         its feature, so minting it would push the row out of the cell."""
         return frozenset(
-            band.member
-            for band in self.bands
-            if band.is_span and band.at_least is not None and band.at_least >= 1
+            band.member for band in self.bands if band.demands_presence
         )
 
     def select(
@@ -147,6 +152,10 @@ CELL_TO_PREDICATE: dict[str, list[str]] = {
 }
 """Each cell's predicate bands as `column<op>value` strings — the flat view
 consumers read instead of walking `AxisBand` objects."""
+
+CELLS_BY_NAME: dict[str, ArchetypeCell] = {cell.name: cell for cell in CELLS}
+"""Name lookup — the consumers dispatch on `name`, so they resolve through
+this rather than scanning `CELLS`."""
 
 CELL_TO_BANKS: dict[str, frozenset[str]] = {
     cell.name: cell.required_banks for cell in CELLS

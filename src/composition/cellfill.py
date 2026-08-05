@@ -15,11 +15,13 @@ import pandas as pd
 from augmentation.config import AugmentationConfig
 from dataset_registry import DATASETS
 from hybrid_search_rrf_dataset.router import decisive_rows
+from query_taxonomy.features import FeatureExtractor
 
 from composition.cells import CELLS, ArchetypeCell
 from composition.compose import DEFAULT_CATALOG, DEFAULT_OUT_DIR, join_text
 from composition.fill import QRELS, FloorLedger
 from composition.floors import FloorSpec
+from composition.mini_catalog import mini_catalog
 from composition.recipe import Recipe
 
 DEFAULT_LABELS = DEFAULT_OUT_DIR.parent / "route_labels" / "labels.parquet"
@@ -31,6 +33,7 @@ REUSED = "reused"
 CANDIDATE = "candidate"
 CONTROL = "control"
 EXHAUSTED = "exhausted"
+NATURAL = "natural"
 ID_COLUMNS = ["dataset", "query_id", "checkable"]
 
 
@@ -179,6 +182,139 @@ class CellFill:
         absent = sorted(set(self._datasets) - set(catalog["dataset"]))
         self._write(selection, sheet, report, absent)
         return selection
+
+    def admit(
+        self,
+        pool: pd.DataFrame,
+        *,
+        extractor: FeatureExtractor | None = None,
+    ) -> pd.DataFrame:
+        """Admit the pool rows that land in their own cell, each capped at that
+        cell's shortfall and its lane share (d51j). Rewrites the selection and
+        the order sheet; returns the admitted rows."""
+        selection = pd.read_parquet(self.selection_path)
+        if "provenance" not in selection.columns:
+            # a selection written before d51k: the fill only ever drew catalog
+            # rows, so every row it holds is natural
+            selection["provenance"] = NATURAL
+        sheet = pd.read_parquet(self.order_sheet_path)
+        cells = {cell.name: cell for cell in CELLS}
+        fresh = self._admissible(pool, selection, sheet)
+        if fresh.empty:
+            print("cell admit: nothing admissible in the pool")
+            return selection.iloc[:0]
+
+        mini = mini_catalog(
+            fresh,
+            extractor or FeatureExtractor(engines=None),
+            columns=tuple(
+                {band.column for cell in CELLS for band in cell.bands}
+            ),
+        )
+        admitted, gained = [], {}
+        for line in sheet[sheet["missing"] > 0].itertuples(index=False):
+            cell = cells.get(line.floor)
+            if cell is None:
+                continue
+            members = fresh[
+                (fresh["floor"] == line.floor)
+                & cell.select(mini).to_numpy()
+            ]
+            if members.empty:
+                continue
+            share = float(
+                self._report_share(line.floor) or self._recipe.target_lane_share
+            )
+            taken = self._take(
+                members, int(line.missing), share, f"admit:{line.floor}",
+            )
+            if taken.empty:
+                continue
+            gained[line.floor] = len(taken)
+            admitted.append(self._admitted_rows(taken, line.floor))
+
+        if not admitted:
+            print("cell admit: no pool row landed in a hungry cell")
+            return selection.iloc[:0]
+        rows = pd.concat(admitted, ignore_index=True)[selection.columns]
+        updated = pd.concat([selection, rows], ignore_index=True)
+        self._assert_natural_share(updated)
+        new_sheet = self._credit_sheet(sheet, gained)
+        updated.to_parquet(self.selection_path, index=False)
+        new_sheet.to_parquet(self.order_sheet_path, index=False)
+        print(
+            f"cell admit: {len(rows):,} rows into {len(gained)} cells | "
+            f"selection {len(selection):,} -> {len(updated):,} | hungry cells "
+            f"{int((sheet['missing'] > 0).sum())} -> "
+            f"{int((new_sheet['missing'] > 0).sum())}"
+        )
+        return rows
+
+    @staticmethod
+    def _admissible(
+        pool: pd.DataFrame, selection: pd.DataFrame, sheet: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Ungated pool rows for a still-hungry cell that the selection does
+        not already hold."""
+        rows = pool
+        if "credit_gate" in rows.columns:
+            gated = rows["credit_gate"].fillna("none") != "none"
+            if gated.any():
+                print(
+                    f"cell admit: skipping {int(gated.sum())} feature-stock "
+                    "rows (gated operators, d42h)"
+                )
+            rows = rows[~gated]
+        hungry = set(sheet.loc[sheet["missing"] > 0, "floor"])
+        return rows[
+            rows["floor"].isin(hungry)
+            & ~rows["query_id"].isin(set(selection["query_id"]))
+        ].assign(
+            # the lane a child is labelled in is the lane the ledger caps on
+            dataset=lambda frame: frame["home_lane"],
+        ).reset_index(drop=True)
+
+    def _report_share(self, cell: str) -> float | None:
+        """The lane-share cap the fill computed for this cell, so admitted rows
+        obey the same bound the natural draw did."""
+        if not self.report_path.exists():
+            return None
+        report = pd.read_parquet(self.report_path)
+        line = report[report["cell"] == cell]
+        return float(line["lane_share_cap"].iloc[0]) if len(line) else None
+
+    def _admitted_rows(self, taken: pd.DataFrame, cell: str) -> pd.DataFrame:
+        """Pool rows in selection schema: labelled in their home lane, staged
+        for labelling, provenance carried from the operator that made them."""
+        return pd.DataFrame({
+            "dataset": taken["home_lane"].to_numpy(),
+            "query_id": taken["query_id"].to_numpy(),
+            "checkable": True,
+            "cell": cell,
+            "stage": CANDIDATE,
+            "route": pd.NA,
+            "provenance": taken["provenance"].to_numpy(),
+            "floors": [[cell]] * len(taken),
+            "query": taken["query"].to_numpy(),
+        })
+
+    def _assert_natural_share(self, selection: pd.DataFrame) -> None:
+        natural = (selection["provenance"] == NATURAL).mean()
+        assert natural >= self._recipe.min_natural_share - 1e-9, (
+            f"natural share {natural:.3f} fell below the recipe minimum "
+            f"{self._recipe.min_natural_share}"
+        )
+
+    @staticmethod
+    def _credit_sheet(
+        sheet: pd.DataFrame, gained: dict[str, int]
+    ) -> pd.DataFrame:
+        """Credit what was admitted and drop the lines that reached zero."""
+        out = sheet.copy()
+        credited = out["floor"].map(gained).fillna(0.0)
+        out["credit"] = out["credit"] + credited
+        out["missing"] = out["missing"] - credited
+        return out[out["missing"] > 1e-9].reset_index(drop=True)
 
     @staticmethod
     def _membership(
@@ -340,6 +476,7 @@ class CellFill:
         frame["cell"] = cell
         frame["stage"] = CANDIDATE if route is None else REUSED
         frame["route"] = pd.NA if route is None else route
+        frame["provenance"] = NATURAL
         return frame
 
     def _control(self, unclaimed: pd.DataFrame, cell_rows: int) -> pd.DataFrame:

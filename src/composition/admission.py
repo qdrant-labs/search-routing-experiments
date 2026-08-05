@@ -21,7 +21,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 
-from query_taxonomy.features import FeatureExtractor, QueryFeatures
+from query_taxonomy.features import FeatureExtractor
 
 from composition.fill import QRELS, FillResult, WeakestFirstFill
 from composition.floors import (
@@ -30,21 +30,8 @@ from composition.floors import (
     StatFloorDeriver,
     span_mask,
 )
+from composition.mini_catalog import mini_catalog
 from composition.recipe import Recipe
-
-
-def _feature_columns(features: QueryFeatures) -> dict[str, float]:
-    """The catalog column convention (scripts/feature_table.py): span
-    counts as `<group>.<type>`, stat scalars as `<bank>.<stat>`."""
-    row: dict[str, float] = {}
-    for group, counts_by_type in features.tfs.items():
-        for type_, count in counts_by_type.items():
-            row[f"{group.value}.{type_}"] = count
-    for stats_by_bank in features.stats.values():
-        for bank_name, stats in stats_by_bank.items():
-            for stat in stats:
-                row[f"{bank_name}.{stat.name}"] = stat.value
-    return row
 
 
 class SelectionArtifacts(NamedTuple):
@@ -157,18 +144,7 @@ class MiniFill:
         return ceiling - (len(selection) - natural)
 
     def _mini_catalog(self, fresh: pd.DataFrame) -> pd.DataFrame:
-        """Catalog-shaped rows for the pool texts — same extractor
-        configuration, same column convention as the base catalog."""
-        rows = []
-        for row in fresh.itertuples(index=False):
-            record: dict[str, object] = {
-                "dataset": row.home_lane,
-                "query_id": row.query_id,
-                "checkable": True,
-            }
-            record.update(_feature_columns(self._extractor.resolve(str(row.query))))
-            rows.append(record)
-        return pd.DataFrame(rows).fillna(0.0)
+        return mini_catalog(fresh, self._extractor)
 
     def _derive_credits(self, mini: pd.DataFrame) -> dict[str, pd.Series]:
         """Every floor's per-row credit over the mini catalog. Span floors

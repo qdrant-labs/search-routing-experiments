@@ -34,7 +34,7 @@ from augmentation.core import (
 )
 from augmentation.supply import SupplyIndex, lane_dirs
 from composition.catalog_axes import StatAxis, stat_column
-from composition.cells import CELL_TO_BANKS, GENERATION_CELLS
+from composition.cells import CELL_TO_BANKS, CELLS_BY_NAME, AxisBand
 from composition.floors import STAT_AXES, identifier_floor_key
 from query_taxonomy.features import FeatureExtractor
 from query_taxonomy.taxonomy import FeatureGroup
@@ -89,23 +89,20 @@ class DecorateOperator(Operator):
         self._rng = Random(config.seed)
         self._order_seed = config.seed
 
-    cells: ClassVar[frozenset[str]] = GENERATION_CELLS.get(
-        "decorate", frozenset()
-    )
-    """Cells whose claim IS register marking — servable here because a
-    decoration is woven from the phrase list, needing no document supply."""
-
     def marker(self, floor: str) -> str:
         """The decoration this demand names: a marker: floor names it
         outright, a cell resolves to one required decoration — any single
         one satisfies an `any_of` cell."""
-        if floor in self.cells:
+        if floor in CELLS_BY_NAME:
             return min(CELL_TO_BANKS[floor] & set(self._decorations))
         return floor.removeprefix("marker:")
 
+    def mints(self, band: AxisBand) -> bool:
+        """Only the registered decorations — other marker banks are
+        detections, not weavable filler."""
+        return band.demands_presence and band.member in self._decorations
+
     def serves(self, floor: str) -> bool:
-        if floor in self.cells:
-            return True
         return floor.startswith("marker:") and self.marker(floor) in self._decorations
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
@@ -185,11 +182,11 @@ class OperatorSyntaxRewrite(Operator):
         self._catalog_path = config.paths.catalog
         self._order_seed = config.seed
 
-    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["operator_syntax_rewrite"]
-    """The archetype cell whose whole claim IS operator dialect."""
+    def mints(self, band: AxisBand) -> bool:
+        return band.demands_presence and band.member == "operator_syntax"
 
     def serves(self, floor: str) -> bool:
-        return floor == "logical:operator_syntax" or floor in self.cells
+        return floor == "logical:operator_syntax"
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
         """Parents with coordination to restructure (widest_list_size >= 2
@@ -265,8 +262,15 @@ class StatRewrite(Operator):
         self._stats: StatDeclarations = config.stats
         self._catalog_path = config.paths.catalog
 
+    def _band(self, floor: str) -> tuple[StatAxis, float, float] | None:
+        """The (axis, low, high) this demand names — a cell resolves through
+        the stat band this operator mints, a floor through the label table."""
+        if floor in CELLS_BY_NAME:
+            return self._cell_band(floor)
+        return self._floor_band(floor)
+
     @staticmethod
-    def _band(floor: str) -> tuple[StatAxis, float, float] | None:
+    def _floor_band(floor: str) -> tuple[StatAxis, float, float] | None:
         for axis in STAT_AXES:
             for index, label in enumerate(axis.labels):
                 key = f"{axis.title}:{str(label).replace(chr(10), ' ')}"
@@ -274,14 +278,35 @@ class StatRewrite(Operator):
                     return axis, axis.edges[index], axis.edges[index + 1]
         return None
 
-    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["stat_rewrite"]
-    """Cells whose feature is common and whose length band is what is rare:
-    relaxing the band keeps the parent's answer key."""
+    def _cell_band(self, floor: str) -> tuple[StatAxis, float, float] | None:
+        cell = CELLS_BY_NAME.get(floor)
+        for band in cell.bands if cell else ():
+            if band.is_span or not self.mints(band):
+                continue
+            axis = next((a for a in STAT_AXES if a.title == band.member), None)
+            if axis is not None:
+                return (
+                    axis,
+                    float(band.at_least if band.at_least is not None else -np.inf),
+                    float(band.below if band.below is not None else np.inf),
+                )
+        return None
+
+    def mints(self, band: AxisBand) -> bool:
+        """A stat band whose axis declares the direction that reaches it: a
+        lower bound wants UP, a bare upper bound wants DOWN (undeclared, so
+        shortening never happens — d51f)."""
+        if band.is_span:
+            return False
+        wanted = (
+            StatDirection.UP if band.at_least is not None else StatDirection.DOWN
+        )
+        return wanted in self._stats.directions(band.member)
 
     def serves(self, floor: str) -> bool:
-        if floor in self.cells:
-            return True
-        band = self._band(floor)
+        """Floor demands only — a cell reaches this family through
+        `dispatch`, which derives it from the bands a parent fails."""
+        band = self._floor_band(floor)
         return band is not None and bool(self._stats.directions(band[0].title))
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
@@ -303,7 +328,10 @@ class StatRewrite(Operator):
         ) | (
             (StatDirection.DOWN in declared) & (joined["__value"] >= high)
         )
-        mask = joined["checkable"] & (joined["__spans"] == 0) & movable
+        # the zero-span pool is a stat-FLOOR convention (d33b); a cell may
+        # legitimately demand a span band and a stat band together
+        zero_span = True if floor in CELLS_BY_NAME else joined["__spans"] == 0
+        mask = joined["checkable"] & zero_span & movable
         out = joined[mask].assign(stat_value=joined["__value"])
         distance = np.where(
             out["__value"] < low, low - out["__value"], out["__value"] - high
@@ -389,18 +417,21 @@ class InjectOperator(Operator):
         self._order_seed = config.seed
         self._supply = SupplyIndex(config.paths)
 
-    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["inject"]
-    """Cells whose surface has to be minted from a grounding doc, natural
-    supply being near zero."""
+    def mints(self, band: AxisBand) -> bool:
+        """Any identifier span asking for more — whether a corpus actually
+        supplies it is the rung test, not the declaration (d51d)."""
+        return band.demands_presence and band.column.startswith(
+            f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
+        )
 
     def serves(self, floor: str) -> bool:
-        return floor.startswith("id:") or floor in self.cells
+        return floor.startswith("id:")
 
     def drawable(self, surfaces: pd.DataFrame, floor: str) -> pd.DataFrame:
         """The surface rows this demand can draw from — an id: floor names
         its own supply rows, a cell name resolves to its required banks (the
         index is keyed per bank and carries no cell names)."""
-        if floor in self.cells:
+        if floor in CELLS_BY_NAME:
             return surfaces[surfaces["bank"].isin(CELL_TO_BANKS[floor])]
         return surfaces[surfaces["floor"] == floor]
 

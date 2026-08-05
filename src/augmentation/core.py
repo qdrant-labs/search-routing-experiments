@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -18,11 +18,24 @@ from pydantic import BaseModel, ConfigDict
 from augmentation.config import AugmentationConfig
 from taxonomy_generators.verify import Targets
 
+if TYPE_CHECKING:  # a type only — keeps the base class off composition's graph
+    from composition.cells import AxisBand
+
 
 class SurfaceOrigin(StrEnum):
     NONE = "none"
     DOC_COPIED = "doc_copied"
     SYNTHETIC = "synthetic"
+
+    @property
+    def provenance(self) -> str:
+        """The selection's provenance value for a row this origin produced
+        (d51k) — no document consulted still means the query changed."""
+        return {
+            SurfaceOrigin.NONE: "augmented",
+            SurfaceOrigin.DOC_COPIED: "doc_grounded",
+            SurfaceOrigin.SYNTHETIC: "synthetic",
+        }[self]
 
 
 class AnswerKeyPath(StrEnum):
@@ -72,7 +85,9 @@ class AugmentedCandidate(BaseModel):
     query: str
     floor: str
     operator: str
-    provenance: str = "augmented"
+    provenance: str
+    """Set from the operator's `surface_origin` at birth — the selection reads
+    it rather than re-deriving it from the operator name (d51k)."""
     generated_from: str
     parent_dataset: str
     home_lane: str
@@ -92,10 +107,6 @@ class Operator(ABC):
 
     declaration: ClassVar[Declaration]
 
-    cells: ClassVar[frozenset[str]] = frozenset()
-    """Archetype cells this family mints, declared in cells.yaml and read
-    through GENERATION_CELLS — empty where the family serves floors only."""
-
     def __init__(self, config: AugmentationConfig) -> None:
         self.first_generation_only = config.first_generation_only
         """d43-review guard: augmented rows are never parents — no
@@ -109,13 +120,19 @@ class Operator(ABC):
         return selection
 
     def unsatisfied(self, pool: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Parents the demand does not already cover — by cell membership
-        where the selection records it, else by the floor's own column."""
-        if floor in self.cells:
-            if "cell" not in pool.columns:
-                return pool
-            return pool[pool["cell"] != floor]
+        """Parents a FLOOR demand does not already cover, read off the
+        selection's `floors` membership column. A cell pool carries no such
+        column and needs no filter: `dispatch.predicate_minus_one` has already
+        dropped every row that satisfies the cell."""
+        if "floors" not in pool.columns:
+            return pool
         return pool[~pool["floors"].map(lambda floors: floor in floors)]
+
+    @abstractmethod
+    def mints(self, band: AxisBand) -> bool:
+        """Whether this operator can put this band's feature INTO a query —
+        the declaration cell dispatch derives from (d51c). Abstract for the
+        same reason `structural` is: a family that mints nothing says so."""
 
     @abstractmethod
     def serves(self, floor: str) -> bool:
@@ -155,6 +172,7 @@ class Operator(ABC):
         operators (Inject) override to attach the surface_origin doc."""
         slug = floor.replace(":", "-")
         return AugmentedCandidate(
+            provenance=self.declaration.surface_origin.provenance,
             query_id=f"aug-{slug}-{parent['query_id']}",
             query=text,
             floor=floor,
