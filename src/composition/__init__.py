@@ -2,7 +2,8 @@
 the d29 feature-table catalog. `TargetComposition` owns the artifact;
 `Recipe` owns every number."""
 
+from composition.cellfill import CellFill
 from composition.compose import TargetComposition
 from composition.recipe import Recipe
 
-__all__ = ["Recipe", "TargetComposition"]
+__all__ = ["CellFill", "Recipe", "TargetComposition"]

@@ -15,12 +15,14 @@ is re-emitted from the mini-fill's own ledger.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import NamedTuple
+
 import numpy as np
 import pandas as pd
 
 from query_taxonomy.features import FeatureExtractor, QueryFeatures
 
-from composition.compose import TargetComposition
 from composition.fill import QRELS, FillResult, WeakestFirstFill
 from composition.floors import (
     FloorSpec,
@@ -45,16 +47,36 @@ def _feature_columns(features: QueryFeatures) -> dict[str, float]:
     return row
 
 
+class SelectionArtifacts(NamedTuple):
+    """Where a fill wrote its selection, order sheet and summary."""
+
+    selection_path: Path
+    order_sheet_path: Path
+    summary_path: Path
+
+    @classmethod
+    def legacy(cls) -> "SelectionArtifacts":
+        """The slice fill's artifacts — the only ones the pool was built against."""
+        # local: keeps the slice fill out of the import graph of everything
+        # that only needs paths
+        from composition.compose import TargetComposition
+
+        old = TargetComposition()
+        return cls(old.selection_path, old.order_sheet_path, old.summary_path)
+
+
 class MiniFill:
-    """Admission from the generated pool into `selection.parquet`."""
+    """Admission from the generated pool into a selection artifact.
+
+    Takes the three artifact paths, so it serves whichever fill wrote them."""
 
     def __init__(
         self,
-        composition: TargetComposition | None = None,
+        artifacts: SelectionArtifacts | None = None,
         recipe: Recipe | None = None,
         extractor: FeatureExtractor | None = None,
     ) -> None:
-        self._composition = composition or TargetComposition()
+        self._artifacts = artifacts or SelectionArtifacts.legacy()
         self._recipe = recipe or Recipe()
         # engines=None: full parity with the catalog build — children's
         # floors and credits must mean the same thing as the base's
@@ -65,8 +87,8 @@ class MiniFill:
         ceiling, and the per-lane cap allow. Returns the admitted rows in
         selection schema; artifacts (selection, order sheet, summary) are
         rewritten in place."""
-        selection = pd.read_parquet(self._composition.selection_path)
-        sheet = pd.read_parquet(self._composition.order_sheet_path)
+        selection = pd.read_parquet(self._artifacts.selection_path)
+        sheet = pd.read_parquet(self._artifacts.order_sheet_path)
         if "generated_from" not in selection.columns:
             selection["generated_from"] = pd.NA
 
@@ -115,8 +137,8 @@ class MiniFill:
         new_sheet = self._updated_sheet(sheet, result)
         self._assert_invariants(updated, new_sheet)
 
-        updated.to_parquet(self._composition.selection_path, index=False)
-        new_sheet.to_parquet(self._composition.order_sheet_path, index=False)
+        updated.to_parquet(self._artifacts.selection_path, index=False)
+        new_sheet.to_parquet(self._artifacts.order_sheet_path, index=False)
         self._append_summary(fresh.iloc[result.picked], sheet, new_sheet)
         print(
             f"mini-fill: admitted {len(admitted):,} of {len(fresh):,} fresh "
@@ -262,5 +284,5 @@ class MiniFill:
             lines.append(
                 f"```\n{picked['floor'].value_counts().to_string()}\n```\n"
             )
-        path = self._composition.summary_path
+        path = self._artifacts.summary_path
         path.write_text(path.read_text() + "\n".join(lines))

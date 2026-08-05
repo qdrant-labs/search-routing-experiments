@@ -1,0 +1,773 @@
+_note: Archetype cells for the Strategy Router composition. fable_5-generated spine; the eight pooled
+  identifier cells had unbuilt-bank any_of branches trimmed so every band resolves to a live catalog column
+  (re-add the branch when its bank ships). predicts is a falsifiable prior tested by labelling, never
+  used to allocate.
+cells:
+- name: bare_concept_token
+  predicate:
+  - column: length.length_words
+    below: 3
+  - column: structured_identifiers.number
+    below: 1
+  predicts:
+  - dense_only
+  rationale: One or two words naming a single concept give the embedding a clean, well-trained point in
+    space, while BM25 holds a single medium-IDF term with no way to break ties among the thousands of
+    documents containing it. The counter-mechanism is the token being rare verbatim jargon, but that regime
+    is claimed by the opaque-token cells; here the falsifiable claim is that the head of the shortest-query
+    distribution goes dense.
+  source: fable_5
+- name: short_grammatical_question
+  predicate:
+  - column: length.length_words
+    at_least: 3
+    below: 7
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.4
+  - column: structured_identifiers.number
+    below: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: A short question whose token budget is mostly closed-class leaves two or three content words
+    to carry the need. The route flips on whether those words are the target passage's literal vocabulary
+    or a paraphrase of it — a property of phrasing choice and term rarity, not of any corpus — so both
+    outcomes are genuinely available in the highest-traffic region.
+  source: fable_5
+- name: stopword_saturated_midlength
+  predicate:
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  - column: stopword_ratio.stopword_ratio
+    at_least: 0.45
+  - column: structured_identifiers.number
+    below: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Extends the buried-anchor shape into full-sentence territory: BM25 discards roughly half
+    the tokens and scores on the three-to-five surviving content words, while dense reads the complete
+    syntax including the relations the function words encode. The route follows whether the surviving
+    content words are the discriminating vocabulary of the answer or a paraphrase of it.'
+  source: fable_5
+- name: verbose_grammatical_request
+  predicate:
+  - column: length.length_words
+    at_least: 20
+    below: 60
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.4
+  predicts:
+  - dense_only
+  - pure_rrf
+  rationale: 'A long grammatical ask gives dense a full intent to compress, while BM25 receives many medium-IDF
+    content terms whose union over-matches tangential documents. RRF has a specific opening: when query
+    and target vocabulary largely coincide, both retrievers rank the same document highly for independent
+    reasons, and rank aggregation is more stable at rank 1 than either list alone.'
+  source: fable_5
+- name: extreme_length_pasted_query
+  predicate:
+  - column: length.length_words
+    at_least: 60
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: Sixty-plus words is no longer a question but a pasted passage. A single-vector embedding
+    must average many facets and may truncate, while BM25 turns the same input into dozens of independent
+    anchors with TF saturation — effectively document-to-document matching, where lexical methods are
+    historically strong. Both mechanisms are real, so the route is genuinely contested at this length.
+  source: fable_5
+- name: high_morphological_variation
+  predicate:
+  - column: morphology.word_variation_share
+    at_least: 0.35
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  - column: length.length_words
+    at_least: 3
+    below: 20
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: When a large share of tokens are inflected or derived forms, exact matching depends on the
+    analyzer's stemmer happening to conflate the query form with the document form — a per-term coin flip.
+    The encoder normalizes morphology, so dense should degrade less; sparse stays available when stems
+    do align or when an inflected variant is itself the rare discriminating form.
+  source: fable_5
+- name: deep_nesting_single_sentence
+  predicate:
+  - column: syntactic_depth.nesting_depth
+    at_least: 6
+  - column: syntactic_depth.statement_count
+    below: 2
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  predicts:
+  - dense_only
+  rationale: A single deeply embedded sentence puts the meaning in the composition — who did what to whom
+    under which condition — which a bag-of-words model flattens away entirely, while dense encodes at
+    least part of that structure. The NL floor keeps the parser honest, since depth is hallucinated on
+    non-sentences. The counter-mechanism is a rare term deciding the match regardless of structure, which
+    the predicate does not select for, so structure should dominate.
+  source: fable_5
+- name: multi_statement_context_dump
+  predicate:
+  - column: syntactic_depth.statement_count
+    at_least: 3
+  - column: length.length_words
+    at_least: 20
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  predicts:
+  - dense_only
+  - pure_rrf
+  rationale: 'Several clauses mean background plus an actual ask: dense compresses the whole and risks
+    diluting the ask, sparse harvests rare terms from every clause including irrelevant background. RRF''s
+    specific mechanism here is that the two retrievers fail on different clauses, and documents satisfying
+    the union of partial evidence — usually the truly relevant ones — survive as the consensus.'
+  source: fable_5
+- name: wide_flat_enumeration
+  predicate:
+  - column: coordination.widest_list_size
+    at_least: 3
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.1
+  - column: length.length_words
+    at_least: 3
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: 'A coordination chain of three or more items is a multi-facet query — the known worst case
+    for a single vector, which averages the facets into a centroid near none of them — while BM25 scores
+    coverage across the items natively. RRF is live when the frame around the list (difference, compatibility,
+    ranking) is what dense contributes while sparse contributes item coverage: complementary evidence
+    converging on the same documents.'
+  source: fable_5
+- name: keyword_telegram_short
+  predicate:
+  - column: natural_language_signal.natural_language_share
+    below: 0.1
+  - column: length.length_words
+    at_least: 3
+    below: 7
+  - column: structured_identifiers.number
+    below: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'The classic keyword telegram: no closed-class tokens, every term load-bearing. The taxonomy''s
+    working assumption is telegram implies sparse, but syntax-free input also just reduces both retrievers
+    to term semantics — embeddings still resolve synonymy between keywords and document phrasing. This
+    cell exists to test the telegram-to-sparse assumption rather than encode it.'
+  source: fable_5
+- name: negation_bearing_question
+  predicate:
+  - column: sentence_markers.negation
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  - column: length.length_words
+    at_least: 3
+    below: 20
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: In principle only dense can represent a negator, since bag-of-words treats the negated term
+    as a positive match and the negator as a near-stopword; in practice bi-encoders score close to chance
+    on negation benchmarks, so both retrievers largely act on the non-negated residue. The prior spans
+    both routes because the winner is decided by that residue, and the cell tests whether negation should
+    modulate routing confidence at all.
+  source: fable_5
+- name: comparative_multi_entity
+  predicate:
+  - column: sentence_markers.comparative
+    at_least: 1
+  - column: coordination.widest_list_size
+    at_least: 2
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.1
+  predicts:
+  - dense_only
+  - pure_rrf
+  rationale: 'X-versus-Y queries let each retriever happily surface documents about one entity alone;
+    the relevant document must cover the relation. Dense can represent the comparative frame directly.
+    RRF''s concrete mechanism: documents mentioning both entities receive moderate rank from both retrievers,
+    and rank fusion promotes exactly that consensus over each retriever''s single-entity toplist.'
+  source: fable_5
+- name: conversational_courtesy_wrapper
+  predicate:
+  - column: stopword_ratio.stopword_ratio
+    at_least: 0.4
+  - column: length.length_words
+    at_least: 10
+  any_of:
+  - column: sentence_markers.greeting
+    at_least: 1
+  - column: sentence_markers.politeness
+    at_least: 1
+  - column: sentence_markers.interjection
+    at_least: 1
+  predicts:
+  - dense_only
+  rationale: Greetings and courtesy padding are pure noise to BM25 — near-zero-IDF terms that dilute score
+    mass — while instruction-tuned embedders were trained on precisely this register and locate the request
+    despite the wrapper. Sparse competes only when a rare content term survives inside the padding, which
+    the predicate does not require; that is the stated counter-mechanism.
+  source: fable_5
+  operator: decorate
+- name: bare_acronym
+  predicate:
+  - column: sentence_markers.acronym
+    at_least: 1
+  - column: length.length_words
+    below: 3
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'A naked acronym''s route is a function of its token statistics alone: a famous acronym is
+    a first-class semantic entity dense places precisely, an obscure one is an opaque rare string only
+    exact match reaches. Fame versus rarity is a property of the query token, so both routes arise within
+    one shape for query reasons.'
+  source: fable_5
+  operator: stat_rewrite
+- name: acronym_inside_question
+  predicate:
+  - column: sentence_markers.acronym
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.4
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: The acronym supplies a hard lexical anchor while the surrounding question supplies intent
+    that dense reads. Sparse wins outright when targets consistently use the acronym; fusion wins when
+    targets alternate between acronym and expansion, so each retriever recovers a different verbalization
+    of the same answer and the fused ranking covers both.
+  source: fable_5
+- name: pasted_code_fragment
+  predicate:
+  - column: logical_structures.code_fragment
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    below: 0.1
+  - column: length.length_words
+    at_least: 10
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: A pasted snippet or trace holds a few genuinely rare symbols — the user's identifiers, the
+    failing frame — drowning in boilerplate tokens shared by every trace of that kind. Sparse wins when
+    the rare symbols occur verbatim in the answer; RRF's mechanism is dense recognizing the failure pattern
+    semantically while sparse pins the specific symbols, different evidence converging on one document.
+  source: fable_5
+- name: code_symbol_named_in_prose
+  predicate:
+  - column: structured_identifiers.code_identifier
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.4
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: 'The controlled opposite of a symbol pile: one API name embedded in a grammatical question.
+    The symbol is usually the highest-IDF token and sparse anchors on it; fusion wins exactly when the
+    question''s intent — deprecation, alternative, error cause — must select among the many documents
+    containing the symbol, so anchor and intent are both required to reach rank 1.'
+  source: fable_5
+- name: symbol_pile_no_grammar
+  predicate:
+  - column: structured_identifiers.code_identifier
+    at_least: 2
+  - column: natural_language_signal.natural_language_share
+    below: 0.1
+  - column: length.length_words
+    below: 10
+  predicts:
+  - sparse_only
+  rationale: Multiple identifiers with no connective grammar hand BM25 a conjunction of rare terms — the
+    strongest lexical evidence available — while a general-text encoder receives subword fragments with
+    no syntax to compose. The counter-mechanism would be a code-pretrained embedder that treats identifiers
+    as vocabulary, which makes the single-route claim falsifiable rather than definitional.
+  source: fable_5
+- name: math_notation_present
+  predicate:
+  - column: logical_structures.math_expression
+    at_least: 1
+  - column: length.length_words
+    below: 20
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Notation cuts both ways: famous formulae are memorized semantic entities an embedding resolves
+    as concepts, while arbitrary expressions survive only as exact character runs that analyzer tokenization
+    may or may not preserve. Which regime a given expression falls into is a property of the query token,
+    so the shape legitimately produces both routes.'
+  source: fable_5
+- name: boolean_operator_query
+  predicate:
+  - column: logical_structures.operator_syntax
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    below: 0.25
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Uppercase boolean operators are retrieval commands neither engine executes: standard analyzers
+    lowercase them into stopwords and rank rather than filter, while the encoder treats them as noisy
+    capitalized function words. The operator semantics — especially NOT — are lost on both sides, so the
+    route falls to the operands; the cell tests the taxonomy''s assumption that operator syntax marks
+    a sparse query.'
+  source: fable_5
+  operator: operator_syntax_rewrite
+- name: relative_temporal_no_dates
+  predicate:
+  - column: logical_structures.temporal
+    at_least: 1
+  - column: structured_identifiers.datetime
+    below: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  predicts:
+  - dense_only
+  rationale: 'Relative time in words — latest, since, three days ago — is semantically pivotal but lexically
+    worthless: the terms are low-IDF, and BM25 either discards them or matches them meaninglessly across
+    unrelated documents, while dense at least encodes the temporal relation. Sparse can only win through
+    the non-temporal residue, which makes the single route the honest falsifiable prior.'
+  source: fable_5
+- name: datetime_token_present
+  predicate:
+  - column: structured_identifiers.datetime
+    at_least: 1
+  - column: length.length_words
+    at_least: 3
+    below: 10
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: A concrete date is a moderately rare token whose surface form — 2024-03-01 versus March 1st
+    — may or may not match the target's. Format agreement makes sparse decisive; disagreement blinds it
+    entirely while dense recovers through surrounding context. The format is chosen at query time, so
+    both routes arise for query reasons.
+  source: fable_5
+  operator: inject
+- name: version_pinned_technical
+  predicate:
+  - column: structured_identifiers.version_string
+    at_least: 1
+  - column: length.length_words
+    at_least: 3
+    below: 10
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: Version strings are high-precision anchors that embeddings actively blur — 2.1.3 and 2.1.4
+    are nearly identical vectors despite the difference being the entire point. Sparse wins when the exact
+    version tags the answer; fusion wins when the version narrows the candidate set while the accompanying
+    words (breaking change, migration) need semantic matching to pick the right document within it.
+  source: fable_5
+- name: status_code_idf_split
+  predicate:
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  any_of:
+  - column: structured_identifiers.error_code_like
+    at_least: 1
+  - column: structured_identifiers.http_status_code
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'This family spans the full IDF spectrum inside one surface shape: a 404 occurs in millions
+    of documents and anchors nothing, while 0x80070005 occurs in a handful and decides the match alone.
+    The identifier''s rarity — a query property — flips the route, directly embodying the principle that
+    identifier presence per se implies nothing.'
+  source: fable_5
+- name: rare_key_buried_in_chatter
+  predicate:
+  - column: stopword_ratio.stopword_ratio
+    at_least: 0.4
+  - column: length.length_words
+    at_least: 10
+    below: 60
+  any_of:
+  - column: structured_identifiers.cve
+    at_least: 1
+  - column: structured_identifiers.ticket_like
+    at_least: 1
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: One decisive token — a CVE or ticket key — wrapped in conversational filler BM25 happily
+    discards; the anchor's IDF is high enough that dilution barely matters, so sparse should usually win.
+    The mechanism is robust to ticket_like's known false positives, since protein-style codes are equally
+    rare anchors. Fusion's specific opening is discussion-style targets that paraphrase the issue without
+    restating the key, where dense's reading of the chatter recovers what the anchor misses.
+  source: fable_5
+- name: bare_number_token
+  predicate:
+  - column: structured_identifiers.number
+    at_least: 1
+  - column: length.length_words
+    below: 3
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'A lone number is the cleanest test of anchor strength: 42 or 2024 is a low-IDF token that
+    anchors nothing and often names a concept — a year, a famous constant — dense resolves better, while
+    a nine-digit string is rare enough for exact match to be decisive. Digit-run rarity is measurable
+    on the query alone, so both routes are available for query reasons.'
+  source: fable_5
+- name: number_inside_natural_question
+  predicate:
+  - column: structured_identifiers.number
+    at_least: 1
+  - column: stopword_ratio.stopword_ratio
+    at_least: 0.35
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: Inside a grammatical question the number is usually a parameter of the need — a year, a quantity
+    — so dense's reading of the frame should dominate; but when the number is a designation, a statute
+    section or model number, it becomes the discriminating term and sparse takes over. Same surface, two
+    anchor regimes, split by token rarity.
+  source: fable_5
+- name: short_quantified_spec
+  predicate:
+  - column: structured_identifiers.value_with_unit
+    at_least: 1
+  - column: length.length_words
+    at_least: 3
+    below: 7
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Value-plus-unit tokens like 3.5mm or 240Hz are mid-IDF: common within a product niche, rare
+    outside it. Sparse wins when the spec is the target''s literal vocabulary, as in spec sheets; dense
+    wins when targets express the same quantity differently or the spec merely narrows an otherwise semantic
+    need.'
+  source: fable_5
+  operator: inject
+- name: instance_value_in_intent
+  predicate:
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  any_of:
+  - column: structured_identifiers.hex_color
+    at_least: 1
+  - column: structured_identifiers.currency_amount
+    at_least: 1
+  predicts:
+  - dense_only
+  rationale: 'Hex colors and price points in queries are typically instance data — the user''s own values
+    — not the vocabulary of helpful documents, which discuss palettes and price ranges without quoting
+    #FF5733 or $47.99 verbatim. Sparse anchors on a token the answer does not contain, while dense reads
+    the intent around it. Falsified where canonical values — named-color hexes, round price points — do
+    appear verbatim in targets.'
+  source: fable_5
+- name: env_var_configuration
+  predicate:
+  - column: structured_identifiers.env_var
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: 'Unlike instance values, environment variable names are shared vocabulary: documentation
+    states JAVA_HOME verbatim, so the identifier is a strong legitimate anchor. Fusion enters when many
+    documents contain the variable and the surrounding question — not set, precedence, permissions — must
+    discriminate among them: sparse shortlists, dense selects within the shortlist, and the fused ranking
+    realizes both signals.'
+  source: fable_5
+- name: bare_machine_token
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.uuid
+    at_least: 1
+  - column: structured_identifiers.api_key
+    at_least: 1
+  - column: structured_identifiers.crypto_address
+    at_least: 1
+  - column: structured_identifiers.ip_address
+    at_least: 1
+  - column: structured_identifiers.cidr
+    at_least: 1
+  - column: structured_identifiers.host_port
+    at_least: 1
+  predicts:
+  - sparse_only
+  rationale: 'Randomly generated locators have zero semantic surface: subword tokenization shreds them
+    into fragments that never co-occurred in training, so the embedding is noise, while exact match is
+    binary and decisive. Pooled across families so the router learns the shape — high-entropy character
+    runs — rather than any one format. No dense mechanism exists for never-seen random strings, which
+    is exactly what makes the single-route claim worth testing rather than assuming.'
+  source: fable_5
+  operator: inject
+- name: registry_structured_identifier
+  predicate:
+  - column: length.length_words
+    below: 10
+  any_of:
+  - column: structured_identifiers.iban
+    at_least: 1
+  - column: structured_identifiers.bic
+    at_least: 1
+  - column: structured_identifiers.securities_id
+    at_least: 1
+  - column: structured_identifiers.tax_id
+    at_least: 1
+  - column: structured_identifiers.phone_number
+    at_least: 1
+  predicts:
+  - sparse_only
+  rationale: Registry identifiers are structured rather than random, but their information lives in checksum-bearing
+    character positions no distributional model represents; the only retrieval path is literal occurrence.
+    Kept distinct from machine tokens in surface shape — fixed-format, partly alphabetic — so the router
+    generalizes opacity across visually different families instead of memorizing one regex look.
+  source: fable_5
+  operator: inject
+- name: logistics_catalog_token
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.barcode
+    at_least: 1
+  - column: structured_identifiers.sku
+    at_least: 1
+  - column: structured_identifiers.serial_number
+    at_least: 1
+  - column: structured_identifiers.booking_reference_like
+    at_least: 1
+  predicts:
+  - sparse_only
+  rationale: The third opaque surface shape — long digit runs and dash-joined alphanumerics — kept separate
+    so opaque-token training mass spans the character-shape space rather than concentrating on one regex
+    family. booking_reference_like is a shape guess; when a match is coincidentally a real word the labels
+    will contradict the prior, which is the intended falsification channel, not a reason to soften the
+    claim.
+  source: fable_5
+- name: legal_citation_canonical
+  predicate:
+  - column: length.length_words
+    below: 10
+  any_of:
+  - column: structured_identifiers.legal_citation
+    at_least: 1
+  - column: structured_identifiers.court_docket
+    at_least: 1
+  - column: structured_identifiers.legislative_citation
+    at_least: 1
+  predicts:
+  - sparse_only
+  rationale: Citations are canonical strings whose punctuation-heavy format tokenizes into fragments dense
+    cannot reassemble, while legal targets reproduce them verbatim by professional convention — the strongest
+    verbatim guarantee of any identifier family. Pooling six citation systems across jurisdictions keeps
+    the cell fillable from unrelated corpora. Dense competes only for citations famous enough to be entities
+    in their own right, the stated counter-mechanism.
+  source: fable_5
+- name: bio_clinical_identifier
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.medical_code
+    at_least: 1
+  - column: structured_identifiers.genomic_accession
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Biomedical identifiers split by fame at the token level: BRCA1 and metformin are dense-vocabulary
+    entities with rich distributional context, while NM_000546.6 or NCT04280705 are opaque accessions
+    only exact match reaches. The family deliberately mixes both regimes so the router must learn token-level
+    rarity rather than domain membership.'
+  source: fable_5
+- name: bibliographic_catalog_identifier
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.academic_identifier
+    at_least: 1
+  - column: structured_identifiers.issn
+    at_least: 1
+  - column: structured_identifiers.library_classification
+    at_least: 1
+  - column: structured_identifiers.astronomical_designation
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'The same fame split in the catalog world: identifiers of famous works leak into distributional
+    training data through countless co-mentions — a landmark arXiv number, a bright exoplanet designation
+    — while a random ISWC or patent number does not. Whether a specific token has accumulated semantic
+    mass is a query property, so both routes occur inside one shape.'
+  source: fable_5
+- name: travel_transport_code
+  predicate:
+  - column: length.length_words
+    at_least: 3
+    below: 10
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.1
+  any_of:
+  - column: structured_identifiers.airport_airline_code
+    at_least: 1
+  - column: structured_identifiers.aircraft_vessel_reg_like
+    at_least: 1
+  - column: structured_identifiers.license_plate
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: IATA codes are among the most famous short tokens in existence — SFO and JFK function as
+    place names to an embedder — while tail numbers and plates are pure registry strings. One family with
+    maximal fame variance, so the route hinges on which member matched, and the _like member adds the
+    is-it-even-a-registration ambiguity on top.
+  source: fable_5
+- name: capsword_shape_ambiguity
+  predicate:
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  - column: length.length_words
+    at_least: 3
+    below: 10
+  any_of:
+  - column: structured_identifiers.stock_ticker_like
+    at_least: 1
+  - column: structured_identifiers.game_notation_like
+    at_least: 1
+  - column: structured_identifiers.betting_odds
+    at_least: 1
+  - column: structured_identifiers.derivatives_symbol_like
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: These banks are explicit shape guesses — the ticker bank fires on gene names like DNA and
+    ADHD, e4 is a chess move or a paper size, 5/2 is odds or a date. When the guess is right the token
+    is a rare anchor; when wrong it is an ordinary token whose capitalized form misleads sparse while
+    dense disambiguates from context. The ambiguity itself, not its resolution, is the routing-relevant
+    feature.
+  source: fable_5
+  operator: stat_rewrite
+- name: package_coordinate_dependency
+  predicate:
+  - column: structured_identifiers.package_coordinate
+    at_least: 1
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: A group:artifact:version coordinate is exact-match gold, but its segments are readable words
+    an encoder genuinely reads. Sparse wins on verbatim coordinates in manifests and changelogs; fusion
+    wins when prose targets name the package conversationally while sparse still anchors the segment tokens
+    — partial evidence from each side converging on the same document.
+  source: fable_5
+  operator: inject
+- name: web_locator_token
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.uri
+    at_least: 1
+  - column: structured_identifiers.email
+    at_least: 1
+  - column: structured_identifiers.social_handle
+    at_least: 1
+  - column: structured_identifiers.file_path
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Locators are exact strings, but unlike UUIDs they are built from morphemes: paths, handles,
+    and mailbox names encode readable words a subword model actually reads. Exact occurrence favors sparse;
+    morpheme leakage lets dense find the entity behind the locator when targets never quote it whole.
+    Which effect dominates depends on how word-like the specific locator is — a query property.'
+  source: fable_5
+  operator: inject
+- name: standards_compliance_lookup
+  predicate:
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.1
+  - column: length.length_words
+    at_least: 3
+    below: 10
+  any_of:
+  - column: structured_identifiers.standards_citation
+    at_least: 1
+  - column: structured_identifiers.hazmat_code
+    at_least: 1
+  predicts:
+  - sparse_only
+  - pure_rrf
+  rationale: 'Standard and classification codes are exact by design and reproduced verbatim in compliance-adjacent
+    targets, favoring sparse. The fusion case is concrete: many documents cite the same standard, and
+    only the semantic remainder of the query — scope, applicability, exemption — selects among them; the
+    anchor shortlists, the intent discriminates, and rank fusion realizes both.'
+  source: fable_5
+- name: geo_coordinate_postal
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.postal_code
+    at_least: 1
+  - column: structured_identifiers.alt_geocoding
+    at_least: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Coordinates and geohashes are opaque numeric strings — sparse territory — but postal codes
+    straddle regimes: famous ones function as place names with real distributional meaning while most
+    are rare exact tokens. The family spans the same fame axis as tickers, expressed on geographic surface
+    forms.'
+  source: fable_5
+  operator: inject
+- name: business_temporal_reference
+  predicate:
+  - column: structured_identifiers.business_temporal
+    at_least: 1
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.25
+  - column: length.length_words
+    at_least: 3
+    below: 20
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Fiscal tokens sit in a double weakness: Q3 or FY25 recurs as boilerplate across enormous
+    numbers of documents, so it anchors weakly for sparse, while CW28 or Sprint 42 is semi-opaque to a
+    general encoder without domain fine-tuning. Neither retriever wins on the token itself, so the route
+    falls to the accompanying content terms — a genuinely contested shape worth labelling.'
+  source: fable_5
+- name: single_token_char_blob
+  predicate:
+  - column: length.length_words
+    below: 4
+  - column: length.length_chars
+    at_least: 60
+  predicts:
+  - sparse_only
+  rationale: 'Character mass concentrated in one to three enormous tokens — a hash, a base64 fragment,
+    a full URL — is lexical or nothing: the string either occurs verbatim or the query is unanswerable,
+    and subword shredding gives the embedding no compositional foothold. Defined purely on scalars so
+    it catches blob types no identifier bank lists. The counter-mechanism is a long URL with a readable
+    slug leaking morphemes to dense, the one leak that would falsify the single route.'
+  source: fable_5

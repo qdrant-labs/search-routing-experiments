@@ -10,12 +10,14 @@ enters twice. Query text joins from the registry caches at the end."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from dataset_registry import DATASETS
+from dataset_registry.core import RegistryDataset
 
 from composition.fill import DEFERRED, QRELS, FloorLedger
 from composition.floors import SpanFloorDeriver, span_mask
@@ -154,21 +156,7 @@ class TargetComposition:
             assert not unaccounted, f"slice {name}: floors neither met nor on the order sheet: {unaccounted}"
 
     def _join_text(self, selection: pd.DataFrame) -> pd.Series:
-        texts = pd.Series(pd.NA, index=selection.index, dtype="object")
-        for name, group in selection.groupby("dataset"):
-            ids = group["query_id"].astype(str)
-            cache = pd.read_parquet(
-                self._datasets[name].cache_path,
-                columns=["query_id", "text"],
-                filters=[("query_id", "in", ids.tolist())],
-            )
-            lookup = cache.set_index(cache["query_id"].astype(str))["text"]
-            texts.loc[group.index] = ids.map(lookup).to_numpy()
-        missing = texts.isna()
-        assert not missing.any(), (
-            f"text join missed {int(missing.sum())} rows — cache drift"
-        )
-        return texts
+        return join_text(selection, self._datasets)
 
     def _order_sheet(self, results: dict[str, SliceResult]) -> pd.DataFrame:
         lines: list[dict[str, object]] = []
@@ -225,6 +213,27 @@ class TargetComposition:
             else "every floor met\n"
         )
         return "\n".join(parts)
+
+
+def join_text(
+    frame: pd.DataFrame, datasets: Mapping[str, RegistryDataset],
+) -> pd.Series:
+    """Query text for (dataset, query_id) rows, read from the registry caches."""
+    texts = pd.Series(pd.NA, index=frame.index, dtype="object")
+    for name, group in frame.groupby("dataset"):
+        ids = group["query_id"].astype(str)
+        cache = pd.read_parquet(
+            datasets[name].cache_path,
+            columns=["query_id", "text"],
+            filters=[("query_id", "in", ids.tolist())],
+        )
+        lookup = cache.set_index(cache["query_id"].astype(str))["text"]
+        texts.loc[group.index] = ids.map(lookup).to_numpy()
+    missing = texts.isna()
+    assert not missing.any(), (
+        f"text join missed {int(missing.sum())} rows — cache drift"
+    )
+    return texts
 
 
 def _floor_table(ledger: FloorLedger) -> pd.DataFrame:

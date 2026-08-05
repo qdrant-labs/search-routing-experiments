@@ -95,8 +95,10 @@ class FillResult(BaseModel):
 
 
 class WeakestFirstFill:
-    """d30b: each pick feeds the floor with the lowest fill/floor ratio,
-    choosing the member row with the highest marginal gain. Deterministic:
+    """Each pick feeds the floor with the lowest fill/floor ratio,
+    choosing the member row with the highest marginal gain. 
+    
+    Deterministic:
     the pool arrives sorted by (dataset, query_id), ties resolve to the
     first maximum, and the only randomness is the seeded top-up draw."""
 
