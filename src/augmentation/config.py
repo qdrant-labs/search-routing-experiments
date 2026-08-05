@@ -125,6 +125,13 @@ class AugmentationPaths(BaseModel):
         return self.data_dir / "composition" / "order_sheet.parquet"
 
     @property
+    def cell_order_sheet(self) -> Path:
+        """The cell fill's shortfalls — cell-named floors, so the loop reads
+        it by passing `sheet_path`; the slice sheet above stays the default
+        until its artifact retires."""
+        return self.data_dir / "composition" / "cell_order_sheet.parquet"
+
+    @property
     def catalog(self) -> Path:
         return self.data_dir / "feature_table" / "catalog.parquet"
 

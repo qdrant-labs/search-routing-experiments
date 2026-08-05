@@ -29,11 +29,12 @@ from augmentation.core import (
     AnswerKeyPath,
     CreditGate,
     Declaration,
-    Grounding,
+    SurfaceOrigin,
     Operator,
 )
 from augmentation.supply import SupplyIndex, lane_dirs
 from composition.catalog_axes import StatAxis, stat_column
+from composition.cells import CELL_TO_BANKS, GENERATION_CELLS
 from composition.floors import STAT_AXES, identifier_floor_key
 from query_taxonomy.features import FeatureExtractor
 from query_taxonomy.taxonomy import FeatureGroup
@@ -67,12 +68,12 @@ def _span_total(catalog: pd.DataFrame) -> pd.Series:
 
 class DecorateOperator(Operator):
     """Weave a register marker into the query (d40d: politeness-class,
-    meaning-preserving — parent qrels inherit, no grounding, no gate)."""
+    meaning-preserving — parent qrels inherit, no surface_origin, no gate)."""
 
     declaration: ClassVar[Declaration] = Declaration(
         operator="decorate",
         floors="marker:greeting | marker:interjection | marker:politeness",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by="target marker span present on local re-measure",
@@ -88,23 +89,33 @@ class DecorateOperator(Operator):
         self._rng = Random(config.seed)
         self._order_seed = config.seed
 
-    @staticmethod
-    def marker(floor: str) -> str:
+    cells: ClassVar[frozenset[str]] = GENERATION_CELLS.get(
+        "decorate", frozenset()
+    )
+    """Cells whose claim IS register marking — servable here because a
+    decoration is woven from the phrase list, needing no document supply."""
+
+    def marker(self, floor: str) -> str:
+        """The decoration this demand names: a marker: floor names it
+        outright, a cell resolves to one required decoration — any single
+        one satisfies an `any_of` cell."""
+        if floor in self.cells:
+            return min(CELL_TO_BANKS[floor] & set(self._decorations))
         return floor.removeprefix("marker:")
 
     def serves(self, floor: str) -> bool:
-        return (
-            floor.startswith("marker:") and self.marker(floor) in self._decorations
-        )
+        if floor in self.cells:
+            return True
+        return floor.startswith("marker:") and self.marker(floor) in self._decorations
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Checkable parents not already carrying the marker — a filter on
-        the selection's own `floors` column, no bank run (d42e). Returned
-        in preference order (seeded shuffle — dataset diversity); the loop
+        """Checkable parents the demand does not already cover — a filter on
+        the selection's own columns, no bank run (d42e). Returned in
+        preference order (seeded shuffle — dataset diversity); the loop
         consumes in order."""
         pool = self.parent_pool(selection)
-        lacks = ~pool["floors"].map(lambda floors: floor in floors)
-        return pool[lacks & pool["checkable"]].sample(
+        pool = self.unsatisfied(pool, floor)
+        return pool[pool["checkable"]].sample(
             frac=1.0, random_state=self._order_seed
         )
 
@@ -157,7 +168,7 @@ class OperatorSyntaxRewrite(Operator):
     declaration: ClassVar[Declaration] = Declaration(
         operator="operator_syntax_rewrite",
         floors="logical:operator_syntax",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by=(
@@ -174,8 +185,11 @@ class OperatorSyntaxRewrite(Operator):
         self._catalog_path = config.paths.catalog
         self._order_seed = config.seed
 
+    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["operator_syntax_rewrite"]
+    """The archetype cell whose whole claim IS operator dialect."""
+
     def serves(self, floor: str) -> bool:
-        return floor == "logical:operator_syntax"
+        return floor == "logical:operator_syntax" or floor in self.cells
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
         """Parents with coordination to restructure (widest_list_size >= 2
@@ -234,7 +248,7 @@ class StatRewrite(Operator):
     declaration: ClassVar[Declaration] = Declaration(
         operator="stat_rewrite",
         floors="any <axis>:<band> whose axis has a declared direction",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by=(
@@ -260,7 +274,13 @@ class StatRewrite(Operator):
                     return axis, axis.edges[index], axis.edges[index + 1]
         return None
 
+    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["stat_rewrite"]
+    """Cells whose feature is common and whose length band is what is rare:
+    relaxing the band keeps the parent's answer key."""
+
     def serves(self, floor: str) -> bool:
+        if floor in self.cells:
+            return True
         band = self._band(floor)
         return band is not None and bool(self._stats.directions(band[0].title))
 
@@ -342,13 +362,16 @@ class StatRewrite(Operator):
 class InjectOperator(Operator):
     """Weave a DOC-COPIED identifier surface into the query (d42d/f).
     The query narrows by design — the answer key is minted against the
-    grounding doc the surface came from, never inherited. One surface per
+    surface_origin doc the surface came from, never inherited. One surface per
     row. Credit is gated by the d40e coherence pilot."""
 
     declaration: ClassVar[Declaration] = Declaration(
         operator="inject",
-        floors="id:<domain> and id:<general-bank> identifier floors",
-        grounding=Grounding.DOC_COPIED,
+        floors=(
+            "id:<domain> and id:<general-bank> identifier floors, plus the "
+            "cells declaring inject — those resolve to their required banks"
+        ),
+        surface_origin=SurfaceOrigin.DOC_COPIED,
         answer_key=AnswerKeyPath.MINTED,
         meaning_preserved=False,
         verifiable_by=(
@@ -366,14 +389,26 @@ class InjectOperator(Operator):
         self._order_seed = config.seed
         self._supply = SupplyIndex(config.paths)
 
+    cells: ClassVar[frozenset[str]] = GENERATION_CELLS["inject"]
+    """Cells whose surface has to be minted from a grounding doc, natural
+    supply being near zero."""
+
     def serves(self, floor: str) -> bool:
-        return floor.startswith("id:")
+        return floor.startswith("id:") or floor in self.cells
+
+    def drawable(self, surfaces: pd.DataFrame, floor: str) -> pd.DataFrame:
+        """The surface rows this demand can draw from — an id: floor names
+        its own supply rows, a cell name resolves to its required banks (the
+        index is keyed per bank and carries no cell names)."""
+        if floor in self.cells:
+            return surfaces[surfaces["bank"].isin(CELL_TO_BANKS[floor])]
+        return surfaces[surfaces["floor"] == floor]
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Rung-1 pairs (d43f): checkable parents lacking the floor whose
-        own gold doc carries a surface of it — joined per lane from the
-        supply index + lane qrels. One deterministic (doc, surface) per
-        parent rides along as `grounding_doc_id` / `surface` / `bank`."""
+        """Rung-1 pairs (d43f): checkable parents the demand does not already
+        cover, whose own gold doc carries a surface of it — joined per lane
+        from the supply index + lane qrels. One deterministic (doc, surface)
+        per parent rides along as `grounding_doc_id` / `surface` / `bank`."""
         pool = self.parent_pool(selection)
         frames: list[pd.DataFrame] = []
         for key, lane in lane_dirs().items():
@@ -381,13 +416,12 @@ class InjectOperator(Operator):
             qrels_path = self._paths.lane_qrels(lane)
             if surfaces.empty or not qrels_path.exists():
                 continue
-            floor_surfaces = surfaces[surfaces["floor"] == floor]
+            floor_surfaces = self.drawable(surfaces, floor)
             if floor_surfaces.empty:
                 continue
-            lane_pool = pool[(pool["dataset"] == key) & pool["checkable"]]
-            lane_pool = lane_pool[
-                ~lane_pool["floors"].map(lambda floors: floor in floors)
-            ]
+            lane_pool = self.unsatisfied(
+                pool[(pool["dataset"] == key) & pool["checkable"]], floor
+            )
             if lane_pool.empty:
                 continue
             qrels = pd.read_parquet(qrels_path)
@@ -481,7 +515,7 @@ def operator_for(
     floor: str, operators: tuple[Operator, ...] | None = None
 ) -> Operator | None:
     """Dispatch by floor key (d42d) — `id:` / `marker:` / `logical:` /
-    stat-axis prefixes, not the loop's grounding branches. Defaults to the
+    stat-axis prefixes, not the loop's surface_origin branches. Defaults to the
     default-config families; a floor no family serves returns None."""
     return next(
         (op for op in (operators or default_operators()) if op.serves(floor)),

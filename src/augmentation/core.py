@@ -1,8 +1,8 @@
 """Operator declarations and the pool-row contract (SPEC d42c/d).
 
-Operators are grounding-aware — they read the order sheet, pick parents,
+Operators are surface_origin-aware — they read the order sheet, pick parents,
 and decide the answer-key path — which is why they live here and not in
-grounding-blind taxonomy_generators (d34a/d42b). Every operator carries a
+surface_origin-blind taxonomy_generators (d34a/d42b). Every operator carries a
 frozen `Declaration`; anything undeclared is feature-stock by default.
 """
 
@@ -19,7 +19,7 @@ from augmentation.config import AugmentationConfig
 from taxonomy_generators.verify import Targets
 
 
-class Grounding(StrEnum):
+class SurfaceOrigin(StrEnum):
     NONE = "none"
     DOC_COPIED = "doc_copied"
     SYNTHETIC = "synthetic"
@@ -27,7 +27,7 @@ class Grounding(StrEnum):
 
 class AnswerKeyPath(StrEnum):
     INHERIT = "inherit"   # meaning preserved -> parent qrels stay valid
-    MINTED = "minted"     # answer minted from the grounding doc
+    MINTED = "minted"     # answer minted from the surface_origin doc
 
 
 class CreditGate(StrEnum):
@@ -50,7 +50,7 @@ class Declaration(BaseModel):
     """Human-readable statement of the floors served — the dispatch
     itself lives in `Operator.serves()` (band parsing, membership
     checks), never in string prefixes."""
-    grounding: Grounding
+    surface_origin: SurfaceOrigin
     answer_key: AnswerKeyPath
     meaning_preserved: bool
     verifiable_by: str
@@ -92,6 +92,10 @@ class Operator(ABC):
 
     declaration: ClassVar[Declaration]
 
+    cells: ClassVar[frozenset[str]] = frozenset()
+    """Archetype cells this family mints, declared in cells.yaml and read
+    through GENERATION_CELLS — empty where the family serves floors only."""
+
     def __init__(self, config: AugmentationConfig) -> None:
         self.first_generation_only = config.first_generation_only
         """d43-review guard: augmented rows are never parents — no
@@ -103,6 +107,15 @@ class Operator(ABC):
         if self.first_generation_only and "generated_from" in selection.columns:
             return selection[selection["generated_from"].isna()]
         return selection
+
+    def unsatisfied(self, pool: pd.DataFrame, floor: str) -> pd.DataFrame:
+        """Parents the demand does not already cover — by cell membership
+        where the selection records it, else by the floor's own column."""
+        if floor in self.cells:
+            if "cell" not in pool.columns:
+                return pool
+            return pool[pool["cell"] != floor]
+        return pool[~pool["floors"].map(lambda floors: floor in floors)]
 
     @abstractmethod
     def serves(self, floor: str) -> bool:
@@ -139,7 +152,7 @@ class Operator(ABC):
         self, parent: pd.Series, floor: str, text: str, attempts: int
     ) -> AugmentedCandidate:
         """Assemble the pool row for inherit-path operators. Minted-path
-        operators (Inject) override to attach the grounding doc."""
+        operators (Inject) override to attach the surface_origin doc."""
         slug = floor.replace(":", "-")
         return AugmentedCandidate(
             query_id=f"aug-{slug}-{parent['query_id']}",

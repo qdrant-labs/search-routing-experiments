@@ -17,7 +17,7 @@ from augmentation.core import (
     AugmentedCandidate,
     CreditGate,
     Declaration,
-    Grounding,
+    SurfaceOrigin,
     Operator,
 )
 from augmentation.campaign import AugmentationCampaign
@@ -52,7 +52,7 @@ __all__ = [
     "DecorateOperator",
     "EngineSettings",
     "GeneratedPool",
-    "Grounding",
+    "SurfaceOrigin",
     "InjectOperator",
     "Operator",
     "OperatorSyntaxRewrite",
