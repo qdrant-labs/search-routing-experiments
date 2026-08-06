@@ -13,6 +13,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     Document,
+    Modifier,
     PointStruct,
     SparseVector,
     SparseVectorParams,
@@ -91,6 +92,11 @@ class EmbeddingConfig(BaseModel):
     """fastembed multi-process workers for CPU inference. None = single process.
     Set to number of CPU cores - 1 for ~2-4x speedup on CPU. Leave None when
     using GPU providers."""
+    modifier: Modifier | None = None
+    """Qdrant query-time scoring modifier for sparse slots. Qdrant/bm25 vectors
+    carry only the TF/length half of BM25 and expect `Modifier.IDF` on the
+    collection — without it, matches are scored TF-only and rare tokens get no
+    rarity weight. Collection schema: changing it requires recreate + re-upload."""
 
 
 class BaseIndexer(ABC, Generic[T]):
@@ -146,7 +152,7 @@ class BaseIndexer(ABC, Generic[T]):
             if cfg.kind == "dense"
         }
         sparse_config = {
-            cfg.name: SparseVectorParams()
+            cfg.name: SparseVectorParams(modifier=cfg.modifier)
             for cfg in self.embeddings
             if cfg.kind == "sparse"
         }
@@ -384,7 +390,7 @@ class BaseIndexer(ABC, Generic[T]):
 
 class CorpusDocument(BaseModel):
     doc_id: str
-    title: str
+    title: str = ""  # auxiliary — prepended to text for embedding; some corpora omit it
     text: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     """Extra payload preserved alongside the canonical fields — not embedded."""

@@ -76,7 +76,7 @@ class FusionStrategy(ABC):
         collection_name: str,
         dense_cfg: EmbeddingConfig,
         sparse_cfg: EmbeddingConfig,
-        fetch_limit: int = 1000,
+        fetch_limit: int = 50,
     ) -> None:
         self.client = client
         self.collection_name = collection_name
@@ -107,7 +107,7 @@ class FusionStrategy(ABC):
             query=self._dense(query),
             using=self.dense_cfg.name,
             limit=self.fetch_limit,
-            with_payload=True,
+            with_payload=["doc_id"],
         ).points
 
     def _sparse_hits(self, query: str) -> list[ScoredPoint]:
@@ -116,7 +116,7 @@ class FusionStrategy(ABC):
             query=self._sparse(query),
             using=self.sparse_cfg.name,
             limit=self.fetch_limit,
-            with_payload=True,
+            with_payload=["doc_id"],
         ).points
 
     def _prefetch_pair(self, query: str) -> list[Prefetch]:
@@ -175,6 +175,6 @@ class PureRRFStrategy(FusionStrategy):
             prefetch=self._prefetch_pair(query),
             query=FusionQuery(fusion=Fusion.RRF),
             limit=self.fetch_limit,
-            with_payload=True,
+            with_payload=["doc_id"],
         ).points
         return self._ranking(hits)
