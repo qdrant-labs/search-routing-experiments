@@ -65,6 +65,18 @@ _DEFAULT_STAT_ENTRIES = (
             "per d42h before credit"
         ),
     ),
+    StatEntry(
+        axis="length_words",
+        direction=StatDirection.DOWN,
+        rationale=(
+            "compression drops words, so meaning survives only against the "
+            "corpus: the cut keeps the terms that keep the parent's gold "
+            "document answering, plus any minted surface verbatim. Where no "
+            "cut can preserve that, the row needs a document of its own and "
+            "belongs to construction, not augmentation — the audit judges "
+            "exactly that boundary before credit"
+        ),
+    ),
 )
 
 

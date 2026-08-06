@@ -101,6 +101,17 @@ class AugmentedCandidate(BaseModel):
     their audit passes and flips them."""
 
 
+NOTHING_ELSE = (
+    "Add nothing beyond what is asked above: no other facts, names, numbers, "
+    "dates, identifiers, greetings, or politeness phrases — anything extra "
+    "changes the query's feature profile and fails the check."
+)
+"""The one exclusion clause, emitted once per request by
+`AugmentationLoop.instruction_for` (d52d). Operators state the positive move
+only: composed mints repeating their own exclusions told the model to insert a
+version string AND to add no numbers."""
+
+
 class Operator(ABC):
     """One augmentation operator: declaration + deterministic selection +
     the LLM's instruction + the verifiable postcondition (a `Targets`)."""
@@ -146,21 +157,37 @@ class Operator(ABC):
         never an LLM."""
 
     @abstractmethod
-    def instruction(self, floor: str, parent: pd.Series) -> str:
-        """System prompt: what to weave and what must not change. Receives
-        the parent row so operators can adapt framing to its profile."""
+    def instruction(
+        self,
+        floor: str,
+        parent: pd.Series,
+        requirement: tuple[AxisBand, ...] = (),
+    ) -> str:
+        """System prompt: the positive move only — `NOTHING_ELSE` carries the
+        exclusion for the whole request. Receives the parent row so operators
+        can adapt framing to its profile, and the cell requirement this call
+        serves so a band never has to be looked up in a global registry."""
 
     @abstractmethod
-    def targets(self, floor: str, parent: pd.Series) -> Targets:
+    def targets(
+        self,
+        floor: str,
+        parent: pd.Series,
+        requirement: tuple[AxisBand, ...] = (),
+    ) -> Targets:
         """The postcondition local verify re-measures (d42g). Receives the
         parent because some postconditions are pair-specific (Inject's
         target bank is the chosen surface's bank)."""
 
     @abstractmethod
-    def structural(self, parent: pd.Series, text: str) -> list[str]:
+    def structural(
+        self, parent: pd.Series, text: str, targets: Targets
+    ) -> list[str]:
         """Parent-relative checks Targets cannot express (d43b):
         no-new-spans, content tokens unchanged, literal containment.
-        Returns failure reasons; empty = pass. Run by the loop after
+        `targets` is what the request AUTHORISED, so a check reads "new" as
+        "nobody asked for it" and composed mints cannot veto each other
+        (d52d). Returns failure reasons; empty = pass. Run by the loop after
         accept(); any failure drops the row. Abstract on purpose (d42c
         default-deny): an operator with no such check DECLARES that with
         an explicit `return []` and its reason — never inherits silence."""
