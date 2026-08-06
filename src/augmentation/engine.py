@@ -20,6 +20,7 @@ last in-loop verify — the d2 gap) is gone entirely.
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 
 from litellm import completion
 from pydantic import BaseModel, ConfigDict
@@ -46,6 +47,24 @@ _SUBMIT_TOOL = {
 }
 
 
+class ErrorCase(StrEnum):
+    """Why an attempt produced no verifiable rewrite — distinct from a rewrite
+    that WAS measured and failed, which carries `checks` instead of `error`."""
+
+    NO_TEXT = "no_text"
+    """A plain reply (single-shot, or a tool-loop message with no tool call)
+    came back empty."""
+    EMPTY_SUBMIT = "empty_submit"
+    """`submit_text` was called with blank text."""
+    ROUNDS_EXHAUSTED = "rounds_exhausted"
+    """`max_rounds` ran out without ever calling `submit_text`."""
+    INCOMPATIBLE_PARENT = "incompatible_parent"
+    """The caller determined, before spending a call, that no rewrite can
+    satisfy the request — e.g. the tokens a mint step must insert already
+    exceed a later band's ceiling. Never set by `Augmenter` itself, which has
+    no view of the parent; the loop raises this pre-flight (d55-followup)."""
+
+
 def _clean(text: str) -> str:
     text = text.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
@@ -56,10 +75,17 @@ def _clean(text: str) -> str:
 class AugmentationOutcome(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    text: str
+    text: str | None
     accepted: bool
     attempts: int
     checks: tuple[TargetCheck, ...] = ()
+    error: ErrorCase | None = None
+    """Set only when `text` carries nothing verifiable. `attempted_tools`
+    is the corroborating evidence for `ROUNDS_EXHAUSTED` specifically."""
+    attempted_tools: tuple[str, ...] = ()
+    """Every tool name called, across every round of the failed attempt, in
+    order — repeating the same tool distinguishes a stuck loop from one that
+    simply ran out of rounds doing varied legitimate work."""
 
 
 class Augmenter:
@@ -67,8 +93,9 @@ class Augmenter:
 
     Spend is `EngineSettings`: `max_attempts` bounds revise-after-local-
     failure cycles; `max_rounds` bounds tool-call rounds per attempt
-    (tool-loop mode only). Exhaustion returns an unaccepted outcome — the
-    caller drops the row, parents are plentiful (d42g).
+    (tool-loop mode only). Exhaustion — of attempts, or protocol-side of
+    rounds — returns an unaccepted outcome and the caller drops the row,
+    parents are plentiful (d42g).
     """
 
     def __init__(
@@ -122,13 +149,20 @@ class Augmenter:
                 "content": f"{prompt}\nTargets: {targets.model_dump_json()}",
             },
         ]
-        text, report = "", None
+        report = None
         for attempt in range(1, self.max_attempts + 1):
-            text = (
-                self._tool_rounds(messages)
-                if tool_loop
-                else self._single_shot(messages)
-            )
+            if tool_loop:
+                text, error, trace = self._tool_rounds(messages)
+            else:
+                text, error, trace = self._single_shot(messages), None, ()
+            if error is not None:
+                return AugmentationOutcome(
+                    text=text,
+                    accepted=False,
+                    attempts=attempt,
+                    error=error,
+                    attempted_tools=trace,
+                )
             report = self.accept(text, targets)
             if report.passed:
                 return AugmentationOutcome(
@@ -151,17 +185,19 @@ class Augmenter:
             checks=report.checks if report else (),
         )
 
-    def _single_shot(self, messages: list[dict]) -> str:
+    def _single_shot(self, messages: list[dict]) -> str | None:
         response = completion(model=self.model, messages=messages, max_tokens=1024)
         text = _clean(response.choices[0].message.content or "")
         messages.append({"role": "assistant", "content": text})
-        return text
+        return text or None
 
-    def _tool_rounds(self, messages: list[dict]) -> str:
-        """Run tool rounds until the model calls submit_text (its arguments
-        are the final text). A plain reply is taken as the candidate; rounds
-        exhausted without either returns '' — which fails accept loudly and
-        feeds back."""
+    def _tool_rounds(
+        self, messages: list[dict]
+    ) -> tuple[str | None, ErrorCase | None, tuple[str, ...]]:
+        """Returns (candidate text, error, tool-call trace). `error` is set
+        exactly when `text` carries nothing verifiable — a spent round budget
+        or a broken protocol, never a failed rewrite."""
+        trace: list[str] = []
         for _ in range(self.max_rounds):
             response = completion(
                 model=self.model,
@@ -174,9 +210,11 @@ class Augmenter:
             messages.append(message.model_dump())
             calls = getattr(message, "tool_calls", None)
             if not calls:
-                return _clean(message.content or "")
+                reply = _clean(message.content or "")
+                return reply, (None if reply else ErrorCase.NO_TEXT), tuple(trace)
             submitted: str | None = None
             for call in calls:
+                trace.append(call.function.name)
                 if call.function.name == "submit_text":
                     try:
                         submitted = str(json.loads(call.function.arguments)["text"])
@@ -193,8 +231,10 @@ class Augmenter:
                     }
                 )
             if submitted is not None:
-                return _clean(submitted)
-        return ""
+                final = _clean(submitted)
+                error = None if final else ErrorCase.EMPTY_SUBMIT
+                return final, error, tuple(trace)
+        return None, ErrorCase.ROUNDS_EXHAUSTED, tuple(trace)
 
     def _dispatch(self, call) -> dict:
         """Run one tool call. Arguments are model-generated — a boundary —
