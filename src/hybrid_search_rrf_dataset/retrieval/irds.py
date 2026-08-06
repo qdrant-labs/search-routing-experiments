@@ -182,9 +182,11 @@ class MSMarcoDev(IRDatasetsMaterialized):
         return kept[:count]
 
     def materialize(self) -> None:
-        if self.query_ids is None or self.corpus_size is None:
+        corpus_size = self.corpus_size if self.corpus_size is not None else self.corpus_target
+        if self.query_ids is None or corpus_size is None:
             raise ValueError(
-                "materialize() needs query_ids and corpus_size; use "
+                "materialize() needs query_ids and corpus_size (or the "
+                "inherited corpus_target as a fallback); use "
                 "load_metadata() + fetch_docs() for targeted lookup"
             )
         queries_df = self._queries_frame(self._test_ds)
@@ -198,7 +200,7 @@ class MSMarcoDev(IRDatasetsMaterialized):
 
         relevant = list(dict.fromkeys(qrels_df["doc_id"]))
         distractors = self._distractor_ids(
-            set(relevant), self.corpus_size - len(relevant)
+            set(relevant), corpus_size - len(relevant)
         )
         texts = self.fetch_docs([*relevant, *distractors])
         # msmarco-passage docs carry no title field
@@ -327,7 +329,7 @@ class OrcasLane(MaterializedDataset):
 
     def __init__(self, query_ids: Iterable[str] | None = None) -> None:
         super().__init__()
-        self._ids = None if query_ids is None else {str(q) for q in query_ids}
+        self.query_ids = None if query_ids is None else {str(q) for q in query_ids}
         self._dataset = ir_datasets.load(self._IRDS_ID)
 
     def load_metadata(self) -> None:
@@ -341,12 +343,12 @@ class OrcasLane(MaterializedDataset):
         queries = [
             {"query_id": query.query_id, "text": query.text}
             for query in Orcas().sample_queries()
-            if self._ids is None or query.query_id in self._ids
+            if self.query_ids is None or query.query_id in self.query_ids
         ]
-        if self._ids is not None and len(queries) < len(self._ids):
+        if self.query_ids is not None and len(queries) < len(self.query_ids):
             raise ValueError(
-                f"{self.name}: {len(self._ids) - len(queries):,} of "
-                f"{len(self._ids):,} requested query_ids are outside the "
+                f"{self.name}: {len(self.query_ids) - len(queries):,} of "
+                f"{len(self.query_ids):,} requested query_ids are outside the "
                 "registry's cached sample — labeling them would silently "
                 "drop rows."
             )

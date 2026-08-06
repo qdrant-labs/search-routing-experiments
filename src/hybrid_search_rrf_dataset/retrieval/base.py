@@ -200,6 +200,12 @@ class MaterializedDataset(RetrievalDataset, ABC):
         """Explicit target override — only for the recorded exceptions
         (a lane whose relevant docs exceed the recipe ceiling, or one whose
         design requires the full corpus). None = computed by `recipe`."""
+        self.query_ids: set[str] | None = None
+        """The query ids this snapshot must serve, pinned from the current
+        composition selection before load_metadata(). Lanes whose upstream is
+        too big to keep whole consult this instead of their seeded self-sample;
+        a snapshot sampled independently of the selection silently drops
+        selected queries from the labelled set. None = lane-default behavior."""
 
     def corpus(self) -> pd.DataFrame:
         return self._corpus_df

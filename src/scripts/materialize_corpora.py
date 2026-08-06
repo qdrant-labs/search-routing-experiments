@@ -38,6 +38,22 @@ class LaneCorpora:
 
     def __init__(self, data_dir: Path | None = None) -> None:
         self._dir = data_dir if data_dir is not None else DEFAULT_DATA_DIR
+        self._selection: pd.DataFrame | None = None
+
+    def _wanted(self, key: str) -> set[str] | None:
+        """The composition's distinct query ids for this lane; None when the
+        selection has no rows for it. Pinned onto every MaterializedDataset
+        before its metadata loads, so a lane that samples its query set
+        samples exactly the selection — a snapshot drawn independently of the
+        selection silently drops selected, judged queries from the labels."""
+        if self._selection is None:
+            self._selection = pd.read_parquet(
+                CellFill().selection_path, columns=["dataset", "query_id"]
+            )
+        ids = self._selection.loc[
+            self._selection["dataset"].astype(str) == key, "query_id"
+        ].astype(str)
+        return set(ids) if len(ids) else None
 
     def lane_dir(self, key: str) -> Path:
         """Resolve through `source.name`, which owns the directory — the table
@@ -62,6 +78,7 @@ class LaneCorpora:
             return
         source = LANES[key].source
         if isinstance(source, MaterializedDataset):
+            source.query_ids = self._wanted(key)
             source.load_metadata()
         source.save_metadata(self._dir)
         tqdm.write(f"[{key}] {self._counts(out)} -> {out}")
@@ -78,6 +95,7 @@ class LaneCorpora:
         # BeirDataset builds its corpus inside corpus(), so it owns neither
         # hydrate() nor load_metadata() and materialize() stays the base no-op
         if isinstance(source, MaterializedDataset):
+            source.query_ids = self._wanted(key)
             if not source.hydrate(self._dir):
                 source.load_metadata()
             source.corpus_target = lane.corpus_target
@@ -122,6 +140,7 @@ class LaneCorpora:
             "budget": None,
             "sizing": "",
             "on_disk": (out / "corpus.parquet").exists(),
+            "sel_in_snap": self._sel_in_snap(key, out),
         }
         if not isinstance(lane.source, MaterializedDataset):
             return {**row, "sizing": "full", "verdict": "no recipe, corpus() is cheap"}
@@ -160,6 +179,22 @@ class LaneCorpora:
         counts them rather than through `min_relevance`."""
         return qrels.loc[qrels["relevance"] >= 1, "doc_id"].astype(str).nunique()
 
+    def _sel_in_snap(self, key: str, out: Path) -> str:
+        """`selected ∩ snapshot queries / selected` — the staleness readout.
+        A snapshot serving fewer selected queries than its source can supply
+        is how 30.7K judged rows went silently unlabelled (2026-08). The
+        column only reports; rebuilding stays an explicit `--metadata
+        --force` decision."""
+        wanted = self._wanted(key)
+        if wanted is None or not (out / "queries.parquet").exists():
+            return ""
+        snap = set(
+            pd.read_parquet(out / "queries.parquet", columns=["query_id"])[
+                "query_id"
+            ].astype(str)
+        )
+        return f"{len(wanted & snap)}/{len(wanted)}"
+
     def _narrow(self, key: str, source: MaterializedDataset) -> None:
         """Cut a lane whose relevant docs overflow the *computed* target down to
         the composition's queries, rather than pinning a target by hand."""
@@ -171,16 +206,8 @@ class LaneCorpora:
         target = source.recipe.target(relevant)
         if target >= relevant:
             return
-        selection = pd.read_parquet(
-            CellFill().selection_path, columns=["dataset", "query_id"]
-        )
-        # a query can be selected into several cells, so the rows repeat
-        ids = (
-            selection.loc[selection["dataset"].astype(str) == key, "query_id"]
-            .astype(str)
-            .unique()
-        )
-        if not len(ids):
+        ids = source.query_ids
+        if not ids:
             raise ValueError(
                 f"{key}: {relevant:,} relevant docs exceed the {target:,} target "
                 "and the composition selects none of its queries — pin an "

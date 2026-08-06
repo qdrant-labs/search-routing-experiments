@@ -47,7 +47,10 @@ class Lane(NamedTuple):
 
 LANES: dict[str, Lane] = {
     "beir-nfcorpus": Lane(NFCorpus()),
-    "msmarco-passage-dev": Lane(MSMarcoDev()),
+    # own materialize(): MSMarcoDev sizes from corpus_size, not the recipe;
+    # corpus_target is its fallback for that param (100K matches the value
+    # this lane was already indexed at) — pin it, don't let the recipe apply.
+    "msmarco-passage-dev": Lane(MSMarcoDev(), corpus_target=100_000),
     "trec-dl-2022": Lane(TrecDL2022(), min_relevance=2),
     "rarb-math": Lane(RarbLane("math")),
     # rarb-code: indexed at 100K before the 20/80 recipe — kept, cost paid

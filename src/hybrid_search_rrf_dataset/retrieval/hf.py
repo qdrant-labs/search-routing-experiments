@@ -376,7 +376,11 @@ class WebFaqLane(MaterializedDataset):
         queries: list[dict[str, str]] = []
         for row in self._config_rows("queries"):
             _expect(row, ("_id", "text"), f"webfaq {WEBFAQ_LANGUAGE}-queries")
-            queries.append({"query_id": str(row["_id"]), "text": row["text"]})
+            qid = str(row["_id"])
+            if self.query_ids is not None and qid not in self.query_ids:
+                continue
+            queries.append({"query_id": qid, "text": row["text"]})
+        wanted = {q["query_id"] for q in queries}
         qrels: list[dict[str, Any]] = []
         for row in self._config_rows("qrels"):
             _expect(
@@ -384,9 +388,12 @@ class WebFaqLane(MaterializedDataset):
                 ("query-id", "corpus-id", "score"),
                 f"webfaq {WEBFAQ_LANGUAGE}-qrels",
             )
+            qid = str(row["query-id"])
+            if qid not in wanted:
+                continue
             qrels.append(
                 {
-                    "query_id": str(row["query-id"]),
+                    "query_id": qid,
                     "doc_id": str(row["corpus-id"]),
                     "relevance": int(row["score"]),
                 }
