@@ -93,6 +93,11 @@ class ArchetypeCell(BaseModel):
     operator: str | None = None
     """Augmentation operator that mints this cell when natural supply is
     thin (`Declaration.operator`); None where the cell fills from supply."""
+    looks_like: str | None = None
+    """What a query of this archetype LOOKS like, in plain words — the only
+    field a generator ever sees (d55d). Deliberately not `rationale`, which
+    argues which ROUTE should win and would bias the measurement the cell
+    exists to make, nor `predicts`, which is the prior under test."""
 
     @model_validator(mode="after")
     def _banded(self) -> ArchetypeCell:
