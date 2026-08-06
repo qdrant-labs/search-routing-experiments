@@ -1,9 +1,20 @@
 _note: Archetype cells for the Strategy Router composition. fable_5-generated spine; the eight pooled
   identifier cells had unbuilt-bank any_of branches trimmed so every band resolves to a live catalog column
   (re-add the branch when its bank ships). predicts is a falsifiable prior tested by labelling, never
-  used to allocate.
+  used to allocate. looks_like is LLM-facing guidance for constructing and recognizing member
+  queries — it restates the cell's surface shape in plain language, says what must and must not
+  appear, and, where predicts spans two routes, names the axis a generator should vary so labelling
+  can split it. It paraphrases the predicate but never overrides it; the predicate columns are the
+  sole matcher and win any disagreement.
 cells:
 - name: bare_concept_token
+  looks_like: >
+    One or two plain words naming a single ordinary concept — the head of the shortest-query
+    distribution, the thing typed into a search box a thousand times a day. Build it from common
+    vocabulary an encoder has seen everywhere: a bare topic noun or a two-word noun phrase. No
+    digits, no acronyms, no code, nothing verbatim-rare — opaque jargon belongs to the identifier
+    cells. The cell tests whether the cleanest concept-shaped queries really do go dense, so keep
+    the concept clean and well-known.
   predicate:
   - column: length.length_words
     below: 3
@@ -18,6 +29,13 @@ cells:
     distribution goes dense.
   source: fable_5
 - name: short_grammatical_question
+  looks_like: >
+    A complete miniature question of three to six words that reads as real grammar — a question
+    word, a verb, and only two or three content words carrying the entire need. No digits, no
+    identifiers, and not a keyword telegram: it must sound like something asked aloud. Construct
+    variants on the deciding axis — sometimes the content words are exactly the vocabulary an
+    answering passage would use, sometimes an everyday paraphrase of it — since that phrasing
+    choice, not any corpus, is what splits the route.
   predicate:
   - column: length.length_words
     at_least: 3
@@ -35,6 +53,13 @@ cells:
     outcomes are genuinely available in the highest-traffic region.
   source: fable_5
 - name: stopword_saturated_midlength
+  looks_like: >
+    A full conversational sentence of seven to nineteen words in which nearly half the tokens are
+    function words — the, of, to, is, in, my — so only three to five content words carry the
+    need, buried in grammar. No digits or identifiers anywhere. Write it the way a person types a
+    whole sentence into a chat box, and vary whether the few surviving content words are the
+    answer's literal vocabulary or a paraphrase of it — that contest is exactly what the cell is
+    built to label.
   predicate:
   - column: length.length_words
     at_least: 7
@@ -52,6 +77,13 @@ cells:
     content words are the discriminating vocabulary of the answer or a paraphrase of it.'
   source: fable_5
 - name: verbose_grammatical_request
+  looks_like: >
+    A long, fully grammatical ask of twenty to sixty words — one elaborate sentence or a few
+    flowing ones — where context, qualifiers, and the actual request are woven into natural
+    prose. Not pasted material and not a keyword string: it should read as deliberately written
+    language. Vary how much of the query's vocabulary an answering document would share verbatim,
+    because heavy overlap is the condition under which rank fusion can beat either retriever
+    alone.
   predicate:
   - column: length.length_words
     at_least: 20
@@ -67,6 +99,13 @@ cells:
     reasons, and rank aggregation is more stable at rank 1 than either list alone.'
   source: fable_5
 - name: extreme_length_pasted_query
+  looks_like: >
+    Sixty words or more — no longer a typed question but a dropped-in passage: a paragraph from a
+    document, a whole ticket description, a long email excerpt, with a thin ask attached or none
+    at all. Make it feel genuinely pasted, with many facets sitting side by side, so a single
+    vector must average them while lexical matching receives dozens of independent anchors.
+    Include variants where one verbatim-rich stretch could decide the match and variants where
+    only the overall gist can.
   predicate:
   - column: length.length_words
     at_least: 60
@@ -79,6 +118,13 @@ cells:
     historically strong. Both mechanisms are real, so the route is genuinely contested at this length.
   source: fable_5
 - name: high_morphological_variation
+  looks_like: >
+    A natural-language query of three to nineteen words in which over a third of the words are
+    inflected or derived forms rather than dictionary base forms — plurals, -ing and -ed forms,
+    -ization and -ability derivations, comparatives. It should still read as ordinary language,
+    just morphology-heavy. Choose word forms an answering document would plausibly write
+    differently, because the cell tests what happens when exact matching depends on a stemmer
+    conflating the query form with the document form.
   predicate:
   - column: morphology.word_variation_share
     at_least: 0.35
@@ -96,6 +142,13 @@ cells:
     do align or when an inflected variant is itself the rare discriminating form.
   source: fable_5
 - name: deep_nesting_single_sentence
+  looks_like: >
+    One single grammatical sentence — never two — whose clauses telescope at least six levels
+    deep: a relative clause inside a conditional inside a complement, so the meaning lives in who
+    did what to whom under which condition rather than in any individual word. It must parse as
+    real language, not word salad. Keep every content word common: a rare term that could decide
+    the match by itself defeats the purpose, which is to isolate compositional structure as the
+    only available signal.
   predicate:
   - column: syntactic_depth.nesting_depth
     at_least: 6
@@ -112,6 +165,12 @@ cells:
     the predicate does not select for, so structure should dominate.
   source: fable_5
 - name: multi_statement_context_dump
+  looks_like: >
+    Three or more separate statements totalling at least twenty words, written the way people
+    fill a support box: a sentence of background, a sentence of what changed or was tried, then
+    the actual ask. Let the statements carry different kinds of evidence — semantic framing in
+    one, specific content terms in another, some of it irrelevant background — so that no single
+    reading of the dump suffices and the real ask genuinely risks dilution inside it.
   predicate:
   - column: syntactic_depth.statement_count
     at_least: 3
@@ -128,6 +187,13 @@ cells:
     the union of partial evidence — usually the truly relevant ones — survive as the consensus.'
   source: fable_5
 - name: wide_flat_enumeration
+  looks_like: >
+    A query whose spine is a flat coordination of three or more parallel items — comma- or and-
+    joined entities, features, or options — with at most a thin frame around the list. The list
+    is the payload; this is the known worst case for a single vector, which averages the facets
+    into a centroid near none of them. Vary whether the frame around the items — difference,
+    compatibility, ranking — carries real intent, because a meaningful frame is what fusion can
+    add on top of raw item coverage.
   predicate:
   - column: coordination.widest_list_size
     at_least: 3
@@ -145,6 +211,13 @@ cells:
     converging on the same documents.'
   source: fable_5
 - name: keyword_telegram_short
+  looks_like: >
+    Three to six bare content words with zero connective grammar — the classic search telegram:
+    no question word, no article, no preposition, no digits, every token load-bearing. Use
+    ordinary vocabulary words, not code symbols or opaque identifiers; those belong to the symbol
+    and identifier cells. The cell exists to test the assumption that telegram style implies
+    sparse, so build variants where the keywords are the target's literal terms and variants
+    where they are loose synonyms of them.
   predicate:
   - column: natural_language_signal.natural_language_share
     below: 0.1
@@ -162,6 +235,13 @@ cells:
     cell exists to test the telegram-to-sparse assumption rather than encode it.'
   source: fable_5
 - name: negation_bearing_question
+  looks_like: >
+    A natural query of three to nineteen words whose meaning pivots on an explicit negator — not,
+    without, never, no longer, except. Construct it so the negation matters: flipping it must
+    change which documents count as correct answers. Keep the remainder ordinary language, and
+    vary how discriminating that non-negated residue is on its own, because the cell measures
+    whether negation should modulate routing confidence when both retrievers mostly act on the
+    residue anyway.
   predicate:
   - column: sentence_markers.negation
     at_least: 1
@@ -180,6 +260,12 @@ cells:
     modulate routing confidence at all.
   source: fable_5
 - name: comparative_multi_entity
+  looks_like: >
+    An explicit comparison naming at least two comparable entities side by side — an X-versus-Y,
+    a better-or-worse-than, a which-should-I-choose — with the comparative marker and both entity
+    names present. The trap under test is each retriever surfacing documents about one entity
+    alone while the relevant target covers the relation, so pick entity pairs where single-entity
+    material plausibly dominates the corpus and only relation-bearing documents truly answer.
   predicate:
   - column: sentence_markers.comparative
     at_least: 1
@@ -196,6 +282,12 @@ cells:
     and rank fusion promotes exactly that consensus over each retriever''s single-entity toplist.'
   source: fable_5
 - name: conversational_courtesy_wrapper
+  looks_like: >
+    A request swaddled in chat courtesy — a greeting, a please or thanks, maybe a stray
+    interjection — at least ten words in total and drenched in function words, with the actual
+    need a small kernel inside the padding. Write it as a person opening a conversation, not
+    composing a search. Keep the kernel's vocabulary ordinary: the stated counter-mechanism is a
+    rare content term surviving inside the padding, so one must not sneak in by accident.
   predicate:
   - column: stopword_ratio.stopword_ratio
     at_least: 0.4
@@ -217,6 +309,12 @@ cells:
   source: fable_5
   operator: decorate
 - name: bare_acronym
+  looks_like: >
+    An acronym standing alone or with at most one companion word — capitals, typically two to six
+    letters, nothing else around it. Span the deciding axis deliberately: famous acronyms that
+    function as first-class entities in training data, obscure ones — a niche committee, an
+    internal protocol — that are effectively opaque rare strings, and the murky middle. Fame
+    versus rarity is a property of the token itself, and it is precisely the property under test.
   predicate:
   - column: sentence_markers.acronym
     at_least: 1
@@ -232,6 +330,12 @@ cells:
   source: fable_5
   operator: stat_rewrite
 - name: acronym_inside_question
+  looks_like: >
+    A fully grammatical question of seven to nineteen words with an acronym embedded as its key
+    term — a hard lexical anchor inside a sentence that supplies the intent. Keep the surrounding
+    words plain so the acronym stays the sharpest token present. Vary whether plausible targets
+    would use the acronym verbatim throughout or alternate it with the spelled-out expansion —
+    verbatim consistency versus alternation is exactly what separates the two predicted routes.
   predicate:
   - column: sentence_markers.acronym
     at_least: 1
@@ -249,6 +353,13 @@ cells:
     of the same answer and the fused ranking covers both.
   source: fable_5
 - name: pasted_code_fragment
+  looks_like: >
+    Actual pasted material — a code snippet, stack trace, or log excerpt running at least ten
+    tokens — with essentially no natural-language framing. Braces, dots, camelCase, line noise:
+    the artifact itself, not a description of it. Compose it the way real traces look, a few
+    genuinely rare tokens — the user's own identifiers, the failing frame — drowning in
+    boilerplate that every trace of that kind shares, and vary whether those rare symbols would
+    occur verbatim in the answering document.
   predicate:
   - column: logical_structures.code_fragment
     at_least: 1
@@ -265,6 +376,13 @@ cells:
     semantically while sparse pins the specific symbols, different evidence converging on one document.
   source: fable_5
 - name: code_symbol_named_in_prose
+  looks_like: >
+    A grammatical question of seven to nineteen words that names one or two code identifiers in
+    passing — camelCase, snake_case, or a dotted API path inside otherwise normal prose. The
+    controlled opposite of a symbol pile: mostly sentence, one hard anchor, usually the highest-
+    IDF token present. Vary the intent around the symbol — deprecation, alternatives, why it
+    misbehaves — and how crowded the symbol's documentation neighborhood plausibly is, since
+    intent must select among the crowd when the anchor alone over-matches.
   predicate:
   - column: structured_identifiers.code_identifier
     at_least: 1
@@ -282,6 +400,11 @@ cells:
     containing the symbol, so anchor and intent are both required to reach rank 1.'
   source: fable_5
 - name: symbol_pile_no_grammar
+  looks_like: >
+    Two or more bare technical tokens sitting side by side with no connective
+    words at all — like a pasted stack-trace fragment or a list of symbols
+    someone dropped into a search box. Not a question, not a sentence: no
+    "how", "what", "the", "of", "in", "and".
   predicate:
   - column: structured_identifiers.code_identifier
     at_least: 2
@@ -297,6 +420,13 @@ cells:
     as vocabulary, which makes the single-route claim falsifiable rather than definitional.
   source: fable_5
 - name: math_notation_present
+  looks_like: >
+    A query of up to nineteen words containing genuine mathematical notation — an equation, a
+    symbolic expression, a formula fragment — bare or with a few framing words. Span both regimes
+    deliberately: famous formulae that are memorized entities a model resolves as concepts, and
+    arbitrary expressions that survive only as exact character runs at the mercy of analyzer
+    tokenization. Which regime a given expression falls into is a property of the query token,
+    and it is the property under test.
   predicate:
   - column: logical_structures.math_expression
     at_least: 1
@@ -311,6 +441,13 @@ cells:
     so the shape legitimately produces both routes.'
   source: fable_5
 - name: boolean_operator_query
+  looks_like: >
+    Search-engine command syntax with almost no natural language around it: uppercase AND, OR,
+    NOT between terms, quoted exact phrases, plus or minus prefixes, field-style filters. Written
+    by someone who believes they are programming the engine. Since neither retriever actually
+    executes the operators, the route falls to the operand terms — so vary those from common
+    vocabulary to rare decisive strings, and include NOT-queries where honoring the operator
+    would actually change the answer set.
   predicate:
   - column: logical_structures.operator_syntax
     at_least: 1
@@ -327,6 +464,13 @@ cells:
   source: fable_5
   operator: operator_syntax_rewrite
 - name: relative_temporal_no_dates
+  looks_like: >
+    A natural query that pins time relatively and only in words — latest, most recent, since the
+    last release, from last week, before the change — with no concrete date token anywhere;
+    writing an actual date breaks the cell. The temporal words are semantically pivotal but
+    lexically near-worthless. Keep the non-temporal remainder ordinary too: a rare anchor
+    sneaking in would hand the query to the residue and stop testing whether the temporal
+    relation itself routes dense.
   predicate:
   - column: logical_structures.temporal
     at_least: 1
@@ -342,6 +486,13 @@ cells:
     the non-temporal residue, which makes the single route the honest falsifiable prior.'
   source: fable_5
 - name: datetime_token_present
+  looks_like: >
+    Three to nine words containing one concrete date or timestamp token. Rotate the surface form
+    deliberately — ISO style, slashed, written-out month and day — because format agreement with
+    the target is the entire axis: exact-form agreement makes the date a decisive anchor, while
+    disagreement blinds exact match completely and leaves the surrounding words to recover the
+    need. The format is chosen at query time, which is what makes this a query-side split worth
+    labelling.
   predicate:
   - column: structured_identifiers.datetime
     at_least: 1
@@ -358,6 +509,13 @@ cells:
   source: fable_5
   operator: inject
 - name: version_pinned_technical
+  looks_like: >
+    A short technical query of three to nine words pinned to an exact dotted version string that
+    must appear verbatim — the kind of precision embeddings actively blur, since adjacent
+    versions differ by the whole point. Vary the job of the surrounding words: sometimes the
+    version alone tags the answer, as in changelogs and release notes; sometimes the accompanying
+    vocabulary — breaking change, migration, incompatibility — must select the right document
+    among the many that mention the same version.
   predicate:
   - column: structured_identifiers.version_string
     at_least: 1
@@ -373,6 +531,13 @@ cells:
     words (breaking change, migration) need semantic matching to pick the right document within it.
   source: fable_5
 - name: status_code_idf_split
+  looks_like: >
+    A natural question of seven to nineteen words built around an error or status code. Span the
+    code-rarity spectrum inside this one surface: ubiquitous codes that occur in millions of
+    documents and anchor nothing, up through long vendor-specific codes rare enough to decide the
+    match alone. The identifier's rarity — a query property — is the whole test; the cell
+    embodies the principle that the mere presence of an identifier implies nothing about the
+    route.
   predicate:
   - column: natural_language_signal.natural_language_share
     at_least: 0.25
@@ -393,6 +558,13 @@ cells:
     identifier presence per se implies nothing.'
   source: fable_5
 - name: rare_key_buried_in_chatter
+  looks_like: >
+    Ten to sixty words of loose conversational chatter — hedges, function words, half-remembered
+    context, the way someone rambles in a team channel — with exactly one decisive key adrift in
+    it: a CVE identifier or a ticket-style key. The key must be the only sharp token; everything
+    around it should be discardable filler. Vary whether plausible targets restate the key
+    verbatim or discuss the issue in paraphrase without ever quoting it — the paraphrase case is
+    fusion's specific opening.
   predicate:
   - column: stopword_ratio.stopword_ratio
     at_least: 0.4
@@ -414,6 +586,12 @@ cells:
     restating the key, where dense's reading of the chatter recovers what the anchor misses.
   source: fable_5
 - name: bare_number_token
+  looks_like: >
+    A number alone or with a single companion word — one or two tokens total. Span anchor
+    strength deliberately: numbers that name concepts — a year, a famous constant, a model family
+    — versus long arbitrary digit runs rare enough for exact match to be decisive. Digit-run
+    rarity is measurable on the query alone, which is what makes both routes available for query-
+    side reasons, so construct across the whole spectrum rather than clustering at either end.
   predicate:
   - column: structured_identifiers.number
     at_least: 1
@@ -428,6 +606,12 @@ cells:
     on the query alone, so both routes are available for query reasons.'
   source: fable_5
 - name: number_inside_natural_question
+  looks_like: >
+    A grammatical, stopword-rich question of seven to nineteen words containing a number. Build
+    both anchor regimes on the same surface: the number as a parameter of the need — a year, a
+    quantity, a threshold — where the frame around it dominates, and the number as a designation
+    — a statute section, a model number, a form number — where the digits themselves are the
+    discriminating term. Same shape, two regimes, split purely by token rarity.
   predicate:
   - column: structured_identifiers.number
     at_least: 1
@@ -445,6 +629,12 @@ cells:
     anchor regimes, split by token rarity.
   source: fable_5
 - name: short_quantified_spec
+  looks_like: >
+    A terse spec-style query of three to six words containing a value-plus-unit token — the kind
+    of line typed into a product or parts search. Such tokens are mid-IDF, common inside their
+    niche and rare outside it. Vary whether the spec is the literal vocabulary of the target —
+    spec sheets and listings quoting it exactly — or merely narrows an otherwise semantic need
+    that targets express in different units, ranges, or prose.
   predicate:
   - column: structured_identifiers.value_with_unit
     at_least: 1
@@ -461,6 +651,13 @@ cells:
   source: fable_5
   operator: inject
 - name: instance_value_in_intent
+  looks_like: >
+    A natural request quoting the user's own concrete value — a hex color code or an exact price
+    — where the value parameterizes the need but is not the vocabulary of helpful documents,
+    which discuss palettes and price ranges without quoting that exact figure. Keep the value
+    plausibly arbitrary most of the time, but deliberately include a few canonical ones — a
+    named-color hex, a round price point — since values that do appear verbatim in targets are
+    the stated falsification channel.
   predicate:
   - column: natural_language_signal.natural_language_share
     at_least: 0.25
@@ -478,6 +675,13 @@ cells:
     appear verbatim in targets.'
   source: fable_5
 - name: env_var_configuration
+  looks_like: >
+    A natural question naming an ALL_CAPS_UNDERSCORE environment variable verbatim. Unlike
+    instance values, the variable name is shared vocabulary — documentation states it literally —
+    so it is a strong, legitimate anchor. Vary how much work the words around it must do: from
+    the variable alone tagging the answer, to crowded cases where many documents contain it and
+    the question's remainder — not set, precedence, permissions — must select within the
+    shortlist.
   predicate:
   - column: structured_identifiers.env_var
     at_least: 1
@@ -493,6 +697,13 @@ cells:
     realizes both signals.'
   source: fable_5
 - name: bare_machine_token
+  looks_like: >
+    A machine-generated locator nearly bare, up to six words total: a UUID, an API-key-shaped
+    string, a crypto address, an IP address, a CIDR block, or a host-and-port pair, with at most
+    a few framing words. High-entropy character runs with zero semantic surface — subword
+    tokenization shreds them into fragments that never co-occurred in training. Sample across all
+    the pooled families so what the router can learn is the shape itself, random character mass,
+    rather than any single format's regex look.
   predicate:
   - column: length.length_words
     below: 7
@@ -519,6 +730,13 @@ cells:
   source: fable_5
   operator: inject
 - name: registry_structured_identifier
+  looks_like: >
+    A structured registry code in up to nine words: an IBAN, a BIC, a securities identifier, a
+    tax ID, or a phone number, alone or with light framing. Unlike random machine tokens these
+    are fixed-format and partly alphabetic — they look almost readable — but their information
+    lives in checksum-bearing positions no distributional model represents. Sample across the
+    families so opacity generalizes across visually different formats instead of one memorized
+    look.
   predicate:
   - column: length.length_words
     below: 10
@@ -542,6 +760,13 @@ cells:
   source: fable_5
   operator: inject
 - name: logistics_catalog_token
+  looks_like: >
+    A logistics or catalog code in up to six words: barcode digits, a SKU, a serial number, or a
+    short booking reference, with minimal framing. The third opaque surface shape — long digit
+    runs and dash-joined alphanumerics — kept separate so opaque-token mass spans the character-
+    shape space. Do include booking-reference shapes that are coincidentally real words: labels
+    contradicting the prior there is the intended falsification channel, not a construction error
+    to avoid.
   predicate:
   - column: length.length_words
     below: 7
@@ -563,6 +788,13 @@ cells:
     claim.
   source: fable_5
 - name: legal_citation_canonical
+  looks_like: >
+    A canonical legal citation in professional format — a case-reporter citation, a court docket
+    number, or a statute or regulation reference — with at most a few framing words, nine words
+    at most in total. The punctuation-heavy format tokenizes into fragments an embedding cannot
+    reassemble, while legal targets reproduce it verbatim by convention. Sample across citation
+    systems and jurisdictions, and include the occasional citation famous enough to be an entity
+    in its own right — the stated counter-mechanism.
   predicate:
   - column: length.length_words
     below: 10
@@ -582,6 +814,13 @@ cells:
     in their own right, the stated counter-mechanism.
   source: fable_5
 - name: bio_clinical_identifier
+  looks_like: >
+    A biomedical identifier in up to six words: a clinical or diagnostic code, a trial registry
+    number, a genomic or protein accession, bare or lightly framed. This family deliberately
+    mixes fame regimes at the token level — identifiers with rich distributional presence that
+    behave as semantic entities, and opaque accessions only exact match reaches — so construct
+    both kinds in quantity, forcing the router to learn token-level rarity rather than domain
+    membership.
   predicate:
   - column: length.length_words
     below: 7
@@ -599,6 +838,13 @@ cells:
     rarity rather than domain membership.'
   source: fable_5
 - name: bibliographic_catalog_identifier
+  looks_like: >
+    A catalog identifier from the world of publications and sky surveys, in up to six words: a
+    DOI or preprint identifier, an ISSN, a library classification number, or an astronomical
+    designation. The same fame split as the biomedical family, expressed on bibliographic
+    surfaces — identifiers of famous works accumulate semantic mass through countless co-mentions
+    while a random catalog number stays opaque — so sample both ends and let the labels resolve
+    the axis.
   predicate:
   - column: length.length_words
     below: 7
@@ -620,6 +866,13 @@ cells:
     mass is a query property, so both routes occur inside one shape.'
   source: fable_5
 - name: travel_transport_code
+  looks_like: >
+    A short travel-flavored query of three to nine words, with at least a little natural
+    language, containing an airport or airline code, an aircraft or vessel registration, or a
+    license plate. This family has maximal fame variance — major-hub airport codes function as
+    place names to an embedder while tail numbers and plates are pure registry strings — so
+    sample across that spread, and let the registration-like member contribute its is-it-even-an-
+    identifier ambiguity.
   predicate:
   - column: length.length_words
     at_least: 3
@@ -642,6 +895,13 @@ cells:
     is-it-even-a-registration ambiguity on top.
   source: fable_5
 - name: capsword_shape_ambiguity
+  looks_like: >
+    Three to nine mostly natural words containing a token that merely looks like a stock ticker,
+    a game-notation move, betting odds, or a derivatives symbol. These banks are explicit shape
+    guesses that also fire on gene names, paper sizes, and plain dates — so construct true
+    positives and false positives of the shape on purpose: sometimes the token really is the
+    symbol, sometimes it is an ordinary word that capitalization makes misleading. The ambiguity
+    itself, not its resolution, is the feature under test.
   predicate:
   - column: natural_language_signal.natural_language_share
     at_least: 0.25
@@ -668,6 +928,13 @@ cells:
   source: fable_5
   operator: stat_rewrite
 - name: package_coordinate_dependency
+  looks_like: >
+    A query containing a package coordinate — a group, artifact, and version triple, a scoped
+    registry package name, or similar dependency syntax — at any overall length. The coordinate
+    is exact-match gold, yet its segments are readable words an encoder genuinely reads. Vary the
+    register of plausible targets: manifests and changelogs that carry the coordinate verbatim,
+    versus prose that names the package conversationally while only fragments of the coordinate
+    still anchor.
   predicate:
   - column: structured_identifiers.package_coordinate
     at_least: 1
@@ -681,6 +948,12 @@ cells:
   source: fable_5
   operator: inject
 - name: web_locator_token
+  looks_like: >
+    A web-world locator in up to six words: a URL, an email address, a social handle, or a file
+    path, bare or nearly so. Unlike UUIDs these are built from morphemes — paths, handles, and
+    mailbox names encode readable words. Vary how word-like the specific locator is, from slug-
+    rich URLs that leak their meaning to cryptic short-code paths that leak nothing, because that
+    per-token property decides whether exact occurrence or morpheme leakage dominates.
   predicate:
   - column: length.length_words
     below: 7
@@ -703,6 +976,13 @@ cells:
   source: fable_5
   operator: inject
 - name: standards_compliance_lookup
+  looks_like: >
+    A compliance-flavored ask of three to nine words, with a little natural language, citing a
+    standards reference or a hazardous-materials code. The codes are exact by design and
+    reproduced verbatim in compliance-adjacent targets. Vary the job of the semantic remainder:
+    from the code alone finding its home, to the crowded case where many documents cite the same
+    standard and only scope, applicability, or exemption words can select among them — the case
+    fusion is predicted to win.
   predicate:
   - column: natural_language_signal.natural_language_share
     at_least: 0.1
@@ -723,6 +1003,12 @@ cells:
     anchor shortlists, the intent discriminates, and rank fusion realizes both.'
   source: fable_5
 - name: geo_coordinate_postal
+  looks_like: >
+    A geographic token in up to six words: a postal code, a coordinate pair, a geohash, or a
+    plus-code, with minimal framing. Coordinates and geohashes are opaque numeric strings, but
+    postal codes straddle regimes — famous ones function as place names with real distributional
+    meaning while most are rare exact tokens. The same fame axis as tickers, expressed on
+    geographic surface forms; sample across it rather than clustering on well-known codes.
   predicate:
   - column: length.length_words
     below: 7
@@ -741,6 +1027,13 @@ cells:
   source: fable_5
   operator: inject
 - name: business_temporal_reference
+  looks_like: >
+    A natural query of three to nineteen words containing a workplace-calendar token — a fiscal
+    quarter, a fiscal year, a calendar week, a sprint number. These tokens are doubly weak:
+    boilerplate-common across enormous numbers of documents, yet semi-opaque to a general
+    encoder. Neither retriever wins on the token itself, so the route falls to the accompanying
+    content words — construct those across the literal-versus-paraphrase spectrum, because that
+    residue contest is the labelling target.
   predicate:
   - column: structured_identifiers.business_temporal
     at_least: 1
@@ -758,6 +1051,13 @@ cells:
     falls to the accompanying content terms — a genuinely contested shape worth labelling.'
   source: fable_5
 - name: single_token_char_blob
+  looks_like: >
+    Character mass concentrated in one to three enormous tokens totalling sixty characters or
+    more — a hash digest, a base64 or JWT fragment, a very long URL — with almost nothing else.
+    Defined purely on scalars precisely so it catches blob types no identifier bank lists;
+    include blobs from families the banks do not cover. Deliberately include the one leak that
+    could falsify the single route: a long URL whose readable slug hands morphemes to the
+    encoder.
   predicate:
   - column: length.length_words
     below: 4
