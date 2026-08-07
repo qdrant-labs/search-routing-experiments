@@ -20,6 +20,7 @@ from taxonomy_generators.verify import Targets
 
 if TYPE_CHECKING:  # a type only — keeps the base class off composition's graph
     from composition.cells import AxisBand
+    from augmentation.engine import AugmentationOutcome
 
 
 class SurfaceOrigin(StrEnum):
@@ -95,6 +96,12 @@ class AugmentedCandidate(BaseModel):
     meaning_preserved: bool
     answer_key: AnswerKeyPath
     attempts: int
+    hops: int = 0
+    """`completion()` round-trips spent on this row — see
+    `AugmentationOutcome.hops`; a cell's own call sequence (additions, then
+    the cut) can cost more than one hop per attempt."""
+    tokens: int = 0
+    elapsed_s: float = 0.0
     credit_gate: str = "none"
     """The operator's gate at creation (d42h): rows born behind an open
     gate ('none') are admissible; gated rows are feature-stock until
@@ -193,15 +200,18 @@ class Operator(ABC):
         an explicit `return []` and its reason — never inherits silence."""
 
     def candidate(
-        self, parent: pd.Series, floor: str, text: str, attempts: int
+        self, parent: pd.Series, floor: str, outcome: "AugmentationOutcome"
     ) -> AugmentedCandidate:
         """Assemble the pool row for inherit-path operators. Minted-path
-        operators (Inject) override to attach the surface_origin doc."""
+        operators (Inject) override to attach the surface_origin doc. Takes
+        the whole outcome, not `text`/`attempts` loose — `hops`/`tokens`/
+        `elapsed_s` live there too, and passing them as separate params would
+        just be the same fact carried twice."""
         slug = floor.replace(":", "-")
         return AugmentedCandidate(
             provenance=self.declaration.surface_origin.provenance,
             query_id=f"aug-{slug}-{parent['query_id']}",
-            query=text,
+            query=outcome.text,
             floor=floor,
             operator=self.declaration.operator,
             generated_from=str(parent["query_id"]),
@@ -209,6 +219,9 @@ class Operator(ABC):
             home_lane=str(parent["dataset"]),
             meaning_preserved=self.declaration.meaning_preserved,
             answer_key=self.declaration.answer_key,
-            attempts=attempts,
+            attempts=outcome.attempts,
+            hops=outcome.hops,
+            tokens=outcome.tokens,
+            elapsed_s=outcome.elapsed_s,
             credit_gate=str(self.declaration.credit_gate),
         )

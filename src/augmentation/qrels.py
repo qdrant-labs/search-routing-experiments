@@ -62,22 +62,71 @@ class AugmentationQrels:
                 "inherited_from": None,
             }])
         else:
-            parent_rows = self._parent_judgments(
-                candidate.home_lane, candidate.generated_from
+            rows = self._inherit_rows(
+                candidate.query_id, candidate.home_lane, candidate.generated_from
             )
-            if parent_rows.empty:
+            if rows.empty:
                 return 0
-            rows = pd.DataFrame({
-                "query_id": candidate.query_id,
-                "doc_id": parent_rows["doc_id"].astype(str),
-                "relevance": parent_rows["relevance"].astype(int),
-                "source": "human",
-                "inherited_from": candidate.generated_from,
-            })
         merged = pd.concat([existing, rows[list(_COLUMNS)]], ignore_index=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_parquet(self.path, index=False)
         return len(rows)
+
+    def backfill(self, pool: pd.DataFrame) -> pd.DataFrame:
+        """Retry the inherit-path lookup for every pool row with no qrels
+        entry yet — a parent whose lane wasn't fully materialized at mint
+        time (d43d) may have judgments now. Pure retry: no new judgment
+        source, so a row whose parent still has none stays exactly as
+        unlabelable as before. A MINTED row should never be orphaned (its
+        answer key has no external dependency at mint time) — reported
+        separately rather than silently mishandled. Returns the query ids
+        still unlabelable after this pass."""
+        self._lane_qrels.clear()   # re-read every lane fresh — that's the point
+        existing = self.load()
+        orphaned = pool[~pool["query_id"].astype(str).isin(set(existing["query_id"]))]
+        inherited = orphaned[orphaned["answer_key"] == str(AnswerKeyPath.INHERIT)]
+        unexpected = orphaned[orphaned["answer_key"] != str(AnswerKeyPath.INHERIT)]
+        if not unexpected.empty:
+            print(
+                f"backfill: {len(unexpected)} orphaned MINTED row(s) — "
+                f"unexpected, not retried: {list(unexpected['query_id'])}"
+            )
+
+        recovered: list[pd.DataFrame] = []
+        unlabelable: list[str] = []
+        for _, row in inherited.iterrows():
+            rows = self._inherit_rows(
+                str(row["query_id"]), str(row["home_lane"]), str(row["generated_from"]),
+            )
+            if rows.empty:
+                unlabelable.append(str(row["query_id"]))
+            else:
+                recovered.append(rows)
+        if recovered:
+            merged = pd.concat([existing, *recovered], ignore_index=True)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_parquet(self.path, index=False)
+        print(
+            f"backfill: {len(recovered)}/{len(inherited)} recovered, "
+            f"{len(unlabelable)} still have no judgment anywhere"
+        )
+        return pd.DataFrame({"query_id": unlabelable})
+
+    def _inherit_rows(
+        self, query_id: str, home_lane: str, generated_from: str
+    ) -> pd.DataFrame:
+        """The qrels rows an inherit-path child copies from its parent's own
+        judgments — empty when the parent's lane has none (yet)."""
+        parent_rows = self._parent_judgments(home_lane, generated_from)
+        if parent_rows.empty:
+            return pd.DataFrame(columns=_COLUMNS)
+        return pd.DataFrame({
+            "query_id": query_id,
+            "doc_id": parent_rows["doc_id"].astype(str),
+            "relevance": parent_rows["relevance"].astype(int),
+            "source": "human",
+            "inherited_from": generated_from,
+        })
 
     def _parent_judgments(self, home_lane: str, parent_id: str) -> pd.DataFrame:
         lane = lane_dirs().get(home_lane)
