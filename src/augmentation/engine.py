@@ -20,6 +20,7 @@ last in-loop verify — the d2 gap) is gone entirely.
 from __future__ import annotations
 
 import json
+import time
 from enum import StrEnum
 
 from litellm import completion
@@ -86,6 +87,86 @@ class AugmentationOutcome(BaseModel):
     """Every tool name called, across every round of the failed attempt, in
     order — repeating the same tool distinguishes a stuck loop from one that
     simply ran out of rounds doing varied legitimate work."""
+    hops: int = 0
+    """`completion()` round-trips spent producing this outcome — a tool-loop
+    attempt costs one per round, not one per attempt."""
+    tokens: int = 0
+    """Total tokens (prompt + completion), summed across every hop."""
+    elapsed_s: float = 0.0
+    """Wall-clock seconds spent inside `completion()` for this outcome."""
+
+
+class Spend:
+    """Cumulative cost: hops (`completion()` round-trips), tokens, LLM
+    seconds, PLUS wall-clock time since construction. Every outcome adds in,
+    accepted or dropped — a drop still paid for its hops. `elapsed_s` is
+    time spent waiting on the model; `wall_s` is everything — start this at
+    the top of whatever scope you want timed, since it measures from `__init__`
+    regardless of what `add()`/`add_hop()` ever see. The gap between the two
+    is the loop's OWN cost: dispatch/plan, gold-doc lookups, structural
+    checks, parquet writes — not just LLM latency. Used at every scope that
+    sums several outcomes into one: one round into one attempt
+    (`Augmenter.run`), one attempt into one call (`_tool_rounds`), one call
+    sequence into one row (`AugmentationLoop.produce`), one floor's whole
+    run — dispatch included (`AugmentationLoop.run`)."""
+
+    def __init__(self) -> None:
+        self.hops = 0
+        self.tokens = 0
+        self.elapsed_s = 0.0
+        self._started = time.monotonic()
+
+    @property
+    def wall_s(self) -> float:
+        return time.monotonic() - self._started
+
+    def add(self, spent: "Spend | AugmentationOutcome") -> None:
+        """Fold in anything shaped like a spend — an outcome or another
+        `Spend` both expose the same three fields, so one method covers
+        merging two running totals and crediting a finished outcome alike."""
+        self.hops += spent.hops
+        self.tokens += spent.tokens
+        self.elapsed_s += spent.elapsed_s
+
+    def add_hop(self, elapsed_s: float, tokens: int) -> None:
+        """One `completion()` round-trip — the raw unit `_completion`
+        measures, before there is an outcome to wrap it in."""
+        self.hops += 1
+        self.tokens += tokens
+        self.elapsed_s += elapsed_s
+
+    def stamp(self, outcome: AugmentationOutcome) -> AugmentationOutcome:
+        """This outcome, credited with the running total rather than just
+        its own last call — an accepted or dropped row's real cost is every
+        call it took to get there, not only the one that decided it.
+        Outcome-compatible fields only — `wall_s` is a scope-level fact, no
+        single outcome owns it, so `report()` carries that instead."""
+        return outcome.model_copy(update=self.as_dict())
+
+    def as_dict(self) -> dict[str, float]:
+        return {"hops": self.hops, "tokens": self.tokens, "elapsed_s": self.elapsed_s}
+
+    def report(self) -> dict[str, float]:
+        """Everything, including wall-clock — for a floor-level readout,
+        never for `stamp()` (`AugmentationOutcome` has no `wall_s` field)."""
+        return {**self.as_dict(), "wall_s": self.wall_s}
+
+    def summary(self, accepted: int) -> str:
+        """One line: totals, plus the per-row rate that answers 'how much
+        does ONE floor value cost' — the question this class exists for.
+        Per-row time is `wall_s`: the loop's own overhead is part of the
+        answer, not just what the model was waiting on."""
+        totals = (
+            f"{self.hops} hops, {self.tokens:,} tokens, "
+            f"{self.wall_s:.1f}s wall ({self.elapsed_s:.1f}s of it LLM)"
+        )
+        if not accepted:
+            return f"{totals} (nothing accepted)"
+        return (
+            f"{totals} -> {self.hops / accepted:.1f} hops/row, "
+            f"{self.tokens / accepted:,.0f} tokens/row, "
+            f"{self.wall_s / accepted:.1f}s/row"
+        )
 
 
 class Augmenter:
@@ -150,11 +231,14 @@ class Augmenter:
             },
         ]
         report = None
+        spend = Spend()
         for attempt in range(1, self.max_attempts + 1):
             if tool_loop:
-                text, error, trace = self._tool_rounds(messages)
+                text, error, trace, round_spend = self._tool_rounds(messages)
             else:
-                text, error, trace = self._single_shot(messages), None, ()
+                text, round_spend = self._single_shot(messages)
+                error, trace = None, ()
+            spend.add(round_spend)
             if error is not None:
                 return AugmentationOutcome(
                     text=text,
@@ -162,11 +246,13 @@ class Augmenter:
                     attempts=attempt,
                     error=error,
                     attempted_tools=trace,
+                    **spend.as_dict(),
                 )
             report = self.accept(text, targets)
             if report.passed:
                 return AugmentationOutcome(
-                    text=text, accepted=True, attempts=attempt, checks=report.checks
+                    text=text, accepted=True, attempts=attempt, checks=report.checks,
+                    **spend.as_dict(),
                 )
             failed = [check.target for check in report.checks if not check.passed]
             messages.append(
@@ -183,35 +269,55 @@ class Augmenter:
             accepted=False,
             attempts=self.max_attempts,
             checks=report.checks if report else (),
+            **spend.as_dict(),
         )
 
-    def _single_shot(self, messages: list[dict]) -> str | None:
-        response = completion(model=self.model, messages=messages, max_tokens=1024)
+    @staticmethod
+    def _completion(**kwargs) -> tuple[object, float, int]:
+        """One `completion()` round-trip, timed and measured — the one place
+        cost enters the system, so every hop above reads it from here rather
+        than each call site re-deriving it."""
+        start = time.monotonic()
+        response = completion(**kwargs)
+        elapsed = time.monotonic() - start
+        tokens = getattr(response, "usage", None)
+        return response, elapsed, getattr(tokens, "total_tokens", 0) or 0
+
+    def _single_shot(self, messages: list[dict]) -> tuple[str | None, Spend]:
+        response, elapsed, tokens = self._completion(
+            model=self.model, messages=messages, max_tokens=1024
+        )
         text = _clean(response.choices[0].message.content or "")
         messages.append({"role": "assistant", "content": text})
-        return text or None
+        spend = Spend()
+        spend.add_hop(elapsed, tokens)
+        return (text or None), spend
 
     def _tool_rounds(
         self, messages: list[dict]
-    ) -> tuple[str | None, ErrorCase | None, tuple[str, ...]]:
-        """Returns (candidate text, error, tool-call trace). `error` is set
-        exactly when `text` carries nothing verifiable — a spent round budget
-        or a broken protocol, never a failed rewrite."""
+    ) -> tuple[str | None, ErrorCase | None, tuple[str, ...], Spend]:
+        """Returns (candidate text, error, tool-call trace, spend). `error`
+        is set exactly when `text` carries nothing verifiable — a spent round
+        budget or a broken protocol, never a failed rewrite. One hop per
+        round, regardless of how many tool calls that round makes."""
         trace: list[str] = []
+        spend = Spend()
         for _ in range(self.max_rounds):
-            response = completion(
+            response, elapsed, tokens = self._completion(
                 model=self.model,
                 messages=messages,
                 tools=self._tool_schemas,
                 tool_choice="auto",
                 max_tokens=1024,
             )
+            spend.add_hop(elapsed, tokens)
             message = response.choices[0].message
             messages.append(message.model_dump())
             calls = getattr(message, "tool_calls", None)
             if not calls:
                 reply = _clean(message.content or "")
-                return reply, (None if reply else ErrorCase.NO_TEXT), tuple(trace)
+                error = None if reply else ErrorCase.NO_TEXT
+                return reply, error, tuple(trace), spend
             submitted: str | None = None
             for call in calls:
                 trace.append(call.function.name)
@@ -233,8 +339,8 @@ class Augmenter:
             if submitted is not None:
                 final = _clean(submitted)
                 error = None if final else ErrorCase.EMPTY_SUBMIT
-                return final, error, tuple(trace)
-        return None, ErrorCase.ROUNDS_EXHAUSTED, tuple(trace)
+                return final, error, tuple(trace), spend
+        return None, ErrorCase.ROUNDS_EXHAUSTED, tuple(trace), spend
 
     def _dispatch(self, call) -> dict:
         """Run one tool call. Arguments are model-generated — a boundary —
