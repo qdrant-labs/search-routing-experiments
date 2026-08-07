@@ -8,3 +8,4 @@ __pycache__
 **/.embeddings/
 **/.embedding_cache/
 **/.ipynb_checkpoints/
+docs/research
