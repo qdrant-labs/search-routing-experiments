@@ -487,12 +487,14 @@ cells:
   source: fable_5
 - name: datetime_token_present
   looks_like: >
-    Three to nine words containing one concrete date or timestamp token. Rotate the surface form
-    deliberately — ISO style, slashed, written-out month and day — because format agreement with
-    the target is the entire axis: exact-form agreement makes the date a decisive anchor, while
-    disagreement blinds exact match completely and leaves the surrounding words to recover the
-    need. The format is chosen at query time, which is what makes this a query-side split worth
-    labelling.
+    Three to nine words containing one concrete date or timestamp token, inserted exactly as it
+    appears in its source — never reworded into a different format. The cell's diversity comes
+    from which form the corpus happens to hand you, sampled across rows rather than chosen by a
+    single generation: ISO style, slashed, written-out month and day. Format agreement with the
+    target document is the entire axis: exact-form agreement makes the date a decisive anchor,
+    while disagreement blinds exact match completely and leaves the surrounding words to recover
+    the need. The format is chosen at query time by the corpus, not the generator — which is what
+    makes this a query-side split worth labelling.
   predicate:
   - column: structured_identifiers.datetime
     at_least: 1
