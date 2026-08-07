@@ -234,6 +234,7 @@ class StrategyRouter:
         pca_dims: int = 50,
         C: float = 1.0,
         extractor: FeatureExtractor | None = None,
+        delta: float = 0.0
     ) -> None:
         self.representation = representation
         self._space = FeatureSpace(representation, encoder, pca_dims)
@@ -241,6 +242,7 @@ class StrategyRouter:
         self._sparse = _binary_pipeline(C)
         self._t_dense = DEFAULT_THRESHOLD
         self._t_sparse = DEFAULT_THRESHOLD
+        self.delta = delta  # near-tie hedge width; 0 = rule unchanged
         self._extractor = extractor
         self._decisive_margin = RouterObjective().decisive_margin
 
@@ -256,20 +258,27 @@ class StrategyRouter:
         self,
         train: pd.DataFrame,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
     ) -> StrategyRouter:
-        """Fit both binaries. Default (SPEC d45a) uses decisive rows only —
-        clean labels the LR can trust. `all_rows=True` expands to every
-        routes_differ row (thin-margin included; still a real winner);
-        `max_class_share` seeded-downsamples majority classes so no class
-        exceeds that share of the training set. Both are SPEC d47a F3
-        experimental flags — defaults preserve d45a."""
-        if all_rows:
+        """Fit both binaries on a substrate chosen by `all_rows`: 'decisive'
+        (default, also False) = clear wins only, 'recommended' (also True) =
+        every routes_differ row, 'all' = the whole frame with tied/all-zero
+        rows entering as negatives for both binaries (they have no winner);
+        `max_class_share` seeded-downsamples majority classes."""
+        mode = {False: "decisive", True: "recommended"}.get(all_rows, all_rows)
+        if mode == "all":
+            rows = train
+        elif mode == "recommended":
             rows = train[_routes_differ(train)]
-        else:
+        elif mode == "decisive":
             rows = train[_margin(train) >= self._decisive_margin]
-        winner = _winner(rows)
+        else:
+            raise ValueError(
+                f"all_rows must be bool, 'decisive', 'recommended' or 'all';"
+                f" got {all_rows!r}"
+            )
+        winner = _winner(rows).where(_routes_differ(rows))
         if max_class_share is not None:
             rows, winner = _cap_class_share(rows, winner, max_class_share)
         self._space.fit(train)
@@ -308,7 +317,9 @@ class StrategyRouter:
 
     def predict_routes(self, frame: pd.DataFrame) -> list[StrategyName]:
         p_dense, p_sparse = self._probabilities(frame)
-        return _route_from_probs(p_dense, p_sparse, self._t_dense, self._t_sparse)
+        return _route_from_probs(
+            p_dense, p_sparse, self._t_dense, self._t_sparse, self.delta
+        )
 
     def coefficients(self) -> pd.DataFrame:
         """Per-feature logistic weights for each binary — the instrument readout
@@ -344,7 +355,11 @@ class StrategyRouter:
         p_dense, p_sparse = self._probabilities(self._query_frame(query))
         p_dense, p_sparse = float(p_dense[0]), float(p_sparse[0])
         route = _route_from_probs(
-            np.array([p_dense]), np.array([p_sparse]), self._t_dense, self._t_sparse
+            np.array([p_dense]),
+            np.array([p_sparse]),
+            self._t_dense,
+            self._t_sparse,
+            self.delta,
         )[0]
         return {
             "query": query,
@@ -353,6 +368,7 @@ class StrategyRouter:
             "p_sparse": p_sparse,
             "t_dense": self._t_dense,
             "t_sparse": self._t_sparse,
+            "delta": self.delta,
             "dense_fires": p_dense >= self._t_dense,
             "sparse_fires": p_sparse >= self._t_sparse,
         }
@@ -391,11 +407,16 @@ def _score_matrix(frame: pd.DataFrame) -> np.ndarray:
 
 
 def _route_indices(
-    p_dense: np.ndarray, p_sparse: np.ndarray, t_dense: float, t_sparse: float
+    p_dense: np.ndarray,
+    p_sparse: np.ndarray,
+    t_dense: float,
+    t_sparse: float,
+    delta: float = 0.0,
 ) -> np.ndarray:
     """The hedge rule (SPEC d46d), vectorised to indices into `_ROUTE_ORDER`:
     both below threshold ⇒ rrf, both fire ⇒ higher probability, else the route
-    that fired."""
+    that fired; a near-tie (|p_dense − p_sparse| < delta) hedges to rrf
+    regardless of what fired."""
     fires_dense = p_dense >= t_dense
     fires_sparse = p_sparse >= t_sparse
     idx = np.full(p_dense.shape, RRF_IDX, dtype=int)
@@ -403,13 +424,19 @@ def _route_indices(
     idx[fires_sparse & ~fires_dense] = SPARSE_IDX
     both = fires_dense & fires_sparse
     idx[both] = np.where(p_dense[both] >= p_sparse[both], DENSE_IDX, SPARSE_IDX)
+    if delta > 0.0:
+        idx[np.abs(p_dense - p_sparse) < delta] = RRF_IDX
     return idx
 
 
 def _route_from_probs(
-    p_dense: np.ndarray, p_sparse: np.ndarray, t_dense: float, t_sparse: float
+    p_dense: np.ndarray,
+    p_sparse: np.ndarray,
+    t_dense: float,
+    t_sparse: float,
+    delta: float = 0.0,
 ) -> list[StrategyName]:
-    idx = _route_indices(p_dense, p_sparse, t_dense, t_sparse)
+    idx = _route_indices(p_dense, p_sparse, t_dense, t_sparse, delta)
     return [_ROUTE_ORDER[i] for i in idx]
 
 
@@ -493,7 +520,7 @@ def _cap_class_share(
 
 
 def decisive_rows(data: pd.DataFrame) -> pd.DataFrame:
-    """Decisive rows (SPEC d41d) with a `winner` column — the router's training
+    """Decisive rows with a `winner` column — the router's training
     and evaluation substrate. Decisive = the top route's score beats the
     runner-up by at least the objective's decisive margin."""
     keep = _margin(data) >= RouterObjective().decisive_margin
@@ -651,7 +678,7 @@ class RouterExperiment:
         representations: Sequence[Representation] | None = None,
         production_client: object | None = None,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
         autofusion: bool | AutoFusionRouter = False,
         autofusion_sample: int | float | None = None,
@@ -762,7 +789,7 @@ class RouterExperiment:
         production_client: object | None,
         bar: tqdm | None = None,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
     ) -> dict[str, object]:
         _phase(bar, "fitting")
