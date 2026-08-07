@@ -32,7 +32,11 @@ from augmentation.supply import lane_dirs
 from composition.indexer import SPARSE_MODEL_ID
 from hybrid_search_rrf_dataset.fusion import StrategyName
 from hybrid_search_rrf_dataset.router import LABELS_PATH, SCORE_COLS, decisive_rows
-from query_taxonomy.corpus_relative import CORPUS_RELATIVE_BANKS, CorpusIndex
+from query_taxonomy.corpus_relative import (
+    CORPUS_RELATIVE_BANKS,
+    CorpusIndex,
+    CorpusRelativeBank,
+)
 from query_taxonomy.metrics.general import STOPWORDS
 
 SEED: Final[int] = 0
@@ -206,7 +210,6 @@ class LaneCorpusStats:
         self._out_path = out_path or (
             labels_path.parent / f"lane_corpus_stats{suffix}.parquet"
         )
-        self._banks = [cls() for cls in CORPUS_RELATIVE_BANKS]
 
     def build(self, *, force: bool = False) -> pd.DataFrame:
         if self._out_path.exists() and not force:
@@ -225,8 +228,9 @@ class LaneCorpusStats:
                 print(f"[skip] {key}: no corpus index on disk")
                 continue
             index = self._store.load(lane)
+            banks = [cls(index) for cls in CORPUS_RELATIVE_BANKS]
             stats = pd.DataFrame(
-                self._query_stats(query, index) for query in group["query"]
+                self._query_stats(query, banks) for query in group["query"]
             )
             rows.append({
                 "dataset": key,
@@ -266,12 +270,14 @@ class LaneCorpusStats:
             correct=[p == t for p, t in zip(predictions, y, strict=True)],
         )
 
-    def _query_stats(self, query: str, index: CorpusIndex) -> dict[str, float]:
+    def _query_stats(
+        self, query: str, banks: list[CorpusRelativeBank]
+    ) -> dict[str, float]:
         tokens = self._store.tokenizer.tokens(str(query))
         return {
             stat.name: stat.value
-            for bank in self._banks
-            for stat in bank.compute(tokens, index)
+            for bank in banks
+            for stat in bank.compute(tokens)
         }
 
     @staticmethod

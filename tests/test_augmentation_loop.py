@@ -8,6 +8,7 @@ import time
 
 import pandas as pd
 import pytest
+from query_taxonomy.features import FeatureExtractor
 
 from augmentation.config import AugmentationConfig, AugmentationPaths
 from augmentation.engine import AugmentationOutcome, Spend
@@ -16,7 +17,6 @@ from augmentation.operators import InjectOperator, StatRewrite, default_operator
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
 from taxonomy_generators.verify import Targets, verify
-from query_taxonomy.features import FeatureExtractor
 
 
 class ScriptedAugmenter:
