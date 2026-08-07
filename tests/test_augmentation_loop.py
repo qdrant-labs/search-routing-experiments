@@ -4,11 +4,13 @@ row is exercised without spend. The model's own competence is not testable here
 and needs one real call.
 """
 
+import time
+
 import pandas as pd
 import pytest
 
 from augmentation.config import AugmentationConfig, AugmentationPaths
-from augmentation.engine import AugmentationOutcome
+from augmentation.engine import AugmentationOutcome, Spend
 from augmentation.loop import AugmentationLoop
 from augmentation.operators import InjectOperator, StatRewrite, default_operators
 from augmentation.pool import GeneratedPool
@@ -228,3 +230,67 @@ def test_the_count_target_is_what_decides(text, expect):
     })
     report = verify(text, targets, extractor=FeatureExtractor(engines=None))
     assert report.passed is expect
+
+
+def test_spend_add_accumulates_across_outcomes():
+    """A drop still paid for its hops — add() has no accepted/rejected
+    branch, it just sums what the outcome actually cost."""
+    spend = Spend()
+    spend.add(AugmentationOutcome(
+        text="a", accepted=True, attempts=1, hops=1, tokens=100, elapsed_s=1.0,
+    ))
+    spend.add(AugmentationOutcome(
+        text=None, accepted=False, attempts=1, hops=2, tokens=250, elapsed_s=3.5,
+    ))
+    assert (spend.hops, spend.tokens, spend.elapsed_s) == (3, 350, 4.5)
+
+
+def test_spend_stamp_credits_the_running_total_not_the_last_call():
+    """A cell's second call (e.g. the cut) only knows its OWN cost; stamp()
+    must overwrite it with everything spent across the whole sequence."""
+    spend = Spend()
+    spend.add(AugmentationOutcome(text="a", accepted=True, attempts=1, hops=1, tokens=100))
+    last_call = AugmentationOutcome(
+        text="b", accepted=True, attempts=1, hops=1, tokens=50, elapsed_s=0.2,
+    )
+    spend.add(last_call)
+    stamped = spend.stamp(last_call)
+    assert (stamped.hops, stamped.tokens) == (2, 150)
+    assert stamped.text == "b"   # every other field survives untouched
+
+
+def test_spend_summary_reports_the_per_row_rate():
+    spend = Spend()
+    spend.add(AugmentationOutcome(text="a", accepted=True, attempts=1, hops=4, tokens=1000))
+    spend.add(AugmentationOutcome(text=None, accepted=False, attempts=1, hops=6, tokens=2000))
+    summary = spend.summary(accepted=1)
+    assert summary.startswith("10 hops, 3,000 tokens, ")
+    assert "of it LLM)" in summary
+    assert summary.endswith("-> 10.0 hops/row, 3,000 tokens/row, "
+                             f"{spend.wall_s:.1f}s/row")
+
+
+def test_spend_summary_handles_nothing_accepted():
+    spend = Spend()
+    spend.add(AugmentationOutcome(text=None, accepted=False, attempts=1, hops=3, tokens=90))
+    summary = spend.summary(accepted=0)
+    assert summary.startswith("3 hops, 90 tokens, ")
+    assert summary.endswith("(nothing accepted)")
+
+
+def test_spend_wall_s_measures_from_construction_not_from_llm_time():
+    """The whole point: `wall_s` ticks even when nothing is ever add()-ed —
+    it is measuring the SCOPE's real time, not summing reported hop costs."""
+    spend = Spend()
+    time.sleep(0.02)
+    assert spend.wall_s >= 0.02
+    assert spend.elapsed_s == 0.0   # no hop was ever reported
+
+
+def test_spend_report_includes_wall_s_but_stamp_input_does_not():
+    """`report()` is for a floor-level readout; `as_dict()` (what `stamp()`
+    uses) must stay outcome-compatible — `AugmentationOutcome` has no
+    `wall_s` field, so leaking it into stamp() would crash the model_copy."""
+    spend = Spend()
+    assert "wall_s" in spend.report()
+    assert "wall_s" not in spend.as_dict()
