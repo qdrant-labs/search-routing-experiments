@@ -10,6 +10,7 @@ import pytest
 
 from augmentation.config import AugmentationConfig
 from augmentation.core import AnswerKeyPath, Operator, SurfaceOrigin
+from augmentation.engine import AugmentationOutcome
 from augmentation.operators import (
     DecorateOperator,
     InjectOperator,
@@ -254,6 +255,34 @@ def test_stat_rewrite_structural_new_span_rule():
     assert op.structural(parent, gained_unrequested, asked) == []
 
 
+def test_stat_rewrite_structural_exempts_a_span_inside_an_authorised_surface():
+    """2026-08 follow-up: 'U.S.C.' is a real acronym AND part of a correctly
+    authorised legal_citation surface Inject copied verbatim — the model
+    chose none of those characters, so a second bank naming them is not a
+    smuggled addition."""
+    op = StatRewrite()
+    parent = pd.Series({
+        "query": "Are eviction cases first heard in circuit court?",
+        "surfaces": ("42 U.S.C.",),
+    })
+    targets = Targets(spans=(SpanTarget(feature="legal_citation", min_count=1),))
+    child = "North Carolina eviction 42 U.S.C."
+    assert op.structural(parent, child, targets) == []
+
+
+def test_stat_rewrite_structural_still_catches_a_smuggled_span_outside_the_surface():
+    """The exemption is narrow: an acronym OUTSIDE the authorised surface is
+    still a genuine addition nobody asked for, and must still fail."""
+    op = StatRewrite()
+    parent = pd.Series({
+        "query": "North Carolina eviction rules",
+        "surfaces": ("42 U.S.C.",),
+    })
+    targets = Targets(spans=(SpanTarget(feature="legal_citation", min_count=1),))
+    child = "North Carolina eviction 42 U.S.C. N.Y. rules"
+    assert op.structural(parent, child, targets) == ["child gained spans: ['acronym']"]
+
+
 def test_stat_rewrite_up_instruction_states_the_band_and_reads_current_value():
     op = StatRewrite()
     open_ended = op.instruction("length_words:60+", pd.Series({"query": "q"}))
@@ -421,7 +450,10 @@ def test_inject_candidate_mints_a_key_against_the_grounding_doc():
     parent = pd.Series({
         "query_id": "q1", "dataset": "beir-nfcorpus", "grounding_doc_id": "MED-1",
     })
-    row = InjectOperator().candidate(parent, "id:tech", "cPGES alternative medicine", 1)
+    outcome = AugmentationOutcome(
+        text="cPGES alternative medicine", accepted=True, attempts=1,
+    )
+    row = InjectOperator().candidate(parent, "id:tech", outcome)
     assert row.grounding_doc_id == "MED-1"
     assert row.answer_key is AnswerKeyPath.MINTED
     assert row.provenance == "doc_grounded"

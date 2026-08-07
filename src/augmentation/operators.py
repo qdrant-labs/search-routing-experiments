@@ -37,6 +37,7 @@ from augmentation.supply import SupplyIndex, lane_dirs
 from composition.catalog_axes import StatAxis, stat_column
 from composition.cells import CELL_TO_BANKS, CELLS_BY_NAME, AxisBand
 from composition.floors import STAT_AXES, identifier_floor_key
+from query_taxonomy.core import FeatureSpan
 from query_taxonomy.features import FeatureExtractor
 from query_taxonomy.taxonomy import FeatureGroup
 from taxonomy_generators.registry import generator_for
@@ -70,6 +71,36 @@ def _span_names(text: str) -> set[str]:
         for name, spans in by_type.items()
         if spans
     }
+
+
+def _spans_by_name(text: str) -> dict[str, list[FeatureSpan]]:
+    """Every span this text exhibits, keyed by bare name, WITH position —
+    `_span_names` throws position away, but a check that wants to know
+    whether a gained span sits inside an already-authorised literal needs it."""
+    result: dict[str, list[FeatureSpan]] = {}
+    for by_type in _regex_extractor().resolve(text).spans.values():
+        for name, spans in by_type.items():
+            if spans:
+                result.setdefault(name, []).extend(spans)
+    return result
+
+
+def _explained_by_surfaces(
+    spans: list[FeatureSpan], text: str, surfaces: tuple[str, ...]
+) -> bool:
+    """Whether every occurrence of a gained span sits inside some literal
+    Inject was already authorised to insert verbatim (d52d covers the span
+    it was TARGETED for; this covers a span a different bank names for the
+    SAME characters — the model chose none of it, so it is not smuggled)."""
+    ranges = [
+        (m.start(), m.end())
+        for surface in surfaces
+        for m in re.finditer(re.escape(str(surface)), text)
+    ]
+    return all(
+        any(lo <= span.start and span.end <= hi for lo, hi in ranges)
+        for span in spans
+    )
 
 
 def _span_total(catalog: pd.DataFrame) -> pd.Series:
@@ -470,13 +501,25 @@ class StatRewrite(Operator):
     ) -> list[str]:
         """No span the parent lacked and the request did not ask for —
         smuggled constraints and register markers are span-visible (d43b),
-        while a composed mint's own span is authorised (d52d)."""
+        while a composed mint's own span is authorised (d52d). A gained span
+        every occurrence of which sits inside a literal Inject already
+        authorised (`parent["surfaces"]`) is not smuggled either — the model
+        chose none of those characters, a different bank just has its own
+        name for some of them (2026-08 follow-up)."""
         authorised = {target.feature for target in targets.spans}
         gained = (
             _span_names(text) - _span_names(str(parent["query"])) - authorised
         )
-        if gained:
-            return [f"child gained spans: {sorted(gained)}"]
+        if not gained:
+            return []
+        surfaces = parent.get("surfaces") or ()
+        child_spans = _spans_by_name(text)
+        smuggled = {
+            name for name in gained
+            if not _explained_by_surfaces(child_spans.get(name, []), text, surfaces)
+        }
+        if smuggled:
+            return [f"child gained spans: {sorted(smuggled)}"]
         return []
 
 
@@ -659,8 +702,8 @@ class InjectOperator(Operator):
             problems.append(f"gained other identifier floors: {sorted(extra)}")
         return problems
 
-    def candidate(self, parent, floor, text, attempts):
-        base = super().candidate(parent, floor, text, attempts)
+    def candidate(self, parent, floor, outcome):
+        base = super().candidate(parent, floor, outcome)
         return base.model_copy(
             update={"grounding_doc_id": str(parent["grounding_doc_id"])}
         )
