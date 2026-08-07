@@ -1,5 +1,545 @@
 # TODOS
 
+## Acceptability view over route labels (2026-08-07, SPEC decision 60)
+
+Design closed via grill-me. Ties are judgment-resolution artifacts (0 of
+15,037 have identical top-10s); the upgrade is a derived acceptability view
+(`ok = score >= oracle − 0.3`, hit parity), three binary training heads,
+all_zero stays null. Vocabulary in CONTEXT.md (Acceptability label, Serve
+decision); full rationale in SPEC d60.
+
+- [x] Implement the view class — DONE 2026-08-07: `AcceptabilityLabels`
+      (labels.py) + `RouteLabels.acceptability()`; default tolerance derived
+      as `RouterObjective().ndcg_weight`, never typed. Must-pass test
+      (`tolerance=0` reproduces stored `route`) + per-shape cases in
+      tests/test_labels.py.
+- [x] Heads router + notebook comparison — DONE 2026-08-07:
+      `AcceptabilityRouter` (router.py, 3 binaries on ok_*, serves cheapest
+      clearing threshold; no-head-fires fallback = most probable, the SPEC
+      deferred policy) + route_experiments.ipynb §6 (readout table vs serve
+      oracle / argmax router / constants; smoke-verified end to end).
+      Threshold tuning and the auto-fusion baseline row still to run/judge
+      in the notebook — user-driven.
+- [ ] **Option A (next)**: LLM-judge the differing tails of tied rows,
+      PPI-rectifier spine (docs/research/route-label-sourcing.md) —
+      ~14.4K queries × ~15–20 unjudged tail docs, sampled not exhaustive.
+      Blocked by the two hygiene items below.
+- [ ] Fix `GoldenRoutingBuilder` parquet round-trip (~147 rows where
+      route_rankings contradict route_scores) — option A judges from those
+      rankings, so the bug must die first.
+- [ ] Rebuild or delete the stale `beir-nfcorpus_oracle` cache (323 rows
+      vs 12 selected).
+- [ ] **Option C (conditional)**: harden webfaq/gooaq/msmarco corpora with
+      adversarial distractors — only if A finds the ties real.
+- [ ] **Option D (last)**: augment tied parents into harder children —
+      after A/C show which perturbations break ties.
+
+## Chances scheduler for AugmentationCampaign (2026-08-07, SPEC decision 59)
+
+Design closed via grill-me + sanity-check (KEEP, stdlib-only). DONE
+2026-08-07 — `FaultStreak` (loop.py) + `_FloorTurn` (campaign.py), both
+plain `@dataclass`es (not pydantic — mutable in-loop accumulators, same
+shape as `Spend`, never cross a real boundary). 170/170 tests passing, ruff
+clean.
+
+- [x] `AugmentationCampaign._schedule()` runs a `collections.deque`-based
+      floor queue with per-floor `_FloorTurn` state (`chances_left`,
+      `tried: set[str]`, `remaining`, `accepted`); `spend_chance()` owns the
+      chances_left decrement (not external mutation).
+- [x] `AugmentationLoop.run()` gained `exclude: frozenset[str]` (unioned
+      with `parents_used`) and `max_consecutive_faults: int | None` —
+      defaults preserve every existing caller's behavior exactly.
+- [x] Fault = `not (outcome.accepted and not problems)` — one boolean
+      (`banked`), computed once, feeds both the accept/drop branch and
+      `FaultStreak.record()`. No distinction by reason.
+- [x] `FaultStreak.tripped()` marks `stopped` itself (not set externally);
+      3 consecutive -> `stopped_early` in `.attrs` -> campaign spends a
+      chance and requeues at the literal back; 0 chances left -> dropped for
+      the rest of the run.
+- [x] **The must-pass test**: `test_a_floor_that_always_faults_costs_at_most_the_k_ceiling`
+      (tests/test_campaign.py) — asserts `engine.calls == MAX_CHANCES * FAULT_STREAK`
+      (9) exactly against 15 real available parents, never a 10th call.
+- [x] Summary distinguishes `DROPPED_EXHAUSTED_CHANCES` from `PRODUCE`, plus
+      an explicit `print()` line listing dropped floors when any exist.
+- [ ] Not directly tested: the chances scheduler against a *cell* floor
+      (multi-call `produce()`, e.g. inject+stat_rewrite bundled) — both new
+      tests use a bare single-call floor for simplicity. The fault-counting
+      logic doesn't distinguish floor type, so this should generalize, but
+      isn't exercised the way `test_plan_resolves_a_cell_floor_through_demand_not_operator_for`
+      covers `plan()`'s cell path.
+
+## `AugmentationCampaign.plan()` never understood cells (2026-08-06)
+
+Caught live: `campaign.plan()` reported "skip: no operator" for all 22
+hungry floors. It predates the d51 cell rebuild and still called
+`loop.operator_for(floor)` directly — which only ever recognized bare floor
+labels ("id:tech", "length_words:60+"), never a cell name. `loop.run()`
+never had this bug because `demand()` checks `CELLS_BY_NAME` first.
+
+- [x] `campaign.plan()` now routes through `loop.demand()` +
+      `loop.planned()`/`loop.owner()` — the same cell-aware path `run()`
+      already used — DONE 2026-08-06. `_planned`/`_owner` on
+      `AugmentationLoop` made public (`planned`/`owner`) since they're now
+      called across the module boundary from `campaign.py`, not just
+      internally. Added `SKIP_UNSERVABLE` distinct from `SKIP_NO_OPERATOR`
+      (a cell with no servable parent left vs. a bare floor nothing
+      registers for are different failure reasons).
+- [x] Verified against the real order sheet: all 22 cells now resolve their
+      real `operator`/`gate` (e.g. `inject, stat_rewrite` /
+      `coherence_gate`) and correctly cap at `pilot_n=30` — previously all
+      22 showed `None`/`None`/`skip: no operator`.
+- [x] Regression tests in `tests/test_campaign.py` (new file): a cell floor
+      resolves correctly, a gate-free bare floor still works unchanged, an
+      unregistered bare floor still reports `SKIP_NO_OPERATOR` distinctly
+      from an unservable cell. 168/168 passing, ruff clean.
+- [ ] Not yet checked: whether `AugmentationCampaign.run()`'s downstream
+      consumers (if any exist outside this repo, e.g. a notebook) read the
+      old single-operator-name `operator` column expecting exactly one
+      name — it's now a comma-joined string when a cell plans more than one
+      operator (e.g. `"inject, stat_rewrite"`).
+
+## From the Spend-tracker-surfaced acronym collision (2026-08-06, SPEC decision 58)
+
+The new `Spend` cost tracker turned an abstract worry ("is this expensive?")
+into a concrete, investigable number: a live `legal_citation_canonical` run
+dropped 9/14 attempts, all for `"child gained spans: ['acronym']"` — a
+deterministic collision between two correct, independent banks
+(`LegalCitationBank`'s `"U.S.C."` form and `AcronymBank`'s dotted shape), not
+model variance.
+
+- [x] `StatRewrite.structural()` now authorises a gained span by CHARACTER
+      RANGE against `parent["surfaces"]`, not just by feature name — DONE
+      2026-08-06 (d58). `_spans_by_name()` + `_explained_by_surfaces()`
+      (operators.py). Audited all four operators; only StatRewrite's check
+      crosses feature-group boundaries, so only it needed the fix.
+- [x] Regression tests: an authorised U.S.C. citation must not be flagged;
+      a genuinely smuggled acronym OUTSIDE the authorised surface still must
+      be — DONE, both in `tests/test_operators.py`. 165/165 passing, ruff
+      clean.
+- [x] Re-run live against `legal_citation_canonical` — DONE 2026-08-06:
+      5/5 accepted, 0/5 dropped (was 5/14, 9 dropped, all `['acronym']`).
+      Spend before -> after: 77 -> 26 hops, 437,714 -> 145,293 tokens,
+      161.0s -> 53.6s wall — roughly a 3x reduction, entirely from removing
+      guaranteed-fail attempts (attempted now equals accepted).
+
+## From "why StatRewrite?" (2026-08-06, SPEC decision 57)
+
+Asked plainly why StatRewrite runs at all — whether a parent's own corpus
+mint might already be enough — and it traced to a real bug: `eligible()`'s
+`movable` filter excluded parents already sitting inside a two-sided band, so
+a genuinely free parent was invisible to the pool rather than merely unedited.
+
+- [x] `already_holds`, `needs_a_move` (dispatch.py) + `StatRewrite.eligible()`'s
+      broadened `movable | already` mask + parent-aware
+      `calls_for(plan, cell, parent)` — DONE 2026-08-06 (d57). Measured on
+      `version_pinned_technical`: candidate pool 4,183 -> 4,802 parents; 689
+      of them need ONLY Inject once picked, StatRewrite dropped from the call.
+- [x] BUG `StatRewrite.eligible()`'s `.assign(stat_value=joined["__value"])`
+      crashed whenever `eligible()` matched zero rows — assigning a column
+      from the UNFILTERED frame onto an empty filtered frame reintroduces a
+      row via index alignment (pandas has no shape left to constrain against
+      on a fully-empty frame). FIXED 2026-08-06: align to `out["__value"]`
+      instead. Caught only by a synthetic test with a non-matching catalog
+      row — a case real traffic never hits, since a hungry cell always has
+      some eligible row.
+- [x] Test coverage: `tests/test_dispatch.py` (`calls_for` drops/keeps/never-
+      drops-CONSTRAIN/all-free, 4 tests), `tests/test_operators.py`
+      (`eligible()` includes an already-in-band row and sorts it first, 2
+      tests), `tests/test_augmentation_loop.py` (one engine call, not two,
+      when Inject alone already satisfies the length band, 1 test). 151/151
+      passing, ruff clean.
+- [ ] `already_holds`/`needs_a_move` only has one real axis to test against
+      today (`length_words`, the only `WORD_AXES` member). Revisit once a
+      second bounded-above-with-a-floor axis declares a direction — nothing
+      today exercises the multi-axis case.
+- [ ] `AugmentationLoop.grounded()` carries an EARLIER, still-uncommitted fix
+      from this same investigation: gated on
+      `parent.get("grounding_doc_id") is None` rather than `Stage.CONSTRAIN`
+      classification, because `StatRewrite.instruction` decides to cut from
+      the PARENT's actual value, not the plan's stage — a two-sided band the
+      parent already overshoots also cuts, and did so blind (no document)
+      before this fix. Applied, but no test exercises the gating itself yet
+      (`test_a_cut_reads_the_gold_document_when_one_is_known` in
+      `test_cells.py` only covers `_cut_instruction`'s wording, not whether
+      `grounded()` decides to fetch).
+
+## From the empty-string investigation (2026-08-06, follows d55)
+
+The user reported "tried: ''" on two live parents and asked whether the
+harness was sending the model something unwinnable. Verified with zero LLM
+spend: neither reported parent (`fayetteville`, `by-product meal`) was
+arithmetically incompatible — 1 mandatory word each against any realistic
+ceiling. So those two empty outcomes are the model failing a FEASIBLE task,
+not the harness's fault; but the engine had no way to say that distinctly,
+and no way to catch the cases that genuinely are the harness's fault.
+
+- [x] `AugmentationOutcome.text` is now `str | None`; `error: ErrorCase | None`
+      replaces stuffing a protocol message into a fake `TargetCheck`;
+      `attempted_tools: tuple[str, ...]` traces every tool called across a
+      round-exhausted attempt, in order — repeating the same tool distinguishes
+      a stuck loop from one doing varied legitimate work that simply ran out of
+      budget. `ErrorCase`: `NO_TEXT`, `EMPTY_SUBMIT`, `ROUNDS_EXHAUSTED` (engine-
+      raised, mid-conversation), `INCOMPATIBLE_PARENT` (loop-raised, pre-flight).
+- [x] `dispatch.unreachable(call, parent)` + `mandatory_words(parent)`: before
+      spending a call on a CONSTRAIN step, sum the words in every mint's
+      mandatory literal surface and compare against the ceiling. If already
+      broken, `loop.produce` returns `INCOMPATIBLE_PARENT` at `attempts=0` —
+      zero spend — instead of letting the model discover it costs 6 rounds.
+      Proven both ways: a poison engine that raises if ever called confirms an
+      incompatible `bare_acronym` parent never reaches it.
+      Scoped to `length_words` (the only axis with a declared DOWN direction,
+      d53f) — extend `dispatch.WORD_AXES` (now public, shared with d57's
+      `already_holds`) if another axis ever gets one.
+- [ ] `_pair_line`/the drop-report branch now print `error` + `attempted_tools`
+      instead of a fake failed-check line — never re-run against a live batch
+      log to confirm the readout is actually clearer, only checked against
+      hand-built outcomes.
+- [ ] The trace only ever showed `verify`/`verify`/... in every example checked
+      so far. If a real round-exhausted batch shows genuinely VARIED tool use
+      (list_features, generate_surface, verify in sequence) rather than one
+      tool repeated, that is evidence for raising `max_rounds` — the opposite
+      conclusion from a repeated-tool trace. Decide only from the trace, per
+      d53's engine agent's own verdict: raising the budget before measuring
+      would mask whether other fixes worked.
+
+## From the request-shape grill (2026-08-05, SPEC decisions 55 + 56)
+
+Fix the three bugs FIRST — the leaked-requirement one changes what the model is
+even asked, so measuring the new prompt before it lands measures nothing.
+
+- [x] BUG `dispatch.planned_targets` never excluded an unsatisfied requirement
+      (`id()` compared across two `requirements(cell)` calls, always False) —
+      FIXED 2026-08-05: keyed on the requirement's VALUE, frozen bands compare
+      by value. **d52(f) partial fulfilment now works for the first time.**
+- [x] BUG `ParentPool.gold_text` took a NaN `grounding_doc_id` over the qrel
+      fallback (NaN is truthy) — FIXED 2026-08-05 with a `pd.isna` guard.
+- [x] BUG `StatRewrite._cell_band` resolved via the global `CELLS_BY_NAME` —
+      FIXED 2026-08-05 by d55's own ABC change: `instruction`/`targets` receive
+      the requirement the call serves, so a generated cell resolves without any
+      registry, and a caller passing nothing gets a clear `ValueError` instead
+      of unpacking None.
+- [x] Sequential request pipeline (d55b/c) — DONE 2026-08-05: `dispatch.Call` +
+      `calls_for`, `AugmentationLoop.produce` / `brief` / `_one_call`. Verified
+      on `symbol_pile_no_grammar`: 2 calls, targets accumulating 2 -> 3
+      requirements, the cut seeing the minted text.
+- [ ] Generator-facing cell field (d55d): schema + wiring DONE
+      (`ArchetypeCell.looks_like`, emitted LAST in the brief and worded to
+      override an operator's default shape claim). **1 of 44 cells written** —
+      `symbol_pile_no_grammar`. The other 43 are human-authored content: a cell
+      with no `looks_like` silently keeps the operator's "must read as one
+      coherent request a real person would type", which is right for most cells
+      and wrong for every telegraphic one. Nothing can verify prose, so a wrong
+      line shows up as oddly-shaped rows, not as a test failure.
+- [x] `NUM` dropped from `CLOSED_CLASS` (d56) — DONE 2026-08-05 in the nested
+      taxonomy repo, uncommitted. 402 bank tests pass; all 7 probe symbol piles
+      now score 0.000 and prose still scores 0.5-0.6.
+- [ ] RE-EXTRACTION, now owed by two repairs: `version_string` (d50b follow-up)
+      and `NUM`/`nl_share` (d56e). `catalog.parquet` is stale for both, plus
+      `number` (freed decimals fall through to NumberBank). Cell membership
+      shifts wherever `nl_share` is banded, so the fill and every per-cell count
+      move with it. Surfaces need `force=True` — `SupplyIndex.build` skips
+      existing files and they were last built Jul 30.
+- [ ] Was `symbol_pile_no_grammar` the only cell this band broke? d56 was
+      diagnosed from one cell and a 7-example probe. Re-check every
+      `nl_share`-banded cell after the re-extraction; the 2.0% band-crossing
+      figure says prose cells barely move, but that was measured on natural
+      queries, not on generated ones.
+
+## From the harm-ordering fix (2026-08-05, SPEC decision 53)
+
+Landed: `Stage.CONSTRAIN` + `reduces()` in dispatch.py, stage reorder in
+`plan()`, `headroom()` deleted, `(length_words, DOWN)` declared,
+`ParentPool.gold_text` + `_corpus_text` pushdown, `StatRewrite._cut_instruction`,
+`AugmentationLoop.grounded`. 53 tests pass, ruff clean, nothing committed.
+Supply 7,855 -> 208,465 parents; 22/22 cells servable; 13 cover their shortfall.
+
+- [x] Inject weaves n surfaces (SPEC d54) — DONE 2026-08-05. `wanted(floor)`
+      reads the band's count, `_offers` groups `(doc, bank)` holding that many
+      DISTINCT surfaces, `surface` -> `surfaces` tuple. Verified:
+      `symbol_pile_no_grammar` now offers `('cPGES', 'lipoxinA4')` against a
+      `code_identifier >= 2` target where before it offered one and forbade a
+      second. Cost: that cell 176 -> 93 parents (a doc must supply both).
+- [x] Empty-query parents (2026-08-05): `ParentPool.available()` filtered on
+      `checkable` but not on whether the query has text, so a blank parent
+      reached the LLM (`before: ''`). Now dropped in `hydrate`, where the text
+      arrives, with a count printed. 8-12 rows per cell. The upstream cache bug
+      is still open under the composition-fill section.
+- [ ] `InjectOperator.wanted()` takes the MAX count across a cell's bands, so a
+      cell demanding 2 of one bank and 1 of another would over-ask on the
+      second. No cell does today (only one has any count > 1); revisit if the
+      d50(d) expansion writes one.
+- [ ] UNEXPLAINED: three low-supply cells lost 4-8 parents against the
+      pre-reorder baseline — `travel_transport_code` 34->30,
+      `standards_compliance_lookup` 58->50, `business_temporal_reference` 9->5.
+      All three have a LOWER-bound length band (QUERY_ONLY, not CONSTRAIN), so
+      the reorder should not touch them, and tracing the steps in either order
+      lands on the current number. Changes no decision (all three remain far
+      short of their ~397 targets), but the baseline delta is unaccounted for
+      and worth one look before trusting per-cell counts to the row.
+- [x] `StatRewrite._cell_band` resolves a cell's band through the global
+      `CELLS_BY_NAME` registry rather than being handed the cell, so a
+      test-local or generated cell is invisible to it (hit while writing
+      `test_a_cut_reads_the_gold_document_when_one_is_known`, which had to use a
+      real cell name). DUPLICATE of the bug above marked fixed under d55 —
+      the requirement now passes down through `instruction`/`targets`.
+- [ ] `gold_text` is untested and is the riskiest new path: a wrong doc silently
+      produces a cut aimed at the wrong evidence. Worth a test that the
+      `grounding_doc_id` path and the qrel-fallback path resolve the same
+      document for an Inject parent.
+- [ ] The cut's escape hatch (d53e) is instruction-only: a model that cannot fit
+      the band replies with the shortest answerable version, which then fails
+      its target and drops. That is safe but wasteful — those rows are exactly
+      the construction candidates, and nothing records them as such.
+
+## Bank precision — repair on demand, not as a programme (2026-08-05)
+
+No SPEC decision: three candidate systemic fixes were proposed and all three
+refuted with data, so there is nothing to decide. A generic surface filter
+rejects 0% of the `bic` / `env_var` / `error_code_like` / `ticket_like` junk
+while killing 92% of real `datetime` and 100% of real `legal_citation` — the
+discriminating property is per-format (a bare digit run is junk for
+`version_string` and IS the format for `postal_code`). A stricter pattern as
+the reference is circular: if it is correct, it IS the repair. Claim
+concentration does not separate — sound banks span top-10 share 1.9-42.5%,
+junk banks 1.7-87.0%, and `securities_id` (99.9% bare digit runs) scores best
+of all 20 because those runs are genuinely high-entropy.
+
+So: repair a bank when a cell you intend to fill depends on it. Cheap to check
+first — `SupplyIndex.load(lane)` filtered to the bank, `.value_counts().head()`
+tells you in seconds whether its surfaces are real.
+
+Measured over the pooled surface index (18 of 42 lanes, 4,555,069 claims):
+**52.1% of non-`number` claims are format-mismatched.** Ranked by damage
+(junk rate x hungry-cell dependence):
+
+- [x] `version_string` — DONE 2026-08-05, taxonomy repo, uncommitted.
+      180,864 -> 5,098 surfaces (2.82%). Keyword-gated / v-prefixed / bare
+      semver branches only; bare 2-part decimals gone. Gave up zero-padded
+      parts, product-gated forms (`Python 3.11`), bare `v2`. 402 bank tests
+      pass. Residual documented: state statute citations (`RCW 10.46.190`),
+      dotted dates, dotted phones.
+- [ ] `env_var` (RIGID, 14,363 claims, ~100% junk) — `--the` x525, `--and`
+      x525 prose double-dashes plus LaTeX (`$T_1`). SOLE supplier for hungry
+      `env_var_configuration` (270). Highest priority: the cell cannot be
+      served at all until this lands.
+- [ ] `securities_id` (113,415, 99.9% bare digit runs) — `998244353` x1572,
+      an NTT prime from competitive-programming code; 112,409 of 113,415 from
+      one lane. Dominates hungry `registry_structured_identifier` (249).
+- [ ] `bic` (21,062, 77% eight bare uppercase letters) — `CONCLUSIONS`,
+      `HOMEPAGE`, `CRITERIA`. Same cell as above; with `securities_id` that
+      cell has no clean supplier (`iban` 4, `tax_id` 16, `phone_number` 663).
+      NOTE: a real BIC is also 8 uppercase letters, so no pattern separates
+      them — this one needs a lexicon, and `wordfreq` is not installed
+      (spaCy's `en_core_web_sm` ships no lexeme probabilities: `the` and
+      `qwzxjk` both return `is_oov=True, prob=-20.0`).
+- [ ] `http_status_code` (19,590, 99.8% contain whitespace) — SPAN BOUNDARY
+      bug, not a permissive branch: `100 Years`, `100\nThe`. Even a true
+      positive yields an unusable surface. Hungry `status_code_idf_split`
+      (235). Shares a root cause with `airport_airline_code` and `uri`
+      (trailing punctuation) — worth one diagnosis for all three.
+- [ ] `error_code_like` (16,023, 99.9% `E`+letters, no digits) — `ECOG` x2695,
+      `EXISTS`, `ELSE`, `ELISA`. Same cell as `http_status_code`, so both its
+      suppliers are junk. Lexicon case again (`EEXIST` vs `EXISTS`).
+- [ ] `postal_code` (39,326, 99.7% bare 5-digit) + `alt_geocoding` (484, 66%
+      arithmetic like `1622+161`) — both suppliers for hungry
+      `geo_coordinate_postal` (278). Its third, `geo_coordinate`, has ZERO
+      supply, so the cell has no sound source at all.
+- [ ] `package_coordinate` (18,981, 58.7% `lower:lower` code colons — `x:x`
+      x658, `coding:utf-8`) — sole supplier for hungry
+      `package_coordinate_dependency` (198).
+- [ ] `issn` (1,284, 97.7% bare NNNN-NNNN — year ranges `1861-1865`) +
+      `library_classification` (273, 84.6% version-shaped `V1.1`) +
+      `astronomical_designation` (1,662, 78.6% `M`+1-2 digits in clinical
+      text) — all three feed hungry `bibliographic_catalog_identifier` (398);
+      only `academic_identifier` there is sound (92.8% real DOI/ISBN).
+- [ ] `genomic_accession` (3,605, 96.8% digits-then-letters — `6MWT`, `131I`,
+      `3GPP`) — hungry `bio_clinical_identifier` (398); co-supplier
+      `medical_code` is ~60% real.
+- [ ] `hazmat_code` (569, 75.4% is cytochrome `P450` — 426 of 569 one surface)
+      — hungry `standards_compliance_lookup` (394); `standards_citation`
+      there is sound.
+- [ ] `airport_airline_code` (148, 100% contain prose — `IATA airport`) +
+      `license_plate` (125, `G-F 20`) — hungry `travel_transport_code` (397),
+      which with `aircraft_vessel_reg_like` (69) has no usable supply.
+- [ ] `uuid` — d50(b)'s repair is INCOMPLETE. 94.1% of claims are all-digit
+      33-char binary strings (`111111101010101111100101001111111`); `0` and
+      `1` are valid hex digits and the `(?!(.)\1*\b)` lookahead only rejects
+      single-repeated-char runs. Verified still claiming under the repaired
+      bank. No hungry cell depends on it today.
+- [ ] `ticket_like` (13,751, 90.8% SHAPE-LEGAL) — a different failure: the
+      population is `COVID-19` x2644, `ICD-10`, `IL-10`, `CIFAR-10`, the
+      corpus's commonest tokens, in a cell named
+      `rare_key_buried_in_chatter` (356). The detection is right and the CELL
+      SEMANTICS are inverted; its only alternative `cve` has ZERO supply.
+      Decide the cell, not the bank.
+
+Not blocking, no hungry cell depends on them: `stock_ticker_like` (693,117
+claims, 39.8% dictionary words / Roman numerals — the largest absolute
+over-claim, but its cell `capsword_shape_ambiguity` is arguably ABOUT that
+ambiguity), `ip_address` (64.3% C++ scope operator `::2`), `social_handle`
+(40% code directives), `file_path` (39% date fragments `/1/2020`),
+`betting_odds` (57.6% plain fractions), `lei`, `market_code`,
+`clinical_trial_id` (49% are PMIDs).
+
+Sound, safe to inject from: `datetime` (96.4% ISO — d50b's epoch deletion
+verified working), `value_with_unit`, `currency_amount`, `code_identifier`
+(759,815 genuine symbols, 4.3% short-camel leakage), `academic_identifier`,
+`email`, `legal_citation` / `legislative_citation` (clean but supply-starved:
+457+238 claims for a 400-missing cell), `standards_citation`,
+`business_temporal`, `phone_number`, `hex_color`.
+
+Zero supply in all 18 indexed lanes: `celex`, `chemical_id`, `cve`,
+`geo_coordinate`, `iso_code`, `tracking_number`. Cell
+`single_token_char_blob` (398 missing) maps to no bank at all.
+
+- [ ] STALE ARTIFACTS from the version_string repair: `catalog.parquet` and
+      every `src/data/<lane>/surfaces.parquet` are wrong for `version_string`
+      AND for `number` (freed decimals fall through to `NumberBank`, which
+      previously lost those ranges). Re-extraction is user-initiated. Note
+      `SupplyIndex.build` is idempotent and skips existing files, so surfaces
+      need `force=True` — they were last built Jul 30, six days before the
+      d50(b) bank repair, so every number above measures PRE-d50b banks for
+      `uuid` / `datetime`.
+- [ ] `-Like` doctrine is 17% applied: 41 non-RIGID banks, 7 carry the
+      suffix, and no test enforces it. NOT worth fixing from the current
+      tiers — `code_identifier` is MODERATE and sound while `env_var` is
+      RIGID and ~100% junk, so a rename driven by today's tiers would mark a
+      good bank and miss the worst one. Also cascades into 33 `cells.yaml`
+      bands across 23 of 44 cells. Revisit only if tiers are ever re-derived
+      from measured precision.
+
+## From augmentation-loop rebuild grill (2026-08-05, SPEC decision 51)
+
+Supersedes d49(i) ("reused, not rebuilt"). Order matters: (1) and (2) are
+offline and precede any LLM spend.
+
+- [x] Cells → augmentation adapter, the half that was silently broken —
+      DONE 2026-08-05 (uncommitted). `serves()` accepted cell names while
+      `eligible()` looked supply up by `floor`, so every cell dispatch found
+      zero surfaces and `continue`d. Added `ArchetypeCell.required_banks` +
+      `CELL_TO_BANKS` (bands demanding presence only — a `below`-only band
+      forbids its feature), `Inject.drawable()` filtering the per-bank surface
+      index, `Operator.unsatisfied()` on the base, Decorate's cell dialect
+      (`marker()` resolving a cell to one required decoration), and
+      cells.yaml routing `conversational_courtesy_wrapper` to `decorate`.
+      Verified: 7 inject cells resolve real supply; before, all were 0.
+- [ ] `SupplyIndex.build_all()` over the 25 unindexed lanes (d51h). Every rung
+      number in d51 is measured over 17 of 42 lanes, so the 31%/69% augment-vs-
+      generate split is an artifact of an unbuilt index. Offline scan, no LLM
+      spend, user-initiated. Re-measure the split afterwards.
+- [x] Derived dispatch (d51c/d/e) — SUPERSEDED by SPEC d52 (2026-08-05). The
+      single-operator rule could not say "this cell needs selecting, not
+      augmenting"; replaced by the staged pipeline (`dispatch.plan`). Landed:
+      `Stage`, `stage_of`, `plan`, `headroom`, `planned_targets`, `plan_report`.
+- [x] Cell-predicate acceptance (d51b) — AMENDED by d52(f): targets are the
+      requirements the plan could serve, not the whole predicate, so a partial
+      row is kept and credited wherever it measures into.
+- [ ] Taxonomy repo commit (d52g): `query-taxonomy.csv` gains the
+      `Relevance Changing` column and `taxonomy.py` gains `RELEVANCE_CHANGING`.
+      `src/query-taxonomy` is a NESTED repo — its own commit, and it must land
+      before this repo compiles against it.
+- [ ] `plan()` is untested end to end (only `stage_of` / `headroom` are). The
+      path that most needs it: a plan whose CORPUS stage empties, which should
+      mark that step unsatisfied and still produce the survivors partially.
+      Nothing exercises `partial=True` today — every real cell comes back
+      fully served or empty.
+- [ ] Parent pool = catalog minus the whole selection (d51g): `checkable` +
+      predicate-1 over 440,534 rows, less every query the selection touches
+      (candidate + reused + control), text joined via `compose.join_text`.
+      5,009 parents. Reimplement the `first_generation_only` guard — it reads
+      `generated_from.isna()` off the selection frame, which a catalog pool
+      does not have.
+- [ ] Parent reservation in `CellFill` (d51g): exclude every (dataset,
+      query_id) appearing in the pool's `generated_from` from future selection.
+      Without it the no-near-duplicate guarantee holds only at draw time and
+      decays on the next fill — silently, months later.
+- [ ] `CellFill.admit(pool)` (d51j): admission test is
+      `cell.select(mini_catalog)`; respect `_take`'s lane-share cap; lift
+      `MiniFill._mini_catalog` to a shared helper. MiniFill stays for the d32
+      slice artifact.
+- [ ] `provenance` column on the cell selection (d51k): natural / augmented /
+      doc_grounded / synthetic, with the natural-share ceiling testing
+      `== 'natural'`. Blocks the synthetic rung — until it lands, a parentless
+      row counts as natural and inflates the augmentation budget.
+- [ ] Synthetic rung = d50(g) (d51l), reached by dispatch rather than deferred.
+      Still blocked on distractor borrowing: one written doc per query with no
+      distractors returns at rank 1 for every route, so the rows land
+      `all_tied` and teach the router nothing.
+
+Deferred by this grill: see SPEC "Deferred questions" — rung 2 (inversion),
+`pilot_n` staging under cell demand, and whether `operator:` survives in
+cells.yaml as a human override.
+
+## From cell-quality grill (2026-08-05, SPEC decision 50)
+
+This session, in order:
+
+- [ ] Predicate repair (SPEC d50b), at the bank + a re-extraction:
+      UUID bank keeps the 32–64 hex digest branch but rejects
+      single-repeated-char / low-entropy runs (regex negative-lookahead if
+      edify exposes backreferences; else bank post-filter + an `OVERRIDES`
+      generator entry). DateTime bank drops the bare-epoch branch (ISO 8601
+      only). Rebuild `catalog.parquet` (380K rows); generator↔bank round-trip
+      test must stay green. IP-vs-version left irreducible; email left as-is.
+- [x] Predicate repair DONE 2026-08-05 (SPEC d50b): UUID gained a
+      `(?!(.)\1*\b)` negative-lookahead (edify exposes backrefs; no OVERRIDES
+      needed — sampler skips `assert_not`); DateTime bare-epoch branch deleted.
+      Submodule bank tests 366 pass. Catalog rebuilt via
+      `feature_table.py --force` → 440,534 rows × 75 cols.
+- [ ] FOLLOW-UP (makes d50b + d50c effective): re-run the fill against the
+      rebuilt catalog — `CellFill(...).build(force=True)` — cell_selection.parquet
+      and every selection_audit number are stale (built from the old 380K
+      catalog). Then re-run `src/selection_audit.ipynb`.
+- [ ] FOLLOW-UP: the round-trip gate `tests/test_taxonomy_generators.py` is RED
+      independent of d50b (92 failed / 3 passed on clean baseline). Cause is the
+      key-dialect skew already logged under the taxonomy-generators grill:
+      `BANKS_BY_FEATURE` keys on bare `str(bank.name)`, `generator.feature`
+      returns `"{group}:{name}"` → KeyError. The gate is meaningless until fixed;
+      d50b's banks were verified by 50-surface self-heal sampling instead.
+- [ ] Two cells.json guards (SPEC d50c), no re-extraction: `uri_in_query`
+      + `length_words below 15`; `opaque_token_any_domain` drops
+      `http_status_code` from its `any_of`.
+- [x] Jaccard coverage audit script (SPEC d50e) — DONE 2026-08-05,
+      `src/scripts/cell_divergence.py` (self-check + ruff clean). Globs
+      `data/route_labels/*_oracle/rows.parquet`, joins cell_selection, computes
+      per-cell dense/sparse top-10 Jaccard, sorts most-divergent first.
+- [ ] BLOCKER for d50e to be meaningful: persist `route_rankings` during
+      labeling. `RouteLabels.label()` (labels.py:136) builds GoldenRoutingBuilder
+      rows that contain the per-route top-10 doc lists but writes only the score
+      columns, discarding the rankings — so only `beir-nfcorpus_oracle` has them
+      (11 of 27,145 cell rows). Fix: save the golden rows per dataset
+      (`GoldenRoutingBuilder(...).save(out_dir/f"{key}_oracle")`, as the lone
+      nfcorpus file was made), then re-run labeling. Until then the divergence
+      screen scores ~0% of cells.
+- [x] Improve the cell-generation brief (SPEC d50d) — DONE 2026-08-05.
+      `docs/composition-cells-prompt.md` rewritten: cut `MEASURED FACTS` (d48h
+      label-stat contamination) and `SUPPLY` (supply-as-validity error d50a);
+      dropped `BUDGET`/`n_per_route`; restated the pooled-vs-within-corpus
+      confound as a principle; added the cross-group INTERACTION + statistical-
+      permutation emphasis; fixed the STALE output schema (was `lo/hi`,
+      `hypothesis`, `n_per_route`, `min_lanes`, `supply` — now `at_least/below`,
+      `any_of`, `predicts`, `source`, matching `ArchetypeCell`, which would have
+      failed validation). Subsumes the d48h deferral.
+- [ ] Run the revised brief through an LLM (separate task) → new static
+      `cells.json`; validate it loads via `composition.cells._load`, then
+      re-run `src/selection_audit.ipynb` against the new set.
+
+Deferred:
+
+- [ ] Cell-conditioned generation — the spine, own session (SPEC d50g).
+      Given a cell's multi-band predicate, generate a coherent query hitting
+      every band and, for zero-supply cells, the constructed document that
+      answers it — from LLM knowledge, no parent. New capability; the current
+      augmentation stack is entirely parent-based. Leans on the constructed-docs
+      / synthetic lane (promote from edge-case to core).
+- [ ] Taxonomy-extractor backlog (SPEC d50d): archetypes the proposal pass
+      wants but no current feature measures (entity specificity, compound-noun-
+      with-common-parts, …). New banks; only after the conjunction space of
+      existing features is exhausted.
+- [ ] Post-label divergence pruner (SPEC d50e): after labels exist, keep the
+      cells whose measured route-split diverges, merge/drop the rest. `predicts`
+      is never an allocator.
+
 ## From router-improvement work (SPEC decision 47)
 
 Current state (2026-08-04): setup pass shipped (F2 + F1'); router beats
@@ -9,27 +549,14 @@ the current-state summary.
 
 Done:
 
-- [x] Pass 1 — Setup pass. **F2 landed**: three derived columns in
-      `FeatureSpace.transform` (`identifier_density`, `avg_word_length`,
-      `short_id_query`); `length.length_words` dropped. **F1' landed**:
-      `tune_thresholds` filters input to `routes_differ` rows only.
-      **F1 tried and reverted** as documented negative result. Numbers
-      after F2 + F1': random_within_lane 0.751 (+0.057 headroom),
-      holdout_lane 0.611 (+0.017). First positive headroom on either
-      protocol. Auto-fusion added to the ablation table via
-      `AutoFusionRouter` + `LLMScoreClient` (`RouterExperiment.run(
-      autofusion=True)`); cache at
-      `data/route_labels/autofusion_cache.parquet`.
+- [x] Pass 1 — setup pass. F2 + F1' landed, F1 tried and reverted.
+      Numbers and the F1 negative result: SPEC d47(a); current-state
+      summary: PLAN.md.
 
 Retired:
 
-- [x] d47(b) — corpus stats as router inference features — RETIRED
-      2026-08-04. Deployment target unknown; `query → route` surface is
-      a hard constraint. Corpus stats stay in the offline labelling /
-      diagnostic toolkit. `CorpusRelativeBank` design preserved in
-      SPEC d47(b) for offline use if needed. Passes 2–5 (build corpus
-      index / side test / six-config ablation) all fall under this
-      retirement.
+- [x] d47(b) corpus stats as router inference features, and passes 2-5
+      under it — retired 2026-08-04. Rationale: SPEC d47(b).
 
 Open (priority order):
 
@@ -54,10 +581,83 @@ Open (priority order):
       whether privileged corpus features at training lift the query-only
       ceiling. Options A (dropout on corpus features) and C (teacher-
       student distillation) documented as fallback / heavier variants.
-- [ ] Composition + augmentation loops (SPEC d45h5, d45h6). Driven by
-      the per-archetype failure map. Fill the coverage holes named in
-      PLAN.md issues #1–3 and #7. Not gated by modeling work; each
-      iteration compounds.
+- [x] Composition redesign (SPEC d45h5) — LANDED as SPEC d48,
+      2026-08-04. 32 archetype cells in `src/composition/cells.json`,
+      generation brief
+      `docs/composition-cells-prompt.md`. Measured that a recipe change
+      alone was worthless (d32 already took 100% of feature-bearing rows
+      in labelable lanes), so cells + allocator + train/control split
+      replace the slice fill. Remaining work below.
+- [x] BRIGHT splits registered (SPEC d49e) — 2026-08-04. All 12 now in
+      `DatasetName` / `DATASETS` / `LANES`; `DATASETS` switched to
+      `*(BrightSplit(s) for s in sorted(BRIGHT_SPLITS))`, matching the
+      existing CRUMB idiom, so a future split needs only an enum member.
+      `lanes.py` lists them explicitly — that package deliberately does not
+      import `dataset_registry`. 30 datasets / 29 lanes; `orcas` is the one
+      registered dataset without a lane, pending its class.
+- [ ] RAR-b commonsense pools (SPEC d49e) — BLOCKED on repo slugs.
+      `RARB_POOLS` holds only `math`/`code`; the catalog names the pools
+      (αNLI, HellaSwag, TempReason — TempReason feeds
+      `temporal_expression_natural`) but not their HF repo paths, and those
+      must not be guessed. Needs one look at the RAR-b org listing, which
+      is a network call and therefore user-initiated.
+      *DRY defect to fix in the same pass:* the pool map is duplicated —
+      `RARB_POOLS` (`hf.py:217`) and `RarbLane._POOLS`
+      (`retrieval.py:562`). Adding a pool currently means editing both.
+- [ ] Wave 2 boxes (SPEC d49e): FreshStack, ANTIQUE, LoTTE, WebFAQ (en
+      config), ScIRGen-Geo (en slice), CLERC (verify availability first),
+      GooAQ (doc_grounded — 62.7% passage-answer coverage measured; needs a
+      real language filter, the file head is Portuguese and ASCII-only),
+      nq_open (verify it ships a corpus; card says QC, text says "short
+      answers only"). Queries first; corpora + embeddings per d49(d).
+      Cache fills are user-initiated.
+- [ ] ORCAS lane (SPEC d49f). `RetrievalDataset` subclass +
+      msmarco-document corpus + `QrelSource.CLICK` labelling. Unblocks the
+      head-of-traffic cells' single-corpus concentration and four
+      otherwise-empty cells. Retire the `deferred` label lane while here.
+- [x] Cells → augmentation adapter (SPEC d49i) — SUPERSEDED by SPEC d51
+      (2026-08-05). The sheet side shipped (`floor = cell.name`) and the
+      dispatch side is done, but "extend `operator_for`" turned out to be the
+      wrong shape: dispatch is derived per (cell, parent), not mapped per cell.
+      Remaining work is the d51 block at the top of this file. The claim that
+      `pilot_n` needs no new tiering is now an open question, not a finding.
+- [ ] d40e coherence pilot, IN PARALLEL with box loading (SPEC d49i).
+      Gates Inject credit, and Inject is the only path for nine cells.
+      Needs no new data (existing corpora + gold docs), so it does not
+      compete with the downloads.
+- [ ] d47 CorpusIndex + 16-row side test BEFORE any fill (SPEC d48i).
+      `max_lane_share` caps by row count; whether contributing lanes are
+      actually different needs corpus stats. ≥12/16 ⇒ lane diversity
+      becomes corpus-stat band spread; ≤7/16 ⇒ keep the share form on
+      names and drop the path. Governs which 50,000 rows get labelled,
+      so it precedes the spend. Skip d47 pass 5 (6-config ablation) for
+      now — model question, not dataset question.
+- [ ] `ArchetypeCell` model + `composition/cells.py` from cells.json
+      (SPEC d48c/d). Needs `any_of` (OR bands) and `max_lane_share`;
+      `min_lanes` is superseded and must not be reintroduced; `max_lane_share`
+      is computed at fill time, not stored. Repo
+      convention is a Python declaration tuple like `LANES` / `BANKS`,
+      so cells.json converts to `CELLS: tuple[ArchetypeCell, ...]`.
+- [x] Per-dataset allocator (SPEC d48f) — DROPPED by d49(c). The global
+      ≤20% cap is gone; `max_lane_share` inside each cell is the whole
+      constraint. Global shares are reported, never targeted. Removes the
+      cell-vs-ledger conflict that would have forced the deferred ILP
+      escalation.
+- [ ] Box-model fill (SPEC d49d). Assign cell candidates from query
+      features across every box (no corpus needed); reuse existing labels
+      on overlap; materialise and embed ONLY the corpora that won quota
+      slots; label; re-check route quotas; top up. Shortfalls go to the
+      augmentation adapter. Cells short of natural supply stage a pilot
+      sample first, scaling only on confirmation. Writes a NEW artifact —
+      do not overwrite `data/composition/selection.parquet` (d49k).
+- [ ] Dark forest as leftovers (SPEC d49j): random draws from queries that
+      entered no cell, ~20% of cell rows. Label it; it is the control
+      slice and is never trained on.
+- [ ] Per-archetype eval on held-out CELL rows + aggregate eval on the
+      control group (SPEC d48f). Three protocols with lane-holdout
+      (d45e); rare archetypes are by definition rare in the unbiased
+      control, so they cannot be evaluated there. Closes WEAKNESSES #12
+      and #14.
 
 Deferred:
 
@@ -66,6 +666,24 @@ Deferred:
       routes_differ) still SPEC-touching; the F3 experimental flag on
       `StrategyRouter.fit` stays in the code for future testing but the
       default keeps decisive-only per d45(a).
+
+Deferred by the d49 grill (2026-08-04):
+
+- [ ] Dark-forest size (d49j). The ~20% is provisional. The defensible
+      number needs the per-row disagreement rate between the router and the
+      best constant, which is only measurable once these rows are labelled.
+      Resize next pass.
+- [ ] CLERC availability (d49e) — `jhu-clsp/CLERC` may require terms
+      acceptance. Verify before counting it as a box.
+- [ ] `predicts` contamination (d48h). The brief that generated the cell
+      set fed the runs our own label statistics, so some rationales argue
+      from facts about our 16 lanes rather than from retrieval mechanics. A
+      clean re-run means cutting the measured-facts sections from
+      `docs/composition-cells-prompt.md`. Decide whether that matters
+      before the priors are tested by labelling.
+- [ ] Redefine label lane by qrel-hole rate rather than grounding — the
+      original d37k idea, still open now that `deferred` is retired and
+      lanes are named by qrel source.
 
 Gates / next actions:
 
@@ -341,12 +959,6 @@ Next actions, in order — (1) and (2) block everything else:
       rrf 145. Permanent notebook cell tracked in the d44 section.
 - [ ] Re-price wave order if pass 1 shows a lane's qrels_ready is thin
       (msmarco precedent: declared QQ ≠ per-query coverage).
-
-## R1 LLM-judge pilot (SPEC d35 + d36) — CLOSED 2026-07-28, no action
-
-Superseded by SPEC d37; full record in `docs/adr/0001` (kappa numbers, root
-cause, and the do-not-reuse warning for the cached judgments).
-`data/r1_pilot/` is the measurement audit trail.
 
 ## From taxonomy-generators grill (2026-07-23, SPEC decision 34)
 - [ ] Realism-override audit: eyeball seeded samples per feature once

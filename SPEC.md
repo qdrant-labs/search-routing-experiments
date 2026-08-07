@@ -142,8 +142,9 @@ breadth; strategy labeling is explicitly a later stage.
     mining), not speculative engines; multilingual is one phase-2 sweep.
 
 17. **Engine as a first-class bank attribute; one unified registry**
-    (grill-me 2026-07-17). `Engine` StrEnum (`regex | gliner_model |
-    spacy_model`) as a `ClassVar` on every bank — engine bases fix it, so
+    (grill-me 2026-07-17). `Engine` StrEnum (`regex |
+    spacy_model`; `gliner_model` removed with d13) as a `ClassVar` on
+    every bank — engine bases fix it, so
     `FeatureExtractor(engines=[Engine.REGEX])` filters **before
     instantiation** and never imports torch/spaCy. Default is
     `(Engine.REGEX,)` (deterministic, dependency-light); `None` selects
@@ -674,26 +675,10 @@ breadth; strategy labeling is explicitly a later stage.
     verification to query-taxonomy. Flips if interactive LLM enrichment
     is abandoned for a one-off batch script.
 
-35. **R1 reframed: LLM-judge calibration pilot** (grill-me 2026-07-27,
-    supersedes d30's R1 hole-diagnostic framing). **SUPERSEDED by d37,
-    2026-07-28 — full record in docs/adr/0001.** 4-level TREC-DL grading
-    (500 stratified pairs, Haiku 4.5 vs Sonnet 4.5) against a kappa ≥ 0.6
-    + per-level-accuracy ≥ 70% gate: failed on measured evidence (kappa
-    0.120–0.139, bootstrap CI upper bound 0.181 — out of reach at any
-    sample size). Load-bearing premise error: orcas was called "no
-    qrels", but ORCAS ships 18.8M click pairs mapped onto msmarco-document
-    doc_ids — positive-only qrels, not unlabelable. `judge.py` and the
-    pilot notebook deleted (cae28fc); `data/r1_pilot/` is the audit trail.
-
-36. **R1 prompt-iteration escalation: hand-crafted few-shot** (grill-me
-    2026-07-27, follows d35's escalation clause). **SUPERSEDED by d37,
-    2026-07-28 — full record in docs/adr/0001.** Ran at n=500: 12
-    hand-crafted exemplars (3 source-style queries × 4 grades) moved
-    kappa by ±0.02 with fully overlapping bootstrap CIs (Haiku 0.348 →
-    0.328, Sonnet 0.320 → 0.340 at grade≥2), so exemplar quality was
-    never the binding constraint — the defect was measuring per-document
-    grade agreement when the pipeline consumes a per-query route
-    decision. The real-exemplar ablation is dropped, not deferred.
+35-36. **R1 LLM-judge calibration pilot and its few-shot escalation**
+    — SUPERSEDED by d37, 2026-07-28. Full record, measurements and the
+    two design errors:
+    `docs/adr/0001-llm-judges-documents-never-routes.md`.
 
 37. **Golden set: route labels from retrieval outcomes, not from an LLM's
     opinion** (grill-me 2026-07-28, supersedes d35 and d36; amends d30's
@@ -1644,13 +1629,818 @@ breadth; strategy labeling is explicitly a later stage.
     The side test replaces guessing with a number cheaply enough that a
     failed hypothesis costs minutes, not weeks.*
 
+48. **Composition redesign: archetype cells replace span floors; the split
+    becomes a train/control boundary** (2026-08-04; executes d45(h5) ahead of
+    d47's ablation — the diagnosis no longer needs it). Cell definitions:
+    `src/composition/cells.json`. Generation brief:
+    `docs/composition-cells-prompt.md`.
+    (a) *Diagnosis: route is a lane property, not a query property.* Sparse-win
+    rate spans 0.8%–100% across the 16 labelled lanes, and query-side signals
+    that look predictive pooled go flat within a lane. Most populated archetype
+    cells under the d32 fill drew the bulk of their rows from one corpus. This,
+    not feature coverage, is what caps the router, and it explains the
+    within-lane vs holdout-lane gap.
+    (b) *A recipe change alone is worthless.* The d32 fill already selected
+    every feature-bearing row available in the labelable lanes — the
+    `exhausted` order-sheet lines restated. No different recipe has unexploited
+    supply to pick. Rejects "reopen recipe values" as a standalone fix.
+    (c) *`ArchetypeCell` replaces the 1-D span floor.* ANDed `AxisBand`s over
+    `catalog_axes` columns, plus `any_of` so one cell can span an identifier
+    family (the router cannot learn a rule from 33 examples of one format, but
+    can learn the token shape across several).
+    (d) *Cell definitions carry no numbers derived from current holdings.*
+    Supply, lane spread, labelling cost and fill tier are COMPUTED at fill time
+    against whatever catalog exists then; freezing them in the spec is
+    stale-by-construction and imports today's bias into tomorrow's fill.
+    `predicts` is a prior from retrieval first principles, tested by labelling,
+    never used to allocate.
+    (e) *Never narrow a target from current labels.* Asymmetry: observing a
+    route in a cell PROVES reachability, while not observing one proves
+    nothing — absence of evidence in a lane-biased sample. Narrowing is also
+    self-fulfilling, since a quota that asks only for dense never draws
+    candidates that could show sparse. Every cell quotas dense AND sparse;
+    `n_per_route` is a single Recipe value, not a per-cell judgement.
+    `pure_rrf` is never quotaed — it wins on near-ties, which the decisive
+    filter removes by construction, so its signal comes from the d41a
+    score-vector target.
+    (f) *Lane diversity is a share, not a count.* `min_lanes` is satisfiable
+    while a cell remains single-corpus in substance; `max_lane_share` is
+    checkable against real supply. Computed per cell at fill time as the
+    tightest cap that cell's lanes can satisfy. Cells that cannot reach the
+    target share are the acquisition requirement, stated in numbers.
+    (g) *Slices A+C merge; B+D become the control group.* A and C were two
+    mechanisms for one job (a cell predicate with zero identifiers plus a
+    length band IS a C stratum). B and D are the only rows whose distribution
+    we did not choose, so they become the never-trained evaluation slice —
+    spending them as training data throws away the only unbiased measurement
+    we own (WEAKNESSES #14). D's mechanism dies with it: three champions at
+    ≤50% each is what the ≤20% allocator forbids. Per-archetype eval runs on
+    held-out CELL rows, since rare archetypes are by definition rare in an
+    unbiased sample; aggregate realism eval runs on the control group.
+    (h) *Cell set provenance: three LLM runs, scored not read.* Ranked against
+    the catalog on hypothesis breadth, lane concentration and redundancy rather
+    than on how convincing the rationales read. All three runs skipped the same
+    thin-supply features — the region the d33 floors also under-served —
+    covered by hand-written cells grouped by retrieval mechanism. Caveat
+    carried: the brief fed the runs statistics from our own labels, so the
+    priors are contaminated to that extent; a clean re-run needs those sections
+    cut.
+    (i) *Gates before the fill.* Acquisition (the ≤20% cap makes T=100,000
+    unreachable from current holdings) and the d47 CorpusIndex side test, which
+    decides whether lane diversity is capped by row share or by corpus-stat
+    band. Both govern which rows get labelled, so both precede the spend.
+    — *The old fill asked "does feature X appear enough?" The cells ask "does
+    it appear enough, in enough corpora, with enough outcome variety?" Only the
+    first was answerable before labelling, which is why the fill is iterative.*
+
+49. **Datasets become supply, not structure: the box model** (grill-me
+    2026-08-04; supersedes d29's per-dataset quota framing and d33d's
+    champion/dark-forest mechanism; amends d39g's ORCAS parking).
+    (a) *Datasets are undifferentiated boxes; cells are the only objective.*
+    Dataset identity stops being a selection axis. The fill searches every box
+    for queries satisfying a cell predicate and fills that cell's quota; which
+    box a row came from matters only to `max_lane_share`. Kills the "which
+    dataset should we acquire" judgement call — the answer is all of them that
+    can produce a label.
+    (b) *Size is an output, not a target.* No row-count goal. T is whatever
+    the filled quotas plus the dark forest come to. Rejects hunting for large
+    datasets: under a per-dataset cap, supply depth past the cap buys nothing
+    and only lane COUNT moves the ceiling, so selecting for size is selecting
+    for the wrong thing.
+    (c) *The global ≤20% per-dataset cap is dropped.* `max_lane_share` inside
+    each cell is the whole constraint — a diversified global mix is fully
+    compatible with individual cells being single-corpus, which is the
+    confound, so the cap belongs where it means something. Global shares are
+    reported, never targeted. Also removes the cell-vs-ledger conflict that
+    would have forced the deferred ILP escalation.
+    (d) *Fill order puts the cheap decision first.* Cell membership is
+    computable from query features alone, so: load queries from every box →
+    assign cell candidates across all boxes → materialise and embed ONLY the
+    corpora that won quota slots → label → check route quotas → top up. The
+    expensive corpus decision falls out of the fill instead of being a guess
+    about a dataset nobody has opened.
+    (e) *Box pool: everything registered plus Wave 2, English only.* Wave 1 is
+    already registered but not exhausted — `BrightSplit` and `RarbPool` are
+    parameterized, so the 9 unregistered BRIGHT splits and the RAR-b
+    commonsense pools (TempReason targets the temporal cell) are an enum
+    member and a line each. Those are the cheapest lanes available (landed
+    2026-08-04: 12 BRIGHT splits registered, 30 datasets / 29 lanes).
+    Admission is by **answer key, not by grounding card** — corrected
+    2026-08-04, the first draft of this clause wrongly excluded all QC boxes.
+    Two admissible kinds: QQ (source qrels) and QC-with-passage-answers,
+    which is d40(a)'s `doc_grounded` path — the answer passage IS the
+    grounding doc, msmarco's own regime. GooAQ is the case that forced the
+    correction: measured 62.7% passage-answer coverage over a 100K sample,
+    and its Google-autocomplete register (short, telegraphic, unit-bearing)
+    is exactly what the msmarco-dominated short-question cells lack.
+    Inadmissible: QO (no corpus, so nothing to retrieve) and
+    QC-without-answers (no key at all). Wave 2 therefore admits FreshStack,
+    ANTIQUE, LoTTE, WebFAQ en, ScIRGen-Geo en, CLERC (pending availability),
+    GooAQ, and nq_open if it ships a corpus — its card says QC while its
+    description says "short answers only", so verify before counting it.
+    XOR-TyDi excluded — cross-lingual is its point and the extractors are
+    English-only (`en_core_web_sm`; d14 rejects the weaker `xx` model).
+    Query-wellformedness excluded twice over: QO, and its only stated
+    consumer was the dropped corruption group. hotchpotch-simulated is not a
+    box but keeps a job: generation calibration against ORCAS.
+    (f) *ORCAS unparked as its own lane* (amends d39g). `msmarco-document`
+    corpus, `QrelSource.CLICK`. It is the only source that breaks the
+    head-of-traffic cells' single-corpus concentration, because it is a
+    genuinely different corpus at comparable scale — real Bing queries versus
+    crowdsourced questions — and it supplies four otherwise-empty cells.
+    Accepted cost: positive-only click qrels, ~1 judged doc per query, the
+    known-noisy regime of WEAKNESSES #10. `deferred` as a label lane is
+    retired; lanes are named by qrel source.
+    (g) *Existing labels are reused on overlap.* Labels key on
+    (dataset, query_id) and record what happened when retrieval ran; the old
+    bias lived in which queries were selected, not in the labels. Fresh
+    selection, free labels on the intersection.
+    (h) *`predicate − 1` relaxation: relax where the feature exists, mint
+    where it does not.* Measured over the thin cells: only two have a
+    near-miss to nudge (the feature is common, just not at that length band)
+    and nine have no candidate at any length in any box. So StatRewrite
+    serves the two, `InjectOperator` the nine, `OperatorSyntaxRewrite` the
+    boolean cell. Injection is therefore the dominant augmentation path, not
+    the fallback — which puts d40e on the critical path for roughly a third
+    of the cell spec.
+    (i) *The augmentation stack is reused, not rebuilt.* It is keyed on a
+    floor NAME and is indifferent to what a floor is, so cells emit
+    shortfalls with `floor = cell.name` and `operator_for` maps per (h).
+    `AugmentationCampaign.pilot_n` already implements pilot-sized staging for
+    gated floors, so cells short of natural supply need no new tiering
+    mechanism. d40e coherence pilot runs in parallel with box loading — it
+    needs no new data, and a failure is cheapest to learn before the corpora
+    are paid for.
+    (j) *Dark forest = leftovers.* Random draws from queries that entered no
+    cell, at ~20% of the cell rows. Strictly better than d33d's three-champion
+    mechanism: it is genuinely unchosen rather than chosen-to-look-unchosen,
+    and it costs nothing to select. The 20% is provisional — the defensible
+    size depends on how often the router and the best constant disagree per
+    row, which is only measurable once these rows are labelled, so it gets
+    resized next pass.
+    (k) *The d32 selection artifact is retained, not overwritten.* Every
+    number in PLAN.md and WEAKNESSES.md references it.
+    — *The old design made datasets structural — champions, per-dataset
+    quotas, a dark forest drawn from named sources. Making them anonymous
+    supply removes a whole layer of accounting and lets the objective be
+    stated once, in the cells.*
+
+50. **Cells are a-priori archetypes: predicate repair now, mechanism-driven
+    expansion next, generator deferred** (grill-me 2026-08-05). The audit
+    (`src/selection_audit.ipynb`) asked whether the 32 cells cover enough and
+    whether more single-route cells were needed; the answer inverted the
+    question.
+    (a) *A cell's validity is a real dense/sparse divergence mechanism plus
+    expressibility as bands over measurable features — never natural supply in
+    the acquired lanes.* The 41 datasets are supply, not ground truth (d49).
+    Thin cells (uuid 24 catalog rows, ip 51, email 35) are generation targets,
+    not weak cells; low supply must never rank, prune, or gate a cell. This
+    retires the "supply-as-validity" reasoning the audit's feasibility counts
+    invited.
+    (b) *Predicate repair happens at the bank, with a re-extraction.* The audit
+    found the sparse-leaning cells matching false positives, and the counts are
+    post-resolution catalog columns, so the fix is in `query_taxonomy`, not
+    cells.json: **UUID** keeps its 32–64 hex digest branch but rejects
+    low-entropy / single-repeated-char runs (`aaaa…` is a padding artifact, not
+    a digest) — a regex negative-lookahead if edify exposes backreferences,
+    else a bank post-filter plus an `OVERRIDES` generator entry; **DateTime**
+    drops the bare-epoch branch entirely (any 10-digit int in 1.5–1.9e9 is a
+    phone/ID false positive), ISO 8601 only. Rebuild `catalog.parquet` (380K
+    rows); the generator↔bank round-trip test stays green (generators derive
+    from bank patterns, so a regex tightening self-heals). IP-vs-version is left
+    irreducible — a 4-part version is a valid IPv4 and RIGID IP wins the range,
+    so `version_string` undercounts; both are two-route cells and labelling
+    tests them. Email is left as-is: the strict pattern's flagged rows are real
+    incidental addresses, not FPs.
+    (c) *Two cells.json guards ride along, no re-extraction:* `uri_in_query`
+    gains `length_words below 15` (stop claiming prose that merely mentions a
+    link); `opaque_token_any_domain` drops `http_status_code` from its `any_of`
+    (the "277 V" false positive).
+    (d) *Cell expansion is produced the way the current set was — a separate,
+    human-run LLM task that writes a static `cells.json`, NOT an automated
+    pipeline pass — with a revised prompt.* The 32 are shallow (single-feature
+    or 2–3-band); the gap is cross-group INTERACTION cells and statistical
+    permutations (conjunctions across identifiers × stats × markers × logical —
+    e.g. rare-entity × high-stopword × short). The lever is the generation
+    brief `docs/composition-cells-prompt.md`, adapted to prior shortcomings:
+    **cut the `MEASURED FACTS` section** (it fed our 16-lane label statistics as
+    facts to "respect" — the d48h `predicts`-contamination) and **cut the
+    `SUPPLY` section** (per-feature catalog counts — the supply-as-validity error
+    d50a retires); **drop `BUDGET`/`n_per_route`** (not a cell property, computed
+    at fill time). Keep the exact-column vocabulary (the measurability
+    constraint — invent no columns), the bad-cell rules, and the
+    pooled-vs-within-corpus confound restated as a PRINCIPLE, not a table of
+    numbers. Add an explicit ask for cross-group conjunctions and statistical
+    permutations, and for a stated retrieval mechanism + `predicts` prior per
+    cell. Argue from retrieval mechanics and entity×statistic relationships
+    (LLM knowledge), never from what the acquired corpora contain. Archetypes
+    needing a property nothing measures are logged as a taxonomy-extractor
+    backlog, not built now. Resolves the d48h contamination deferral. *(Brief
+    rewritten 2026-08-05; a stale output schema — `lo/hi`, `hypothesis`,
+    `n_per_route`, `min_lanes`, `supply` — was also corrected to the shipped
+    `ArchetypeCell` fields `at_least/below`, `any_of`, `predicts`, `source`, so
+    the generated file loads. Running an LLM against it is the open step.)*
+    (e) *`predicts` stays a tested prior; selection and pruning are post-label
+    on measured divergence, never pre-label on prior or supply.* The loop: LLM
+    proposes rich cells → fill (natural draw + augmentation + constructed docs)
+    → label → keep the cells that measurably diverge (dense/sparse top-10
+    Jaccard as a pre-label screen; measured route-split after labels), merge or
+    drop the rest.
+    (f) *50/50 sparse/dense is an eval-time weighting, not a selection target.*
+    Real decisive traffic is ~74% dense in the current mix; a balanced
+    population would be unrepresentative and teach over-prediction of sparse.
+    Training needs a per-class FLOOR — enough sparse decisive rows to learn the
+    boundary — met by augmentation/generation, consistent with the
+    Representative doctrine (balance applied at eval as a weighting).
+    (g) *Cell-conditioned generation is the deferred spine — its own session,
+    recorded here for a parallel effort.* The whole augmentation stack is
+    parent-based (mutates an existing selection row); nothing generates a query
+    from a cell spec. The capability the vision needs: given a cell's multi-band
+    predicate, produce a coherent query hitting every band and — for a
+    zero-natural-supply cell — the constructed document that answers it, from
+    LLM knowledge, no parent. It leans on the constructed-docs / synthetic lane,
+    which moves from edge-case to core under this design.
+    — *The audit's real finding was not a coverage gap but a category error:
+    judging cells by what the acquired corpora happen to supply. Fixing the
+    false-positive predicates makes the sparse claims honest; expanding by
+    mechanism (bounded by what the extractors can measure) and validating by
+    measured divergence is how the cell set earns a defensible route mix without
+    ever baking in the prior.*
+
+51. **The augmentation loop is rebuilt around cells: demand is a cell, dispatch
+    is derived per (cell, parent), acceptance is the whole cell predicate**
+    (grill-me 2026-08-05; supersedes d49(i)'s "the augmentation stack is reused,
+    not rebuilt").
+    (a) *Diagnosis: both halves of the pipeline fail, in opposite directions.*
+    `Operator.targets` returns ONE span target while a cell is conjunctive, so
+    accepted rows are credited to cells they are not in — measured over Inject's
+    own eligible parents, 6-12% satisfy the cell's other predicate bands
+    (web_locator_token 22/398, registry_structured_identifier 39/489,
+    short_quantified_spec 21/179). And admission cannot credit a cell at all:
+    `MiniFill._derive_credits` emits only floor-deriver keys, so a cell-named
+    floor yields no residual floors and admits zero. The loop would pay for rows
+    that miss their cell, then refuse to admit the ones that hit.
+    (b) *Acceptance is the whole cell predicate.*
+    `cell_targets.generation_branches` already builds the conjunctive `Targets`
+    (one branch per `any_of` alternative) and was wired to nothing but tests; it
+    becomes the postcondition the final local re-measure checks. An operator's
+    own single target stops being the acceptance test.
+    (c) *Dispatch is DERIVED per (cell, parent) from the bands the parent fails,
+    never declared per cell.* One `operator:` field cannot be right for every
+    parent: a short parent lacking a URI needs Inject, a 40-word parent holding
+    one needs deletion. The declaration also went stale inside one session
+    (`conversational_courtesy_wrapper` declared `inject` while all three of its
+    bands are decorations) and left 15 of 22 hungry cells — 4,939 of 7,084 rows —
+    reaching no operator while their supply sat in the index. Derivation: compute
+    the unsatisfied bands, then take the operator declaring exactly those.
+    (d) *Which rung a demand lands on is keyed on the operator's declared
+    `surface_origin`.* DOC_COPIED (Inject) needs a predicate-1 parent AND a gold
+    doc carrying the surface, because the minted key must point at a really
+    judged document. NONE (Decorate, StatRewrite, OperatorSyntaxRewrite) needs
+    only a predicate-1 parent — the feature comes from the phrase list or from
+    rearranging the parent's own words, and the human qrels are inherited. One
+    corpus test for everything would have sent `boolean_operator_query`'s 103,607
+    parents and `bare_acronym`'s 34,276 to generation for no mechanical reason. A
+    band no operator declares (acronym, negation, comparative — deliberately
+    excluded from `config.decorations` as detections, not weavable filler) is
+    UNMINTABLE and falls to the synthetic rung; the order sheet's `reason` must
+    distinguish unmintable from unsupplied, since they are different failures.
+    (e) *One operator per row; operators never compose.* Every band a parent
+    fails must be minted by a single operator (an `any_of` family counts as one
+    requirement). Composition would make augmented rows into parents — reversing
+    d43's `first_generation_only` guard — and would audit a meaning-preservation
+    claim against text no human wrote. Predicate-1 pools are 154K-440K rows per
+    cell against a 400-row target, so chaining buys nothing scarce. Cost
+    accepted: cells needing two features at once are reachable only by
+    generation, and d50(d)'s planned cross-group interaction cells are
+    conjunctive by design, so that share grows.
+    (f) *Deletion never happens, because (e) makes it unnecessary.* A cell
+    bounding `length_words` from above is served by the parents already inside
+    the bound, not by shortening long ones. `(length_words, DOWN)` stays
+    undeclared.
+    (g) *The parent pool is the catalog minus the WHOLE selection, and a used
+    parent is reserved.* Parents come from the 440,534 catalog rows that are
+    `checkable` and satisfy predicate-1, less every query the selection already
+    touches — candidate, reused and control alike: 5,009 usable parents, against
+    691 available from inside the selection. Excluding the whole selection rather
+    than only the control slice costs 623 parents (11%) and changes no cell's
+    verdict: the same 6 of 22 hungry cells are rung-1 servable either way. What
+    it buys is structural, not statistical — a parent that is never a dataset row
+    cannot form a near-duplicate pair with its own child (cos ~0.95 by
+    construction), cannot contribute the same need twice under two labels, and
+    cannot straddle d45(e)'s within-lane eval mask. The control-slice exclusion
+    survives only as a special case of this rule, not as its own argument.
+    Because the selection is regenerated per fill, the guarantee decays unless
+    enforced forward: every parent is already recorded in the pool's
+    `generated_from`, so `CellFill` excludes those (dataset, query_id) from later
+    selection — **used as a parent means reserved**. Two consequences: band
+    evaluation runs on catalog feature columns, so the `floors`-string membership
+    test is dead on this path; and eligibility ends in a `compose.join_text`
+    call, the catalog carrying no query text. Two limits, stated so the guarantee
+    is not over-read: it is query-level and not corpus-level (the parent's gold
+    document sits in a lane the dataset already draws from), and the pool is
+    consumed rather than renewable — each reserved parent leaves it for good.
+    (h) *Supply is read across every lane, not the indexed subset.* Every rung
+    number here is measured over the 17 of 42 lanes that had a surface index, so
+    `SupplyIndex.build_all()` over the remaining 25 precedes writing any rung
+    split into the spec as fact. More indexed corpora move rows off the synthetic
+    rung onto a real judged parent, which is the direction that raises label
+    trust.
+    (i) *Cell credit is 1.0 per member row — already true in code, recorded so it
+    is not re-litigated.* `CellFill._take` uses `credit=pd.Series(1.0, ...)` with
+    `amount` as a row count and `FloorLedger` enforcing only the lane share; the
+    d33 ambiguity discounts (MODERATE 0.75 / AMBIGUOUS 0.5) never applied to
+    cells. A generated row earns 1.0 on cell membership and nothing otherwise.
+    (j) *`CellFill.admit(pool)` owns admission.* The admission test IS
+    `cell.select(mini_catalog)`, which CellFill already owns alongside the
+    selection artifact, the order sheet, and the `_take` lane-share cap that
+    admitted rows must also respect. `MiniFill._derive_credits` and
+    `WeakestFirstFill` are dead on this path; `_mini_catalog`'s re-extraction
+    lifts to a shared helper. Cost accepted: two admission paths coexist until
+    the d32 slice artifact retires.
+    (k) *The selection gains an explicit `provenance` column.* The synthetic rung
+    produces rows with no parent, and `_headroom` / `_assert_invariants` currently
+    read `generated_from.isna()` AS the natural-row marker — so a parentless row
+    would silently count as natural and inflate the augmentation budget. Values:
+    `natural`, `augmented` (inherit path, no document consulted), `doc_grounded`
+    (surface copied from a gold doc), `synthetic` (query and document generated
+    together); the natural-share ceiling tests `provenance == 'natural'`.
+    CONTEXT's Provenance entry gains `augmented`.
+    (l) *The synthetic rung IS d50(g), no longer a parallel effort.* It is the
+    second outcome of the derived dispatch, reached when no operator mints the
+    band or no corpus supplies the surface. Its blocker stands as recorded: a
+    constructed lane holding one written document per query, with no borrowed
+    distractors, returns that document at rank 1 for every route, so the rows
+    land `all_tied` and carry no routing signal until distractor borrowing is
+    designed.
+    — *The old loop asked "does this parent lack feature X?" The cell loop asks
+    "which bands does this parent fail, is there one operator that mints exactly
+    those, and does the result satisfy the whole predicate?" Same operators, same
+    engine, same pool: eligibility narrows, acceptance widens, and whatever
+    neither can reach goes to generation.*
+
+52. **The cell pipeline: requirements staged by what they cost, most-constraining
+    first** (2026-08-05; amends d51(b), reverses d51(e), and moves the
+    relevance property into the taxonomy).
+    (a) *Diagnosis: the single-operator rule asked the wrong question.* d51(c)
+    asked "which one operator covers every band this parent fails?", which
+    cannot express "this cell needs selecting, not augmenting". Measured: a cell
+    banded only by upper bounds (`logical<2 & ident<4 & length<6`) was reported
+    UNMINTABLE and routed to generation while **141,254 unspent checkable rows
+    already satisfied it**. One of the 44 real cells, `bare_concept_token`, is
+    already shaped that way; it escapes only by never going hungry.
+    (b) *Four stages, run in cost order over one shrinking candidate set.*
+    SELECT — nothing mints it, so it must already hold; the narrowest filter,
+    first. CORPUS — minted from a surface copied out of the parent's own gold
+    document; the scarce resource, so it runs before anything that never runs
+    short. QUERY_ONLY — woven from the phrase list, no corpus. REBUILD — adding
+    it would change which documents are relevant; nothing serves it. Every
+    mint stage still applies its operator's own eligibility: the difference
+    between CORPUS and QUERY_ONLY is the corpus, not the rule. (Skipping
+    query-only eligibility inflated `boolean_operator_query` from 4,304 usable
+    parents to 98,592 during implementation — the stages narrow, they do not
+    merely classify.)
+    (c) *The staging axis is the band's DIRECTION plus the operator's
+    `surface_origin`, never the taxonomy group.* A band nothing mints is a
+    SELECT constraint whether it is an upper bound (`number < 1`) or a lower
+    bound nobody weaves (`acronym ≥ 1`). This is why `logical`, `identifier`
+    and `length` bands in one cell are not a special case: each lands in its
+    stage independently.
+    (d) *Operators compose within ONE hop — reverses d51(e).* Two mints apply to
+    the same human-written parent and produce one child in one completion,
+    verified once. The d43 `first_generation_only` guard is untouched: it
+    forbids an augmented row becoming a PARENT, and one child from one natural
+    parent is one generation, not two. The real cost, which d51(e) misstated:
+    the declaration audit now judges a compound edit rather than a single move,
+    and the answer key follows the strongest origin among the mints — one
+    doc-copied surface makes the whole child grounded in that document.
+    (e) *Headroom is exact, not a margin.* Adding a surface inflates the axes
+    the SELECT stage filtered on, so a parent picked at five words for a
+    `length_words < 6` cell leaves the band the moment a token lands. The
+    corpus stage attaches the chosen surface per row, so the bounded numeric
+    requirements are re-checked against that row's own token cost — no
+    quantile, no constant, nothing to tune.
+    (f) *Partial fulfilment — amends d51(b).* Acceptance targets are the
+    requirements the plan could serve, not the whole predicate, and a row whose
+    combination proved impossible is kept rather than discarded. Admission
+    already re-measures every child and tests `cell.select`, so a partial row is
+    credited to whichever cell it measures into and is feature-stock if none.
+    (g) *Relevance-changing features are declared in the TAXONOMY.* The
+    `Relevance Changing` column of `query-taxonomy.csv` plus `RELEVANCE_CHANGING`
+    in `taxonomy.py` — negation, comparative, temporal, temporal_like. It
+    belongs there because it states what the feature MEANS, not how we augment:
+    adding "not" to a judged query makes its gold document the wrong answer, and
+    no surface copied from that document repairs it. Crucially it is a veto on
+    MINTING, not a classification of the feature — nothing currently mints these,
+    so they act as ordinary SELECT constraints, and a parent that already carries
+    "not" was judged carrying it. The veto fires the moment someone registers one
+    as weavable, which is the tempting move it exists to refuse.
+    (h) *`operator_syntax` stays off that list, enforced rather than asked.* The
+    feature spans both classes — AND/OR restructure, NOT excludes — so a
+    per-feature boolean cannot split it. `OperatorSyntaxRewrite` emits the AND/OR
+    half only: its instruction forbids NOT and its `structural()` rejects a
+    NOT that appears anyway. Keeps the cell servable (393 rows short, 4,304
+    parents) without letting exclusion through.
+    (i) *The readout answers the operational question.* Per hungry cell:
+    `select` (unspent rows already satisfy it — the fill's constraint binds, not
+    supply), `augment` (parents survive and mints remain), or `construct` (no
+    parent survives). `run()` refuses a `select` cell outright rather than
+    paying an LLM to change nothing.
+    — *The old rule matched a cell against operators. The pipeline asks instead
+    what each requirement costs, and lets the answer be "nothing to do here" —
+    which was the one answer the old rule could not give.*
+
+53. **Generation runs least-harmful first: add before you take away** (2026-08-05;
+    reverses d52(b)'s stage order and d52(f) "deletion never happens").
+    (a) *Diagnosis: d52 imported search logic into generation.* Ordering by
+    most-constraining-first is right for a query planner and wrong for a
+    rewriter. It made a `length_words < 6` band an ENTRY REQUIREMENT, so a cell
+    admitted only parents already that short, and the intersection with "has a
+    usable surface in its gold document" was tiny. Measured: 7,855 parents
+    across 22 hungry cells, one cell with none at all.
+    (b) *The destructive step runs last, because only then does it know what to
+    keep.* `'prenatal vitamins'` + a version surface -> `'prenatal vitamins
+    v3'` -> cut to fit. Cutting first yields `'vita'` and then a mutilated
+    `'vitav4'`. So `Stage.CONSTRAIN` is a rewrite the model performs, never a
+    filter on the pool: a 40-word parent qualifies for a 6-word cell.
+    Measured after the reorder: **208,465 parents (+200,610), 22/22 cells with
+    supply, 13 covering their whole shortfall (was 5)**. Two cells went from
+    unservable-or-select to fully served — `single_token_char_blob` 0 ->
+    133,143, `bare_acronym` 8 -> 55,564.
+    (c) *A requirement is destructive when it is bounded only from above.*
+    `reduces()` — a scalar band with no lower bound. Span bands nothing mints
+    stay SELECT pre-filters: a cell demanding an acronym still needs a parent
+    that carries one, because nothing can weave one in.
+    (d) *The cut is corpus-aware or it is dishonest.* Removing words removes
+    the terms the parent's gold document was judged against, so an inherited
+    qrel silently goes stale. The cut therefore reads that document and is told
+    to keep what keeps it answering, plus any minted surface verbatim.
+    `ParentPool.gold_text` resolves it from `grounding_doc_id` (Inject's own
+    join) or the parent's top-graded qrel, by pushdown filter — the lane
+    parquets reach 133M rows, so never a full read. No document resolvable ->
+    the instruction degrades to corpus-blind rather than failing.
+    (e) *Where no cut preserves answerability, the corpus must change.* That is
+    construction with a minted key, not augmentation with an inherited one —
+    d51(l)'s constructed lane, still blocked on distractor borrowing. The cut
+    instruction asks for the shortest version that the document can still
+    answer, so the row lands short of the band and is credited wherever it
+    measures into (d52f) rather than being forced past the point of honesty.
+    (f) *`(length_words, DOWN)` is declared, with the corpus condition as its
+    rationale.* It was undeclared under d52(f), which is what made an upper
+    bound unmintable and forced it to be a filter. Its declaration audit judges
+    exactly the boundary in (e).
+    (g) *No new structural check was needed — composition already had it.*
+    `InjectOperator.structural` verifies literal containment of the copied
+    surface, and the loop unions every planned operator's checks, so "the
+    minted surface survived the cut" is enforced for free.
+    (h) *`headroom()` is deleted.* It re-filtered bounded numeric bands against
+    each row's surface cost, compensating for a pre-filter that no longer
+    exists. A cell banding both ends (`at_least 3, below 10`) is one mintable
+    requirement the model must land inside, and the local re-measure is the
+    verdict.
+    — *d52 asked which requirement is cheapest to satisfy. The order that
+    matters is which is cheapest to UNDO: everything additive first, and the one
+    irreversible act last, where it can see the whole row.*
+
+54. **Inject weaves as many surfaces as the band demands** (2026-08-05; widens
+    d42(d)'s "one surface per row").
+    (a) *Diagnosis: a count band made the request unsatisfiable.*
+    `symbol_pile_no_grammar` asks for `code_identifier >= 2`, Inject offered one
+    surface, and both its instruction and the shared exclusion clause forbade
+    adding a second. The model called `verify`, saw 1 of 2, had no legal move,
+    and burned all six tool rounds — the same self-contradiction d52(d) fixed
+    for structural checks, reappearing at the target level. Only one of the 44
+    cells has this shape, and it is hungry (398 missing), so it could not be
+    left unserved. Found only because d53's protocol diagnostic distinguishes
+    round exhaustion from a bad rewrite; before it, this read as `tried: ''`.
+    (b) *All n surfaces come from ONE document of ONE bank.* The minted key
+    therefore stays single-valued and the span target stays one feature at a
+    count. What widens is the meaning claim the d40(e) audit judges — from "this
+    document answers this narrowed query" to the same sentence with two
+    narrowings — not the answer-key mechanism.
+    (c) *The surfaces must be DISTINCT.* Two copies of one token are a single
+    span to the banks, so a repeated surface could never satisfy a count of two.
+    (d) *A doc that cannot supply the whole demand is not an offer.* Filtering
+    `(doc, bank)` groups to those holding at least n distinct surfaces is what
+    keeps the target reachable; the cost is supply, measured at 176 -> 93 parents
+    for the cell (the pool total moves 208,465 -> 208,382, and 22/22 cells and
+    13 covering their shortfall are unchanged).
+    (e) *`surface` becomes `surfaces`, a tuple — one structure, not two.* Even a
+    single-surface demand carries a 1-tuple, so instruction, structural check and
+    target read the same column at any n.
+
+55. **The request is a pipeline of single-purpose calls, briefed from the cell**
+    (grill-me 2026-08-05; reverses d52(d)'s single composed call and amends
+    d52(b)'s prompt assembly).
+    (a) *Diagnosis: the decomposition was right for selection and wrong for the
+    prompt.* Deciding which parent, which surface, which document belongs in
+    deterministic tables (d42) and stays. But ASSEMBLING the instruction by
+    concatenating each operator's sentence made fragments that cannot see one
+    another, and every failure was that: Inject demanding a surface while
+    StatRewrite's exclusion forbade adding numbers; a count of 2 while the
+    instruction forbade a second; a structural check vetoing the span another
+    mint was asked for. The user's original design was a PIPELINE
+    (`'prenatal vitamins' -[version_string]-> 'prenatal vitamins v3' -(length<4)->`)
+    and d52 collapsed it into one call; the collapse is what produced the
+    contradictions. Evidence for the simpler shape: the pre-composition design
+    banked 1,981 of 1,989 rows on the FIRST attempt (99.6%), against one
+    accepted row for the composed design — with the caveat that 1,706 of those
+    were Decorate, the cheapest family, so the comparison is not clean.
+    (b) *One call for every addition, a second for the cut.* Additive mints
+    cannot contradict each other — only add-versus-remove can — so grouping all
+    mints into one call and giving the cut its own keeps the property that
+    actually failed at two calls per row regardless of how many mints a cell
+    needs. The cut also finally sees the minted text, which the single call
+    could not give it.
+    (c) *Checks accumulate; the last accepted text is banked.* Step N verifies
+    its own target AND every target already achieved, so a later step cannot
+    silently undo an earlier one. A step that fails banks the last text that
+    passed — a real row with fewer targets met, credited wherever it measures
+    into (d52f). Local verify costs no LLM call, so accumulating is free, and
+    paid work is never discarded. Intermediate texts never touch
+    `GeneratedPool`, so d43's `first_generation_only` guard is untouched: an
+    intermediate is a working value, not a generation.
+    (d) *Cells gain a generator-facing field; `rationale` and `predicts` are
+    never sent.* Verified that today's prompt contains no cell name, rationale,
+    or route prediction — only operator fragments and a JSON of coined metric
+    names the model cannot act on (`natural_language_share` is meaningless
+    without its definition). `rationale` cannot be forwarded: it argues WHICH
+    ROUTE SHOULD WIN, so it would bias the very measurement the cell exists to
+    make, and d48(h) records it as partly contaminated by our own label
+    statistics — `symbol_pile_no_grammar`'s is 100% route talk with no
+    description of the query at all. So a separate human-authored field states
+    what the query LOOKS like, with no route talk. It also covers the gap in
+    d52(b): a SELECT requirement is verified on the child but no operator owns
+    it, so nothing described it; the archetype brief is that description.
+    — *Selection decomposes because it must be deterministic and auditable. The
+    prompt composes badly for the same reason a committee writes badly: no
+    fragment can see the others. One brief per call, one job per call.*
+
+56. **`NUM` leaves `CLOSED_CLASS`: a numeral is content, not grammatical glue**
+    (2026-08-05; amends d14's natural-language signal).
+    (a) *Diagnosis: not tagger noise, a definition mismatch.* A symbol pile
+    measured `natural_language_share = 0.333` and failed a `< 0.1` band while
+    spaCy reported ZERO closed-class tokens in it. The bank counts `NUM` as a
+    function word, so `502` in `'v1.2.3 nginx.conf 502'` scored as glue — and
+    spaCy tags bare identifiers `NUM`, so `cPGES` did too.
+    (b) *The bank was faithful to UD and wrong for its own question.* UD really
+    does file NUM as closed-class, which is why the code matched its comment.
+    But the signal answers "is this grammatical glue or a keyword telegram?",
+    and a numeral is content. Departing from UD here is deliberate and recorded
+    because a future reader will otherwise "fix" it back.
+    (c) *The error concentrated exactly where it does most harm.* Measured over
+    400 real selection queries: mean share 0.400 -> 0.378, 24.8% of rows
+    inflated, only 2.0% crossing a 0.1 band. Harmless on prose. But on the
+    identifier-dense short queries the signal is meant to score near 0.0 it
+    decided 3 of 7 genuine symbol piles. After the change all 7 score 0.000
+    while prose still scores 0.5-0.6, so the measure still separates what it
+    exists to separate.
+    (d) *A tolerance was the alternative and it cannot work.* Absorbing 0.333
+    needs a band wide enough to admit real sentences (prose sits at 0.4-0.5), so
+    the tolerance that fixes generation destroys the distinction the cell is
+    built on. An acceptable error rate is the right instinct for a statistical
+    band over prose — 2% boundary churn is not worth chasing — and the wrong one
+    for a definitional bug meeting short identifier-dense text.
+    (e) *Cost: `catalog.parquet` is stale for every `nl_share` band.* The change
+    lands in the nested `src/query-taxonomy` repo, needs its own commit, and
+    shifts cell membership wherever `nl_share` is banded — so it rides along
+    with the re-extraction the `version_string` repair already owes, paying the
+    cascade once.
+
+57. **A parent needing no edit beats any edit — `calls_for` skips a mint the
+    parent already satisfies** (2026-08-06; amends d55(b)'s "one call per
+    addition").
+    (a) *Diagnosis: `StatRewrite.eligible()`'s `movable` filter excluded
+    parents already inside a two-sided band.* Asked why StatRewrite runs at
+    all for `version_pinned_technical`, the trail led to `movable` only
+    matching values OUTSIDE the band (`< low` or `>= high`) — a parent whose
+    bare length already sat inside `[3, 10)` matched neither arm and was
+    dropped from `eligible()` entirely, not merely marked as needing no move.
+    Measured: only 661 of 4,836 Inject-joined candidates (13.7%) already
+    satisfied the length band once the mandatory Inject surface was counted,
+    and every one was invisible to the pool.
+    (b) *The fix has two parts, at two different moments.* `already_holds`
+    and `eligible()`'s broadened `movable | already` mask decide, at
+    PLANNING time, whether a parent belongs in the cell's candidate pool at
+    all — sorted so the free rows (`distance=-1.0`) sort first.
+    `dispatch.needs_a_move(step, parent)` decides, at CALL time, whether THIS
+    parent's scalar step is worth spending an LLM call on, given the words a
+    prior CORPUS mint (Inject) already committed to add (`mandatory_words`,
+    read from `parent["surfaces"]`) — a span requirement is never free, since
+    the literal surface genuinely is not in the query yet.
+    (c) *`calls_for` becomes parent-aware.* It now takes the parent (not just
+    the plan) and drops any non-CONSTRAIN step `needs_a_move` says is
+    unnecessary from the call list — but its requirement still rides along in
+    `verified`, so the local re-measure still catches a wrong guess. A
+    CONSTRAIN step is never dropped this way: it must see the row AFTER every
+    addition, and a pre-decided "free" verdict can't know that yet.
+    (d) *Measured effect on `version_pinned_technical`:* `plan()`'s candidate
+    pool grew 4,183 -> 4,802 parents; per-row `calls_for` checks show 689 of
+    them need ONLY Inject, StatRewrite dropped — matching the 661-candidate
+    estimate from before the fix. A parent that still genuinely needs cutting
+    (a 10-word query, say) is unaffected: both `inject` and `stat_rewrite`
+    still bundle for it.
+    (e) *Incidental bug found and fixed while testing this: `.assign(stat_value
+    =joined["__value"])` crashed whenever `eligible()` matched zero rows.*
+    Assigning a column from the UNFILTERED frame onto an empty filtered frame
+    reintroduces a row through index alignment — pandas has no shape left to
+    constrain against on a fully-empty frame, so the assign brings the
+    source Series' row back, and the next line's `np.where` then sees a
+    length mismatch. Fixed by aligning to `out["__value"]` instead of
+    `joined["__value"]`. Caught only because a synthetic test with a
+    non-matching catalog row hit the true zero-eligible-rows case that real
+    traffic never has (a hungry cell always has some eligible row).
+    — *StatRewrite was never the point — Inject alone is often already the
+    whole job. The question the user actually asked ("what do these
+    candidates already have, from the corpus, that lets us add rather than
+    edit") is what this decision answers: prefer the mint that costs nothing
+    over the edit that might.*
+
+58. **A gained span fully inside an already-authorised literal is not
+    smuggled — `StatRewrite.structural()`'s cross-group check narrows its
+    authorisation from feature-name to character-range** (2026-08-06).
+    (a) *Diagnosis: cost instrumentation surfaced a systematic, deterministic
+    drop.* A live `legal_citation_canonical` run (measured with the new
+    `Spend` tracker) dropped 9 of 14 attempts, every one for the reason
+    `"child gained spans: ['acronym']"`, and every dropped attempt injected a
+    U.S.C.-form citation — never an F./S.Ct.-form one. Confirmed live, not
+    assumed: `'42 U.S.C.'` resolves to `legal_citation: ['42 U.S.C.']` AND
+    `acronym: ['U.S.C.']`; `'343 F.3d 1260'` resolves to `legal_citation`
+    only. `LegalCitationBank`'s `"U.S.C."` literal is, by construction, the
+    same shape `AcronymBank`'s dotted alternative matches (2+ reps of
+    `[A-Z]\.`); `"F.3d"`/`"S. Ct."` break that shape (a digit or a second
+    lowercase letter follows the dot) and never collide.
+    (b) *The bank is right; the check's boundary was too narrow.* `"U.S.C."`
+    genuinely is an acronym — this is not the version_string bare-decimal
+    false positive from d50(b)'s repair, where the SHAPE matched but the
+    SEMANTICS didn't. Here both banks are correct about the same characters;
+    they are independent, orthogonal FeatureGroups (structured_identifiers,
+    sentence_markers) that were never meant to be exclusive. Narrowing the
+    bank to special-case "U.S.C." would teach it something false to serve a
+    different bank's authorisation logic — the exact "hack one structure to
+    fit another" the project's own comment guidance warns against.
+    (c) *`StatRewrite.structural()` is the only check with this exposure.*
+    Audited every operator: `Decorate` declares no check (`return []`);
+    `OperatorSyntaxRewrite` checks word tokens, not spans; `Inject`'s own
+    check resolves `groups=[STRUCTURED_IDENTIFIERS]` only, one group, where
+    within-group claim resolution already prevents a double-claim. Only
+    `StatRewrite.structural()` calls `_span_names()` with no group filter, so
+    it alone can see a span from a DIFFERENT group land on text a prior call
+    already authorised.
+    (d) *Fix: authorise by character range, not feature name, for the
+    surfaces Inject already committed to.* `_spans_by_name()` (new) gives the
+    child text's gained spans their positions; `_explained_by_surfaces()`
+    (new) checks every occurrence of a gained span against every occurrence
+    of an authorised literal (`parent["surfaces"]`, via `re.finditer`) in the
+    same text. A span entirely inside one is not smuggled — the model chose
+    none of those characters, only Inject did, and Inject's own literal
+    already passed its own authorisation. A span with even one occurrence
+    OUTSIDE every authorised surface is still smuggled, and still fails —
+    proven by test, not merely by construction, so the fix narrows the check
+    rather than disabling it.
+    — *A structural check exists to catch what the MODEL chose to add. Text
+    an operator already committed to, verbatim, is not a model choice — a
+    second bank's name for some of those same characters cannot be "extra."*
+
+59. **The campaign schedules floors by a chances mechanic, not a single
+    early-exit** (grill-me 2026-08-07).
+    (a) *Diagnosis: two real failure shapes, one signal.* A live
+    `datetime_token_present` run (measured via the d57-follow-up `Spend`
+    tracker) accepted 12 of 181 attempts, 169 of them `rounds_exhausted` —
+    a near-total, near-consecutive engine-protocol collapse, root-caused to
+    a self-contradictory `looks_like` (fixed separately, this session).
+    `legal_citation_canonical` pre-d58 dropped 9 of 14, all structural
+    rejections, but *interspersed* with successes — never a long streak. A
+    pure consecutive-error counter catches the first case and misses the
+    second; a pure rolling accept-rate catches both but reacts slower to
+    the first. Resolution: **fault** (d59, `CONTEXT.md`) unifies both —
+    an engine error, a structural rejection, and a measured-but-failed
+    target all count identically as one non-accepted parent attempt,
+    tracked at that granularity (not finer, e.g. not per internal
+    `engine.run()` call within a multi-call cell).
+    (b) *A fault streak costs a chance, not the floor.* Given the user's own
+    framing — "punish the cells wasting compute," not "abandon them" — a
+    floor is not stopped for good on its first bad streak. It holds a
+    **chance**: one continuous turn at the front of the campaign's queue,
+    which ends ordinarily (need met, or parents exhausted — no cost) or is
+    cut short by 3 consecutive faults, which spends the chance and sends
+    the floor to the literal back of the queue (no re-sort by remaining
+    hunger — a demoted floor does not get to trade on being hungry to cut
+    back toward the front; that would undo the demotion). A floor starts
+    with 3 chances; exhausting all 3 drops it from the queue entirely for
+    the rest of that run, however hungry it still is.
+    (c) *A repeat chance must try different parents, or the mechanic is
+    theater.* `parents_used(floor)` (the loop's existing exclusion, derived
+    from the persisted pool) only knows about ACCEPTED history — a dropped
+    attempt is never written anywhere, so calling `AugmentationLoop.run()`
+    again naively would rebuild the identical queue and immediately re-fail
+    the same parents that just cost the floor its chance. Fix: `run()`
+    gains an `exclude: set[str]` parameter; the campaign accumulates
+    attempted (accepted or faulted) parent ids per floor, in memory, across
+    chances, and passes the growing set back each turn. No persistence
+    across separate campaign invocations — this is scoped to one run.
+    (d) *The edge case is accepted, not special-cased.* If a demoted floor
+    is the only one left in the queue, popping the queue returns it
+    immediately — its remaining chances run back-to-back with no cooldown,
+    since there is nothing else to interleave with. The `exclude` set still
+    guarantees each of those tries hits a genuinely different parent. The
+    rule is unchanged regardless: burn 3 chances, however spaced, and the
+    floor is dropped.
+    (e) *The one number this whole feature exists to guarantee.* Given
+    `chances=3` and `fault_threshold=3`, the worst-case wasted spend on any
+    single floor is a fixed, derived ceiling — **K = 9 faulty attempts,
+    total, ever, per floor, per campaign run** — never a hand-picked
+    timeout. This is the load-bearing invariant: whatever else might be
+    imperfect in the scheduler, "no floor ever costs more than 9 wasted
+    attempts" must be unconditionally, always tested — the actual
+    protection the feature exists to provide, independent of any other bug.
+    A healthy floor has no ceiling on genuinely successful attempts; only
+    the faulty-attempt budget is bounded.
+    (f) *Sanity-checked against simpler designs (full ladder in the
+    grill-me transcript).* A single early-exit with no requeue (the
+    original strawman) was rejected because it violates the user's own
+    "give looser cells additional chances" requirement — verified against
+    the interview, not assumed. A fixed-cap-no-requeue design fails the
+    same way. An off-the-shelf circuit-breaker/task-queue library was
+    rejected on total cost: this runs as ~22 floors in one in-memory Python
+    process with no cross-process or crash-persistence requirement, so a
+    distributed job system buys nothing. Verdict: KEEP the custom
+    *policy* (chances/exclude/K-ceiling — no library encodes this
+    domain-specific tradeoff), but the *implementation* stays stdlib-only —
+    `collections.deque` plus a small per-floor state record, no new
+    dependency. Flips if this ever needs multi-process or crash-recoverable
+    state, neither of which is required today.
+    — *The mechanism is not "stop wasting money" — it is "never let one
+    broken floor cost more than a fixed, provable amount, while every
+    floor still gets a fair, repeated shot." Fairness and the hard ceiling
+    are the same design, not a tradeoff between them.*
+
+60. **Ties are judgment-resolution artifacts, upgraded by an acceptability
+    view, not by re-weighting the objective** (grill-me 2026-08-07).
+    (a) *Diagnosis, measured on the cached lane oracles.* Of 15,037
+    `all_tied` rows, **zero** have identical top-10 lists across the three
+    routes; 96.1% share only the top-1 doc and differ in their (unjudged)
+    tails; 70% sit in three median-one-judged-doc lanes (webfaq 60% tie
+    rate, gooaq 45%, orcas 28%). A tie means the judgments ran out of
+    resolution, never that the routes are equivalent. Objective
+    re-weighting was separately measured dead (§9, all 42 lanes pooled):
+    0.5/0.5 flips zero real labels vs shipped, bare NDCG@10 ~92 of 46K —
+    the label is not an artifact of the 0.7/0.3 choice. min_relevance+1
+    is degenerate (39 of 42 lanes have binary qrels; gold empties).
+    (b) *Acceptability is a derived view, never stored columns.* Per route:
+    `ok = score >= oracle − tolerance`, `oracle = max` of the row's three
+    scores — computed by a view class over `labels.parquet`'s score vector,
+    tolerance as its parameter. CONTEXT.md already rules `route` "a view
+    over the scores"; materializing ok_* would create the twin-structure
+    consistency bug CLAUDE.md forbids and bake one tolerance into the
+    artifact. `tolerance=0` reproduces today's labels exactly — nothing is
+    destroyed. (Sanity-check, compressed: the component is one small class
+    computing three booleans from three stored floats; the rejected
+    alternatives — new parquet columns, a sibling parquet per tolerance —
+    both add an artifact to keep consistent. KEEP the view.)
+    (c) *Canonical tolerance 0.3 = hit parity, derived not hand-picked.*
+    0.3 is the objective's own `ndcg_weight`: the widest gap two routes
+    can show while sharing the same top-1 outcome (a hit/miss difference
+    forces ≥ 0.4 — same derivation style as d41's 0.4 decisive margin).
+    The measured gap distribution confirms the band is real: runner-up
+    gaps have median 0.022, p75 0.095, then jump to 0.811 at p90 —
+    nothing lives between 0.3 and 0.4, and serve flips saturate at 6,827
+    by tol 0.2. Accepted trade-off: tail quality alone (NDCG 1.0 vs 0.4,
+    both rank-1 hits) never disqualifies a route — Top-1 parity is what
+    the production router optimizes.
+    (d) *all_zero stays null (d41 upheld), for a bias reason, not
+    conservatism.* The view could express `[0,0,0]` ("no route
+    acceptable") — argmax never could — but qrel holes are asymmetric
+    (dense 14–32% vs BM25 ~6% on older pools), so a chunk of the 8,181
+    all-zeros are fake and disproportionately fake against dense;
+    training all-negatives on them injects exactly that bias. Revisit
+    after (f)'s option A shrinks the fake-zero population.
+    (e) *The training target is three binary acceptability heads.* One
+    head per route on ok_dense/ok_rrf/ok_sparse; at inference, serve the
+    cheapest route whose P(ok) clears a threshold. This keeps [1,0,1]
+    distinct from [1,1,1], turns the 15,018 tied rows into sparse-positive
+    training signal (7,789 genuine sparse wins + ties ⇒ the starving
+    class is fed), and leaves cost policy in the inference rule, tunable
+    without relabeling. The derived `serve` column is the evaluation
+    oracle readout only — including for the production hard-classifier
+    baseline.
+    (f) *Follow-up sequence, decided: A next, C conditional, D last.*
+    A = LLM-judge the differing tails (PPI-rectifier spine per
+    docs/research/route-label-sourcing.md): ~14.4K tied queries ×
+    ~15–20 unique unjudged tail docs, the honest tie-breaker, and the
+    unlock for revisiting (d). C = harden webfaq/gooaq/msmarco corpora
+    with adversarial distractors — only if A shows the ties are real
+    (tails genuinely irrelevant ⇒ the corpus is too easy). D = augment
+    tied parents into harder children — waits for A/C evidence on which
+    perturbations break ties.
+    — *The finding that pays for the whole grill: zero of fifteen
+    thousand ties are irreducible. The information to break every one of
+    them already sits in the cached rankings; only judgments are missing.
+    The acceptability view is how the dataset stays useful while they
+    are.*
+
 ## Deferred questions
 
-- Recipe values remaining after d32's macro-split (50K; 60/20/20; entity
-  slice 80/20; dark forest ≥3 champions, ≤50% each): per-cell floor sizes
-  (d30a precision rule), per-span-type target amounts, minimum natural
-  share, harvest-target N, per-quota per-dataset source cap (d29 default
-  ≤50%).
 - Register/box definitions for eval-time weighting + page-search log
   acquisition (d30; boxes wait for a real log).
 - Judgment-shaped MODEL features (word-order sensitivity, syntactic depth,
@@ -1666,30 +2456,8 @@ breadth; strategy labeling is explicitly a later stage.
   from lane corpus parquets, registry untouched (consistent with d39a).
   The richer candidates (vocabulary mismatch, ambiguity, specificity)
   reopen only if the d44(c) transfer pilot's captured headroom stalls.
-- Strategy labeling stage: empirical dense/sparse/hybrid labels in
-  `src/hybrid_search_rrf_dataset`, scored by d37(a)'s objective (was "via
-  NDCG"). Remaining: pool extraction; the unanswerable-query outcome
-  (d37i) resolved by d41 (route = null); corpus sizing settled
-  composition-wide by d39(e)'s threshold rule. Anchor yield (d37j)
-  measured 2026-07-28, msmarco lane 2026-07-29:
-  `data/route_labels/labels.parquet` (8,020 rows).
-- Pass-1 reality check (d39): per-lane qrels_ready counts are unknown
-  until the fetches run — msmarco's 49.1% says declared QQ grounding
-  does not guarantee per-query coverage. Re-price wave order if a lane
-  comes back thin. Qrels dialects (RAR-b tsv, BRIGHT gold_ids +
-  excluded_ids, crumb/quest/limit lists) verified at implementation.
 - msmarco corpus scale-up past 100K if margins look corpus-limited —
   recipe is a parameter (d38c), embedding cache amortizes the retry.
-- ORCAS click-lane labeling (the other 31% of the composition): clicks are
-  weak relevance of a different kind (`source='click'` in QrelStore, d37d)
-  — own decision, not lumped into qrels-lane work.
-- ILP escalation for quota conflicts (solver choice, formulation).
-- Next acquisitions: CLERC, the 9 unregistered BRIGHT splits, further BEIR
-  subsets (ORCAS with `recommended_sample=100K` + 3 BRIGHT splits
-  registered 2026-07-20, d21/d31).
-- Enrichment grounding layer (d34a) — resolved: d40 (admission rules) +
-  d42 (generation-side design: supply index, Inject ladder, operator
-  declarations). Implementation tracked in TODOS d42.
 - StatRewrite entries beyond (length, up) — reopen when a band goes
   hungry; a "telegram queries feel underrepresented" instinct is a
   recipe/band question first, demand second (d42d).
@@ -1697,18 +2465,36 @@ breadth; strategy labeling is explicitly a later stage.
   implementation, informed by the Decorate pilot batches.
 - Hungry-floor rung assignment (d42f) — pending the supply-scan readout
   (augmentation_supply.ipynb, three cells left to run).
-- Corruption operators' home (R5 programmatic damage):
-  taxonomy-generators later wave vs parent-repo lane (d34d).
-- Orchestrator-LLM batch lane (d10/d34e) — superseded by d42's Augmenter
-  (the agentic tool loop with local-verify acceptance IS that lane).
 - Realism overrides over the d34b defaults: which features need them is
   discovered empirically from seeded round-trip samples, not decided up
   front.
-- Demo (b) infrastructure: corpus indexing + local Qdrant
-  (docker-compose.yml exists) for the disagreement measurement.
 - Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light
   formal content: "x squared plus y squared", prose pseudo-code) — layered
   bank; needs a code/math detection model choice (d20).
 - Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
   minus-exclusion, `site:`) — attested in query logs but precision-dangerous;
   own decision (d20).
+- Rung 2 under d51 (d43's inversion: any lane doc carrying the surface, not the
+  parent's own gold doc). A key minted against a doc that carries the surface
+  but does not answer the parent's need is weaker than rung 1 — decide when
+  rung 1 runs dry, not before.
+- `AugmentationCampaign.pilot_n` staging under cell demand (d51). Credit gates
+  are per-operator, so one cell served by Inject stages a pilot while the same
+  cell served by Decorate does not — unexamined in the d51 grill.
+- Whether `operator:` is removed from cells.yaml or kept as a human override of
+  d51(c)'s derivation. Two sources of truth is what went stale; a veto path for
+  a mechanically-valid-but-semantically-wrong mint has no home without it.
+- Inference fallback when no acceptability head clears its threshold (d60e) —
+  a serving policy (cheapest? abstain-to-rrf?), decided at router-training
+  time, never encoded into labels.
+- `[0,0,0]` for all_zero rows (d60d) — reopens only after option A's tail
+  judging shrinks the fake-zero population enough to measure the dense-hole
+  bias instead of assuming it.
+- `GoldenRoutingBuilder` parquet round-trip inconsistency: ~147 of 46K rows
+  have `route_rankings` that contradict their stored `route_scores` (traced
+  live on gooaq 139935 — score implies the gold doc in top-10, rankings lack
+  it). The §9 noise floor; harmless to d60's view (reads labels.parquet, not
+  oracles) but must be fixed before option A judges tails from those rankings.
+- Stale `beir-nfcorpus_oracle` cache: 323 upstream queries vs the 12 the
+  composition selects — rebuild or delete before any oracle-pooled readout is
+  quoted as exact.

@@ -27,12 +27,16 @@ CSV.
 **Natural-language signal**:
 The canonical "how natural-language-shaped is this query?" measure —
 `natural_language_share`, the fraction of tokens that are function words
-(UD closed-class POS; pinned spaCy tagger, ALGO tier). Keyword telegrams
-sit near 0.0, proper sentences near 0.4–0.5. The stopword-ratio feature is
-its REGEX fallback. Replaced the POS-profile histogram (SPEC d26): only
-this scalar answered a router question.
+(UD closed-class POS **minus NUM**; pinned spaCy tagger, ALGO tier). Keyword
+telegrams sit near 0.0, proper sentences near 0.4–0.5. The stopword-ratio
+feature is its REGEX fallback. Replaced the POS-profile histogram (SPEC d26):
+only this scalar answered a router question. NUM left the set at d56: UD files
+numerals as closed-class, but this measure asks whether a query is grammatical
+glue or a keyword telegram, and a numeral is content — spaCy also tags bare
+identifiers NUM, so counting them scored `v1.2.3 nginx.conf 502` as one-third
+function words.
 _Avoid_: POS profile (dead), closed_class_share (renamed by d26), POS as
-GLiNER entity labels
+GLiNER entity labels, reading it as literal UD closed-class share
 
 **The five signals**:
 The statistical-metrics group read as a panel: NL-shape
@@ -198,11 +202,26 @@ preservation, and what re-measurement verifies it. Families: Decorate
 operator with per-(axis, direction) declaration entries, each piloted
 before earning credit — Inject (identifiers), Corrupt (programmatic, no
 LLM). Operators also declare parent-relative structural checks
-(`structural(parent, text)`: no-new-spans, content tokens unchanged,
-literal surface containment), run after local accept (d43b). Undeclared
-or unverifiable ⇒ feature-stock.
+(`structural(parent, text, targets)`: no-new-spans, content tokens unchanged,
+literal surface containment), run after local accept (d43b) — `targets` is
+what the request authorised, so composed mints do not veto each other (d52d).
+Each `instruction()` states its positive move only; the exclusion is the
+composed request's, emitted once. Undeclared or unverifiable ⇒ feature-stock.
 _Avoid_: Expand/Compress as operators (they are StatRewrite entries),
 one generic enrich() endpoint
+
+**Rung**:
+How a cell's shortfall gets served, chosen per (cell, parent) rather than per
+cell (d51c). Rung 1 augments a real parent: the parent satisfies every cell
+band except the ones one operator will mint (**predicate − 1**), and where that
+operator declares `surface_origin=DOC_COPIED` its own gold document must carry
+the surface. The synthetic rung generates query and document together, reached
+when no operator mints the band (acronym, negation, comparative — undeclared by
+design) or no corpus supplies the surface. d43's rung 2 (inversion — any lane
+doc carrying the surface) is deferred: its key points at a document that has
+the surface but need not answer the parent.
+_Avoid_: branch (say rung), calling the synthetic rung a fallback (it is a
+dispatch outcome), reading "no natural supply" as "no parent available"
 
 **Supply index**:
 The one-time bank profile of a lane corpus — (doc_id, floor key, surface
@@ -247,6 +266,25 @@ change that breaks generation fails this test at CI time, never a profile
 run.
 _Avoid_: drift test, mirror test
 
+**Fault** (campaign scheduling):
+A parent attempt that does not bank an accepted row — an engine error
+(rounds exhausted, no text), a structural rejection, and a measured-but-
+failed target all count identically (d59). Unifies three previously distinct
+"drop" reasons under one signal for the chances mechanism; does not replace
+`ErrorCase` or a structural check's own message, which still explain WHY a
+given attempt faulted.
+_Avoid_: drop (a fault is a drop, but "drop" alone doesn't carry the
+scheduling signal)
+
+**Chance**:
+One continuous turn a floor holds at the front of the campaign's queue
+(d59). Ends ordinarily (its need is met, or its parents run out) with no
+cost, or is cut short by 3 consecutive faults, which spends the chance and
+sends the floor to the back of the queue. A floor starts with 3; burning all
+3 drops it from the queue for the rest of that campaign run.
+_Avoid_: attempt (a chance contains many attempts), retry (implies the same
+parent, not a fresh one)
+
 ### Datasets
 
 **Profiling**:
@@ -290,22 +328,29 @@ infeasible.
 _Avoid_: gap report, error log
 
 **Label lane**:
-Per-row labeling route recorded at selection time: `qrels` vs `deferred`.
-Derived from the registry's grounding card (QQ vs QC), **not** from actual
-judgment coverage, which makes it a weaker claim than it reads as: a
-`qrels`-lane row from a positive-only dataset has ~1 judged doc against an
-18–25 doc pool, so ~95% of what the routes retrieve is unjudged there too.
-The `deferred` label is also now stale — its only member was orcas, which
-has 18.8M clicks (d37k). Due for redefinition in terms of
-[[qrel-hole]] rate per row rather than grounding.
-_Avoid_: reading `qrels` as "fully judged", checkable (that is the input
-proxy, not the route), tier
+Per-row labeling route recorded at selection time, named after the
+[[qrel-source]] that will judge it: `qrels` (human) or `click` (behavioral).
+Never a claim about judgment *coverage* — a `qrels`-lane row from a
+positive-only dataset has ~1 judged doc against an 18–25 doc pool, so ~95%
+of what the routes retrieve is unjudged there too.
+`deferred` is retired (d49): its only member was orcas, which ships 18.8M
+click pairs and is now a lane of its own.
+_Avoid_: `deferred` (retired), reading `qrels` as "fully judged", checkable
+(that is the input proxy, not the route), tier
+
+**Qrel source**:
+Where a judgment came from, ranked by trust: `human` > `constructed` >
+`click` > `llm` (`QrelSource` in `qrels.py`; declaration order IS the
+precedence when two lanes judge the same pair). A route label inherits the
+weakest source that produced it.
+_Avoid_: label quality, confidence (both suggest a score, not a provenance)
 
 **Dark forest**:
-The feature-blind 20% of the target dataset: uniform draws from ≥3
-generalist champions, deliberately unconditioned on any extractor output —
-insurance against the taxonomy's own blind spots. A *selection* concept
-(slice D of the composition).
+The feature-blind ~20% of the target dataset: random draws from queries that
+entered no cell, deliberately unconditioned on any extractor output —
+insurance against the taxonomy's own blind spots, and the never-trained
+control slice. A *selection* concept. Since d49(j) it is the fill's
+leftovers, not draws from named champion datasets.
 _Avoid_: unknown universe, random slice, and — since 2026-07-28 — using it
 for unanswerable queries; that is [[route-outcome-shape]]'s all-zero case,
 an *outcome* discovered after retrieval, not a slice chosen up front. The
@@ -314,9 +359,29 @@ unanswerable query may sit in any slice.
 
 **Provenance**:
 Per-row origin of a query in the diversified dataset: `natural` (taken as-is
-from a source dataset), `doc_grounded` (generated/augmented against a real
-corpus document), or `synthetic` (query + document generated together).
-_Avoid_: source (already means acquisition backend, `SourceKind`)
+from a source dataset), `augmented` (rewritten from a parent under a
+meaning-preserving operator, no document consulted — the parent's judgments
+carry over), `doc_grounded` (generated/augmented against a real corpus
+document), or `synthetic` (query + document generated together). An explicit
+selection column since d51(k): the natural-share ceiling tests
+`provenance == 'natural'`, and inferring it from `generated_from.isna()`
+counts a parentless row as natural.
+_Avoid_: source (already means acquisition backend, `SourceKind`), inferring
+it from the lineage column
+
+**Grounding**:
+The dataset-card field for which retrieval assets a source ships: `QO`
+(queries only), `QC` (queries + corpus), `QQ` (queries + corpus + qrels).
+A statement about assets, never about whether we can label the rows — that
+is [[checkable]], which admits QC sources carrying clicks or passage answers.
+_Avoid_: using it for a row's origin (that is [[provenance]]) or for a
+generated surface's source (that is [[surface-origin]])
+
+**Surface origin**:
+Where an augmentation operator's new text came from: `none` (rewritten from
+the parent), `doc_copied` (lifted from the grounding doc), `synthetic`.
+Named `Grounding` until 2026-08-04, which collided with the card field.
+_Avoid_: grounding
 
 **Verification loop**:
 The generator-side check: LLM produces a query with feature targets, the
@@ -345,8 +410,11 @@ construction. Selection counts only checkable rows toward floors.
 Replacement filters on "can't check", never on "didn't like the grade":
 ties and all-fail rows stay, flagged (d30c). Extends [[answerability]] —
 grounded means a home document exists; checkable means the grade is
-computable.
-_Avoid_: conflating with answerability, discarding graded-but-ugly rows
+computable. The feature table's `checkable` column is a card-level stand-in
+for this — True when a dataset ships any relevance signal (qrels, clicks, or
+an answer passage doubling as the gold doc), so the same value for every row.
+_Avoid_: conflating with answerability, discarding graded-but-ugly rows,
+reading the column as "[[grounding]] is QQ" (the old, narrower rule)
 
 **Dark matter (of data)**:
 What graded data systematically cannot show: unjudged queries (the messy
@@ -506,6 +574,25 @@ rule on all but 5 of 1,673 rows on disk). The honest trainable count,
 and the only rows quality-dominance headlines are read over.
 _Avoid_: trainable rows (routes_differ alone overcounts — 47% are exact
 top-two ties), margin ≥ 0.06 (dead)
+
+**Acceptability label**:
+Per route, `score >= oracle − 0.3` (d60): did this route land in the same
+top-1 band as the best route? A derived view over the stored score vector
+(like `route` itself), never materialized columns; tolerance 0.3 is the
+objective's own `ndcg_weight` — the widest gap that cannot involve a
+top-1 flip — not a hand number. All-zero rows stay null (d41 holds).
+_Avoid_: multi-label route (says the mechanism, not the meaning), storing
+ok_* in labels.parquet (twin structure), tolerance as a dataset fact (it
+is the view's parameter; 0.3 is only the canonical default)
+
+**Serve decision**:
+The cheapest route whose acceptability is true (cost order sparse <
+dense < rrf). At tolerance 0 this is exactly the stored `route` column;
+at 0.3 it is the cost-aware oracle readout routers are evaluated
+against (d60e). Training targets are the three acceptability heads, not
+this column.
+_Avoid_: serve as a training label (it hard-codes cost policy into the
+label), winner (that is the quality argmax)
 
 **Headroom**:
 The measured value of routing: mean per-query oracle (best of the three

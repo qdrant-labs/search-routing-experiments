@@ -28,6 +28,15 @@ poetry run pytest
 poetry run ruff check src/query_taxonomy tests
 ```
 
+## Comments
+
+Hard limits: file docstring 3 sentences, class 2, method 1. No input/output
+prose — the signature says it. Never cite SPEC decision numbers in code; they
+point into a 1,800-line file nobody will open. Name things so they need no
+comment.
+
+A consistency check between two structures you both authored is a design bug. Delete one structure."
+
 ## Query taxonomy (`src/query_taxonomy/`)
 
 Feature extractors over queries/documents for corpus profiling and Strategy
@@ -111,4 +120,12 @@ only: banks of different groups never compete for the same char ranges.
 - Every bank needs ~2 positive / 2 negative cases in `tests/test_banks.py`
   (`test_every_bank_has_cases` enforces presence). Keep negatives blatant,
   not exhaustive.
+- A bank REPAIR banks its evidence: the false positives measured in the
+  corpus become the negative cases (`"p = 0.05"`, `"a 2.5-fold increase"`
+  came from version_string's real claims, not from imagination). These cases
+  are the only precision guard that exists — a generic surface filter, a
+  stricter twin pattern, and claim-concentration were each measured and
+  refuted (TODOS, bank precision). Measure a bank's real claims before
+  trusting its tier: RIGID is a hand assertion nothing checks, and five
+  RIGID banks over-claim ≥64%.
 
