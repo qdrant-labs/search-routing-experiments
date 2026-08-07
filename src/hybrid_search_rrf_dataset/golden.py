@@ -117,7 +117,7 @@ class LLMScoreClient:
         response = requests.post(
             self._api_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"text": query},
+            json={"text": query[:4096]},  # server rejects longer text
             timeout=self._timeout,
         )
         response.raise_for_status()
