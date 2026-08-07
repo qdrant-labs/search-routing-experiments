@@ -17,8 +17,10 @@ import numpy as np
 import pandas as pd
 
 from hybrid_search_rrf_dataset.fusion import (
+    SERVING_COST,
     TIE_TOLERANCE,
     FusionStrategy,
+    StrategyName,
     derive_route,
 )
 from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
@@ -341,6 +343,10 @@ class RouteLabels:
             ["labelled", "selected"], ascending=False, ignore_index=True
         )
 
+    def acceptability(self, tolerance: float | None = None) -> AcceptabilityLabels:
+        """The d60 view over the stored labels."""
+        return AcceptabilityLabels(self.load(), tolerance=tolerance)
+
     def _qrels_ready(self, dataset: str, labelled: int) -> int:
         """Selected rows joinable against the lane's on-disk qrels, minus the
         already-labelled ones. 0 when the lane is unknown or not yet fetched."""
@@ -359,3 +365,45 @@ class RouteLabels:
             ].astype(str)
         )
         return max(len(selected_ids & judged) - labelled, 0)
+
+
+class AcceptabilityLabels:
+    """The d60 view over a labelled frame: per-route `ok_*` booleans plus the
+    cost-aware `serve` decision, derived from the stored score vector at read
+    time and never materialized. Default tolerance is hit parity — the
+    objective's own `ndcg_weight`, the widest gap that cannot involve a
+    top-1 flip."""
+
+    def __init__(
+        self, labels: pd.DataFrame, tolerance: float | None = None
+    ) -> None:
+        self.labels = labels
+        self.tolerance = (
+            RouterObjective().ndcg_weight if tolerance is None else tolerance
+        )
+
+    def frame(self) -> pd.DataFrame:
+        """The input frame plus `ok_<route>` (nullable boolean) and `serve`;
+        all-zero rows carry nulls in every added column (d41 upheld)."""
+        out = self.labels.copy()
+        score_cols = [c for c in out.columns if c.startswith("score_")]
+        routes = [c.removeprefix("score_") for c in score_cols]
+        scores = out[score_cols].to_numpy(dtype=np.float64)
+        oracle = scores.max(axis=1)
+        answerable = oracle > TIE_TOLERANCE
+        # floored at TIE_TOLERANCE so tolerance=0 means "exact ties", exactly
+        # as derive_route counts them — the must-pass reproduction property.
+        effective = max(self.tolerance, TIE_TOLERANCE)
+        ok = scores >= (oracle - effective)[:, None]
+
+        for i, route in enumerate(routes):
+            column = pd.array(ok[:, i], dtype="boolean")
+            column[~answerable] = pd.NA
+            out[f"ok_{route}"] = column
+
+        cost = np.array([SERVING_COST[StrategyName(r)] for r in routes])
+        cheapest_ok = np.where(ok, cost[None, :], np.inf).argmin(axis=1)
+        out["serve"] = pd.Series(
+            [routes[i] for i in cheapest_ok], index=out.index
+        ).where(answerable)
+        return out

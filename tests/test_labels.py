@@ -1,7 +1,11 @@
 import pandas as pd
 import pytest
 
-from hybrid_search_rrf_dataset.labels import RouteLabels
+from hybrid_search_rrf_dataset.labels import (
+    AcceptabilityLabels,
+    RouteLabels,
+    route_label,
+)
 from hybrid_search_rrf_dataset.objective import NDCGObjective, RouterObjective
 
 
@@ -79,3 +83,55 @@ def test_decisive_winners_split(labels):
     assert table.loc["lane-a", "sparse_only"] == 0
     assert "lane-b" not in table.index  # no decisive rows there
     assert table.loc["POOLED"].sum() == 2
+
+
+@pytest.fixture
+def shaped_frame():
+    """One row per interesting shape, scores as (dense, rrf, sparse)."""
+    return pd.DataFrame(
+        {
+            "score_dense_only": [1.0, 0.2, 1.0, 0.0, 1.0, 1.0],
+            "score_pure_rrf": [0.6, 0.1, 1.0, 0.0, 0.7, 1.0],
+            "score_sparse_only": [1.0, 0.9, 1.0, 0.0, 0.5, 0.2],
+        },
+        index=["near_top", "sparse_wins", "all_tied", "all_zero",
+               "hit_parity", "two_way_tie"],
+    )
+
+
+def test_tolerance_zero_reproduces_stored_route(shaped_frame):
+    # the d60 must-pass: at tolerance=0 the view's serve IS today's label,
+    # including the two-way tie resolving dense (cheapest of the tied best).
+    view = AcceptabilityLabels(shaped_frame, tolerance=0.0).frame()
+    score_cols = [c for c in shaped_frame.columns if c.startswith("score_")]
+    for row_name, row in shaped_frame.iterrows():
+        scores = {c.removeprefix("score_"): row[c] for c in score_cols}
+        stored = route_label(scores)
+        served = view.loc[row_name, "serve"]
+        # both nulls (all_zero) count as agreement — parquet stores each as NaN
+        assert (pd.isna(served) and stored is None) or served == stored, row_name
+
+
+def test_hit_parity_default_tolerance(shaped_frame):
+    view = AcceptabilityLabels(shaped_frame)
+    assert view.tolerance == pytest.approx(RouterObjective().ndcg_weight)
+
+
+def test_acceptability_per_shape(shaped_frame):
+    view = AcceptabilityLabels(shaped_frame).frame()  # tolerance 0.3
+
+    tied = view.loc["all_tied"]
+    assert bool(tied.ok_dense_only) and bool(tied.ok_pure_rrf)
+    assert bool(tied.ok_sparse_only) and tied.serve == "sparse_only"
+
+    zero = view.loc["all_zero"]
+    assert pd.isna(zero.ok_dense_only) and pd.isna(zero.serve)
+
+    # 0.7 sits exactly at hit parity (1.0 - 0.3): same top-1 band, acceptable
+    parity = view.loc["hit_parity"]
+    assert bool(parity.ok_pure_rrf) and not bool(parity.ok_sparse_only)
+    assert parity.serve == "dense_only"
+
+    # sparse alone clears; the others miss by more than the tolerance
+    assert view.loc["sparse_wins", "serve"] == "sparse_only"
+    assert not bool(view.loc["sparse_wins", "ok_dense_only"])

@@ -34,8 +34,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from hybrid_search_rrf_dataset.fusion import StrategyName
+from hybrid_search_rrf_dataset.fusion import SERVING_COST, StrategyName
 from hybrid_search_rrf_dataset.golden import LLMScoreClient
+from hybrid_search_rrf_dataset.labels import AcceptabilityLabels
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
 if TYPE_CHECKING:
@@ -384,6 +385,90 @@ class StrategyRouter:
     def _probabilities(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         x = self._space.transform(frame)
         return self._dense.predict_proba(x)[:, 1], self._sparse.predict_proba(x)[:, 1]
+
+
+class AcceptabilityRouter:
+    """Three acceptability binaries (SPEC d60e): each head learns P(this
+    route is acceptable) from the d60 view's `ok_*` labels, and serving picks
+    the cheapest route whose probability clears `threshold`."""
+
+    COST_ORDER = sorted(StrategyName, key=SERVING_COST.__getitem__)
+
+    def __init__(
+        self,
+        representation: Representation = Representation.BOTH,
+        encoder: QueryEncoder | None = None,
+        pca_dims: int = 50,
+        C: float = 1.0,
+        extractor: FeatureExtractor | None = None,
+        tolerance: float | None = None,
+        threshold: float = DEFAULT_THRESHOLD,
+    ) -> None:
+        self.representation = representation
+        self._space = FeatureSpace(representation, encoder, pca_dims)
+        self._heads = {route: _binary_pipeline(C) for route in _ROUTE_ORDER}
+        self.tolerance = tolerance  # None = the view's hit-parity default
+        self.threshold = threshold
+        self._extractor = extractor
+
+    def fit(self, train: pd.DataFrame) -> AcceptabilityRouter:
+        """Fit all three heads on the answerable rows of `train` — all_zero
+        rows carry null ok_* labels (d60d) and are excluded, never negatives."""
+        view = AcceptabilityLabels(train, tolerance=self.tolerance)
+        self.tolerance = view.tolerance
+        rows = view.frame()
+        rows = rows[rows["serve"].notna()]
+        self._space.fit(rows)
+        x = self._space.transform(rows)
+        for route in _ROUTE_ORDER:
+            y = rows[f"ok_{route.value}"].to_numpy(dtype=bool)
+            self._heads[route].fit(x, y)
+        return self
+
+    def predict_routes(self, frame: pd.DataFrame) -> list[StrategyName]:
+        probs = self.probabilities(frame)
+        matrix = np.column_stack([probs[r.value] for r in self.COST_ORDER])
+        fires = matrix >= self.threshold
+        # cheapest firing head; fallback while SPEC d60's deferred policy is
+        # open: the most probable route.
+        first_fired = fires.argmax(axis=1)
+        best_prob = matrix.argmax(axis=1)
+        idx = np.where(fires.any(axis=1), first_fired, best_prob)
+        return [self.COST_ORDER[i] for i in idx]
+
+    def probabilities(self, frame: pd.DataFrame) -> dict[str, np.ndarray]:
+        x = self._space.transform(frame)
+        return {
+            route.value: self._heads[route].predict_proba(x)[:, 1]
+            for route in _ROUTE_ORDER
+        }
+
+    def predict(
+        self, query: str, *, collection_stats: dict[str, float] | None = None
+    ) -> StrategyName:
+        del collection_stats
+        return self.predict_routes(self._query_frame(query))[0]
+
+    def explain(
+        self, query: str, *, collection_stats: dict[str, float] | None = None
+    ) -> dict[str, object]:
+        """`predict` plus the three acceptability probabilities behind it."""
+        del collection_stats
+        frame = self._query_frame(query)
+        probs = self.probabilities(frame)
+        return {
+            "query": query,
+            "route": self.predict_routes(frame)[0],
+            **{f"p_ok_{name}": float(p[0]) for name, p in probs.items()},
+            "threshold": self.threshold,
+            "tolerance": self.tolerance,
+        }
+
+    def _query_frame(self, query: str) -> pd.DataFrame:
+        row: dict[str, object] = {"query": query}
+        if self._space.needs_engineered:
+            row.update(_extract_features(self._extractor, query))
+        return pd.DataFrame([row])
 
 
 def _binary_pipeline(C: float) -> Pipeline:
