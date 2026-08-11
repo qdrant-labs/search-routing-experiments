@@ -18,8 +18,10 @@ quirks (SPEC d46c).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from enum import StrEnum
+from functools import lru_cache
 from query_taxonomy.features import FeatureExtractor as _FE
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
@@ -29,6 +31,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from tqdm.auto import tqdm
+from wordfreq import zipf_frequency
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -67,7 +70,14 @@ _DERIVED_ENGINEERED = (
     "derived.identifier_density",
     "derived.avg_word_length",
     "derived.short_id_query",
+    "derived.min_zipf",
+    "derived.rare_token_share",
 )
+_RARE_ZIPF = 4.0
+# ≥2 letters: hex/identifier blobs shed single-letter fragments ('e', 'a')
+# that score as common words and mask the blob's rarity.
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+_ZIPF_LANGS = ("en", "es", "fr", "de", "pt")
 _ROUTE_ORDER = list(StrategyName)  # column/index order for the score matrix
 DENSE_IDX = _ROUTE_ORDER.index(StrategyName.DENSE_ONLY)
 RRF_IDX = _ROUTE_ORDER.index(StrategyName.PURE_RRF)
@@ -173,14 +183,30 @@ class FeatureSpace:
     def needs_embedding(self) -> bool:
         return self.representation != Representation.ENGINEERED
 
-    def fit(self, train: pd.DataFrame) -> FeatureSpace:
+    def fit(
+        self,
+        train: pd.DataFrame,
+        support: pd.DataFrame | None = None,
+        min_fires: int = 0,
+    ) -> FeatureSpace:
+        """Fix the column set (and PCA) on train; when `support` is given,
+        drop engineered columns nonzero on fewer than `min_fires` of its rows —
+        near-constant columns get tiny scaler stds, so a handful of firing
+        rows can saturate a binary's probability at serve time."""
         if self.needs_engineered:
             base = [
                 c
                 for c in train.columns
                 if _is_engineered(c) and c not in _DROPPED_ENGINEERED
             ]
-            self._engineered_cols = base + list(_DERIVED_ENGINEERED)
+            cols = base + list(_DERIVED_ENGINEERED)
+            if support is not None and min_fires > 0:
+                enriched = _derive_engineered(support)
+                counts = (
+                    enriched.reindex(columns=cols, fill_value=0.0) != 0
+                ).sum()
+                cols = [c for c in cols if counts[c] >= min_fires]
+            self._engineered_cols = cols
         if self.needs_embedding:
             if self._encoder is None:
                 raise ValueError(
@@ -261,12 +287,14 @@ class StrategyRouter:
         *,
         all_rows: bool | str = False,
         max_class_share: float | None = None,
+        min_fires: int = 20,
     ) -> StrategyRouter:
         """Fit both binaries on a substrate chosen by `all_rows`: 'decisive'
         (default, also False) = clear wins only, 'recommended' (also True) =
         every routes_differ row, 'all' = the whole frame with tied/all-zero
         rows entering as negatives for both binaries (they have no winner);
-        `max_class_share` seeded-downsamples majority classes."""
+        `max_class_share` seeded-downsamples majority classes; features firing
+        on fewer than `min_fires` substrate rows are excluded (0 disables)."""
         mode = {False: "decisive", True: "recommended"}.get(all_rows, all_rows)
         if mode == "all":
             rows = train
@@ -282,7 +310,7 @@ class StrategyRouter:
         winner = _winner(rows).where(_routes_differ(rows))
         if max_class_share is not None:
             rows, winner = _cap_class_share(rows, winner, max_class_share)
-        self._space.fit(train)
+        self._space.fit(train, support=rows, min_fires=min_fires)
         x = self._space.transform(rows)
         self._dense.fit(x, (winner == StrategyName.DENSE_ONLY).to_numpy())
         self._sparse.fit(x, (winner == StrategyName.SPARSE_ONLY).to_numpy())
@@ -388,9 +416,10 @@ class StrategyRouter:
 
 
 class AcceptabilityRouter:
-    """Three acceptability binaries (SPEC d60e): each head learns P(this
-    route is acceptable) from the d60 view's `ok_*` labels, and serving picks
-    the cheapest route whose probability clears `threshold`."""
+    """Three acceptability binaries (SPEC d60e): each head learns P(this route
+    is acceptable) from the d60 view's `ok_*` labels. `priority` carries the
+    cost policy d60e leaves in the inference rule — None serves the most
+    probable route, a route order serves the first one clearing `threshold`."""
 
     COST_ORDER = sorted(StrategyName, key=SERVING_COST.__getitem__)
 
@@ -403,12 +432,14 @@ class AcceptabilityRouter:
         extractor: FeatureExtractor | None = None,
         tolerance: float | None = None,
         threshold: float = DEFAULT_THRESHOLD,
+        priority: Sequence[StrategyName] | None = None,
     ) -> None:
         self.representation = representation
         self._space = FeatureSpace(representation, encoder, pca_dims)
         self._heads = {route: _binary_pipeline(C) for route in _ROUTE_ORDER}
         self.tolerance = tolerance  # None = the view's hit-parity default
         self.threshold = threshold
+        self.priority = priority
         self._extractor = extractor
 
     def fit(self, train: pd.DataFrame) -> AcceptabilityRouter:
@@ -427,14 +458,17 @@ class AcceptabilityRouter:
 
     def predict_routes(self, frame: pd.DataFrame) -> list[StrategyName]:
         probs = self.probabilities(frame)
-        matrix = np.column_stack([probs[r.value] for r in self.COST_ORDER])
+        order = list(self.priority or _ROUTE_ORDER)
+        matrix = np.column_stack([probs[r.value] for r in order])
+        if self.priority is None:
+            return [order[i] for i in matrix.argmax(axis=1)]
         fires = matrix >= self.threshold
-        # cheapest firing head; fallback while SPEC d60's deferred policy is
-        # open: the most probable route.
-        first_fired = fires.argmax(axis=1)
-        best_prob = matrix.argmax(axis=1)
-        idx = np.where(fires.any(axis=1), first_fired, best_prob)
-        return [self.COST_ORDER[i] for i in idx]
+        # first firing head in priority order; fallback while SPEC d60's
+        # deferred policy is open: the most probable route.
+        idx = np.where(
+            fires.any(axis=1), fires.argmax(axis=1), matrix.argmax(axis=1)
+        )
+        return [order[i] for i in idx]
 
     def probabilities(self, frame: pd.DataFrame) -> dict[str, np.ndarray]:
         x = self._space.transform(frame)
@@ -529,12 +563,29 @@ def _is_engineered(col: str) -> bool:
     return col not in IDENTITY_COLS and "." in col
 
 
+@lru_cache(maxsize=65536)
+def _token_zipf(token: str) -> float:
+    """Max zipf across the covered languages, so non-English common words
+    don't masquerade as rare anchors."""
+    return max(zipf_frequency(token, lang) for lang in _ZIPF_LANGS)
+
+
+def _query_rarity(text: str) -> tuple[float, float]:
+    """(min zipf, share of tokens below the rare cutoff) over the query's
+    alphabetic tokens; (0.0, 0.0) when no such tokens exist."""
+    zipfs = [_token_zipf(t.lower()) for t in _WORD_RE.findall(str(text))]
+    if not zipfs:
+        return 0.0, 0.0
+    rare = sum(z < _RARE_ZIPF for z in zipfs)
+    return min(zipfs), rare / len(zipfs)
+
+
 def _derive_engineered(frame: pd.DataFrame) -> pd.DataFrame:
-    """Append the F2 derived columns (SPEC d47a): identifier_density,
-    avg_word_length, short_id_query. Missing base columns default to 0 so
-    the serving path (a one-row frame carrying only fired features) works
-    without KeyError — same tolerance FeatureSpace.transform already uses
-    for the catalog block."""
+    """Append the derived columns: identifier_density, avg_word_length,
+    short_id_query, plus min_zipf / rare_token_share from the query text.
+    Missing base columns default to 0 so the serving path (a one-row frame
+    carrying only fired features) works without KeyError — same tolerance
+    FeatureSpace.transform already uses for the catalog block."""
     words = frame.get(_LENGTH_WORDS, pd.Series(0.0, index=frame.index))
     chars = frame.get(_LENGTH_CHARS, pd.Series(0.0, index=frame.index))
     id_cols = [c for c in frame.columns if c.startswith(_STRUCTURED_ID_PREFIX)]
@@ -547,11 +598,20 @@ def _derive_engineered(frame: pd.DataFrame) -> pd.DataFrame:
     identifier_density = id_sum / safe_words
     avg_word_length = chars / safe_words
     short_id_query = ((identifier_density > 0) & (words <= 5)).astype(float)
+    if "query" in frame.columns:
+        rarity = [_query_rarity(q) for q in frame["query"]]
+        min_zipf = pd.Series([r[0] for r in rarity], index=frame.index)
+        rare_share = pd.Series([r[1] for r in rarity], index=frame.index)
+    else:
+        min_zipf = pd.Series(0.0, index=frame.index)
+        rare_share = pd.Series(0.0, index=frame.index)
     return frame.assign(
         **{
             "derived.identifier_density": identifier_density,
             "derived.avg_word_length": avg_word_length,
             "derived.short_id_query": short_id_query,
+            "derived.min_zipf": min_zipf,
+            "derived.rare_token_share": rare_share,
         }
     )
 
