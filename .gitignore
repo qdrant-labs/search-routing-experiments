@@ -9,3 +9,4 @@ __pycache__
 **/.embedding_cache/
 **/.ipynb_checkpoints/
 docs/research
+**/.logs/
