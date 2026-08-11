@@ -41,6 +41,10 @@ class FusionRow(BaseModel):
     metric: float
     metric_name: str
     strategy_name: StrategyName
+    provenance: str = "natural"
+    """The query's own origin (`RetrievalDataset.provenance()`) — natural
+    unless the source declares otherwise. Defaulted so rows written before
+    this field existed still load."""
 
 
 class BaselineDataset(FusionRow):
@@ -81,6 +85,7 @@ class QueryContext(BaseModel):
     query: str
     gold_qrel: dict[str, int]
     dataset_name: str
+    provenance: str = "natural"
 
 
 T = TypeVar("T", bound=FusionRow)
@@ -165,6 +170,8 @@ class FusionBuilder(ABC, Generic[T]):
     ) -> Iterator[QueryContext]:
         store = qrels or QrelStore.from_dataset(dataset)
         by_query = store.lookup(dataset.name)
+        prov_df = dataset.provenance()
+        provenance = dict(zip(prov_df["query_id"].astype(str), prov_df["provenance"]))
         queries_df = dataset.queries()
         for i, q in enumerate(
             tqdm(
@@ -183,6 +190,7 @@ class FusionBuilder(ABC, Generic[T]):
                 query=str(q.text),
                 gold_qrel=gold,
                 dataset_name=dataset.name,
+                provenance=provenance.get(qid, "natural"),
             )
 
     def _row(
@@ -205,6 +213,7 @@ class FusionBuilder(ABC, Generic[T]):
             metric=score,
             metric_name=self.objective.name,
             strategy_name=strategy_name,
+            provenance=ctx.provenance,
             **extra,
         )
 

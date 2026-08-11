@@ -162,6 +162,33 @@ class BaseIndexer(ABC, Generic[T]):
             sparse_vectors_config=sparse_config or None,
         )
 
+    def missing(self, items: Sequence[T], batch_size: int = 1024) -> list[T]:
+        """Items whose point id is not in the collection yet — the upload set
+        for a corpus that grew, so adding one document costs one embedding
+        instead of re-embedding the lane.
+
+        Identity is the point id alone: edited text under an unchanged id is
+        deliberately NOT re-embedded, matching the behaviour of the count check
+        this replaces.
+        """
+        ids = [self.item_id(item) for item in items]
+        found: set[str] = set()
+        for chunk in _chunked(ids, batch_size):
+            found.update(
+                str(point.id)
+                for point in self.client.retrieve(
+                    collection_name=self.collection_name,
+                    ids=chunk,
+                    with_payload=False,
+                    with_vectors=False,
+                )
+            )
+        return [
+            item
+            for item, point_id in zip(items, ids, strict=True)
+            if str(point_id) not in found
+        ]
+
     def upload(
         self,
         items: Sequence[T],

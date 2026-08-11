@@ -12,6 +12,7 @@ trainable rows a 50K pool actually yields.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
@@ -27,9 +28,18 @@ from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
 from hybrid_search_rrf_dataset.lanes import LANES
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
-from hybrid_search_rrf_dataset.retrieval import QuerySubset, RetrievalDataset
+from hybrid_search_rrf_dataset.retrieval import (
+    QuerySubset,
+    QuerySupplement,
+    RetrievalDataset,
+)
+
+if TYPE_CHECKING:
+    from augmentation.config import AugmentationPaths
 
 DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "route_labels"
+
+Generation = Literal["floor_based", "cell_based"]
 
 ROUTES_DIFFER = "routes_differ"
 ALL_TIED = "all_tied"
@@ -64,6 +74,27 @@ def route_label(scores: dict[str, float]) -> str | None:
     return str(derive_route(scores))
 
 
+def _augmented_rows(
+    pool: pd.DataFrame, wanted: pd.DataFrame, home_lane: str, generation: Generation,
+) -> pd.DataFrame:
+    """This lane's augmentation-pool rows admissible for evaluation: `floor_based`
+    unconditionally once ungated, `cell_based` only once `wanted` already admits
+    them (SPEC d61). A gated row has no human-audited credit yet regardless of
+    generation — the d42h gate applies to both (2026-08-10 fix: `floor_based`
+    originally skipped this check, leaking 240 unaudited rows)."""
+    # lazy: composition/__init__ pulls in hybrid_search_rrf_dataset.router, which
+    # imports this module — a top-level import here would be circular (same
+    # reason augmentation/supply.py's lane_dirs() defers its own).
+    from composition.cells import CELLS_BY_NAME
+
+    rows = pool[pool["home_lane"] == home_lane]
+    rows = rows[rows["credit_gate"].fillna("none") == "none"]
+    if generation == "floor_based":
+        return rows[~rows["floor"].isin(CELLS_BY_NAME)]
+    admitted = set(wanted["query_id"].astype(str))
+    return rows[rows["query_id"].astype(str).isin(admitted)]
+
+
 class RouteLabels:
     """Builds and owns `data/route_labels/labels.parquet`."""
 
@@ -81,10 +112,15 @@ class RouteLabels:
         selection: pd.DataFrame,
         out_dir: Path | None = None,
         objective: Objective | None = None,
+        *,
+        augmentation_paths: AugmentationPaths | None = None,
     ) -> None:
+        from augmentation.config import AugmentationPaths  # lazy: see _augmented_rows
+
         self.selection = selection
         self.objective = objective or RouterObjective()
         self._out_dir = out_dir if out_dir is not None else DEFAULT_OUT_DIR
+        self._aug_paths = augmentation_paths or AugmentationPaths()
 
     @property
     def labels_path(self) -> Path:
@@ -108,13 +144,14 @@ class RouteLabels:
         dataset: str | None = None,
         qrels: QrelStore | None = None,
         force: bool = False,
+        generation: Generation = "cell_based",
     ) -> pd.DataFrame:
-        """Label this dataset's selection rows and merge into the artifact.
-
-        `dataset` names the selection's key for `source` when the two differ —
-        the composition calls BEIR NFCorpus `beir-nfcorpus` while the retrieval
-        class calls it `nfcorpus`. Re-labelling replaces that dataset's rows
-        only; every other dataset's labels are left untouched.
+        """Label this dataset's query_ids not already in the artifact, and
+        append. Already-labelled query_ids (natural or augmented) are never
+        rescored — `force` is the only way to redo one that already has a
+        row. `dataset` names the selection's key for `source` when the two
+        differ — the composition calls BEIR NFCorpus `beir-nfcorpus` while
+        the retrieval class calls it `nfcorpus`.
         """
         key = dataset or source.name
         wanted = self.rows_for(key)
@@ -122,8 +159,13 @@ class RouteLabels:
             raise ValueError(f"No selection rows for dataset {key!r}.")
 
         existing = self.load()
-        if not force and (existing.get("dataset") == key).any():
-            return existing[existing["dataset"] == key]
+        already = (
+            set()
+            if force
+            else set(
+                existing.loc[existing.get("dataset") == key, "query_id"].astype(str)
+            )
+        )
 
         subset = QuerySubset(source, wanted["query_id"])
         excluded_df = subset.excluded()
@@ -135,9 +177,40 @@ class RouteLabels:
             if not excluded_df.empty
             else None
         )
+
+        from augmentation.pool import GeneratedPool  # lazy: see _augmented_rows
+        from augmentation.qrels import AugmentationQrels
+
+        aug_rows = _augmented_rows(
+            GeneratedPool(self._aug_paths).load(), wanted, key, generation
+        )
+        if aug_rows.empty:
+            eval_dataset, eval_qrels = subset, qrels
+        else:
+            aug_ids = set(aug_rows["query_id"].astype(str))
+            matched = AugmentationQrels(self._aug_paths).load()
+            matched = matched[matched["query_id"].astype(str).isin(aug_ids)]
+            eval_dataset = QuerySupplement(
+                subset,
+                aug_rows[["query_id", "query", "provenance"]].rename(
+                    columns={"query": "text"}
+                ),
+                matched[["query_id", "doc_id", "relevance"]],
+            )
+            eval_qrels = QrelStore.concat([
+                qrels or QrelStore.from_dataset(source),
+                QrelStore(matched.assign(dataset=key)[QrelStore.COLUMNS]),
+            ])
+
+        missing = set(eval_dataset.queries()["query_id"].astype(str)) - already
+        if not missing:
+            return existing.iloc[:0]
+        if already:
+            eval_dataset = QuerySubset(eval_dataset, missing)
+
         rows = GoldenRoutingBuilder(
             dense, hybrid, sparse, objective=self.objective, excluded=exclusions
-        ).build(subset, qrels=qrels)
+        ).build(eval_dataset, qrels=eval_qrels)
 
         labelled = pd.DataFrame(
             [
@@ -151,14 +224,15 @@ class RouteLabels:
                     "shape": outcome_shape(row.route_scores),
                     "metric_name": row.metric_name,
                     "min_relevance": self.objective.min_relevance,
+                    "provenance": row.provenance,
                 }
                 for row in rows
             ]
         )
         if labelled.empty:
             raise ValueError(
-                f"{key!r}: no rows produced. Every selected query lacked "
-                f"judgments — check that the qrels cover this selection."
+                f"{key!r}: no rows produced for the {len(missing):,} new "
+                f"query_ids — check that the qrels cover them."
             )
         # one label per (dataset, query_id): a query in several cells appears
         # once in wanted per cell, so dedup before the merge or it fans out.
@@ -176,9 +250,12 @@ class RouteLabels:
             carry.rename(columns=clash), on="query_id", how="left"
         )
 
-        merged = pd.concat(
-            [existing[existing.get("dataset") != key], labelled], ignore_index=True
+        # keep every row this call didn't touch — force only replaces the
+        # query_ids it actually rescored, never the rest of the dataset
+        stale = (existing.get("dataset") == key) & (
+            existing["query_id"].astype(str).isin(missing)
         )
+        merged = pd.concat([existing[~stale], labelled], ignore_index=True)
         self.labels_path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_parquet(self.labels_path, index=False)
         return labelled
