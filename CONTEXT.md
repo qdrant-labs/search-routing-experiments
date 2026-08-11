@@ -34,9 +34,12 @@ only this scalar answered a router question. NUM left the set at d56: UD files
 numerals as closed-class, but this measure asks whether a query is grammatical
 glue or a keyword telegram, and a numeral is content — spaCy also tags bare
 identifiers NUM, so counting them scored `v1.2.3 nginx.conf 502` as one-third
-function words.
+function words. Membership is gated by the [[word-shape-guard]] since d62: the
+tag alone is a guess on any unseen token, and a 32-char hex digest tagged `AUX`
+scored 1.0 — a stronger signal than real prose.
 _Avoid_: POS profile (dead), closed_class_share (renamed by d26), POS as
-GLiNER entity labels, reading it as literal UD closed-class share
+GLiNER entity labels, reading it as literal UD closed-class share, trusting the
+tag on a token the pinned model never saw
 
 **The five signals**:
 The statistical-metrics group read as a panel: NL-shape
@@ -53,6 +56,17 @@ meaningful only where `natural_language_share` indicates natural language
 (the parser hallucinates structure on non-sentences).
 _Avoid_: reading a signal in isolation, labeling by signal, "the four
 signals" (superseded count)
+
+**Word-shape guard**:
+The rule that a closed-class token must be word-shaped — no digits — before it
+counts toward [[natural-language-signal]] (d62c). The POS tag is a *guess* for
+any token the tagger has not seen, and an unpredictable one: a 32-char hex
+digest tags `AUX` and scored as pure glue, while `deadbeefcafe1234` tags
+`NOUN`. Stated about token shape rather than about `AUX`, so a sibling tag on
+a future unseen token is covered without a second repair.
+_Avoid_: excluding one more tag (that is d56's shape, and it did not
+generalize), `is_alpha` (drops `'s`/`n't`), `is_oov` (true for every token
+under the pinned model)
 
 **Operator syntax**:
 Word-form boolean operators in uppercase (AND/OR/NOT) — the user deliberately
@@ -345,6 +359,19 @@ precedence when two lanes judge the same pair). A route label inherits the
 weakest source that produced it.
 _Avoid_: label quality, confidence (both suggest a score, not a provenance)
 
+**Supplement** (d61):
+Read-time addition of admitted augmented rows to a lane's own queries/qrels,
+never a mutation of the lane's persisted snapshot — `QuerySupplement` mirrors
+`QuerySubset`'s shape (wraps a `source: RetrievalDataset`) but adds rows
+instead of narrowing them. Chosen over "overlay" specifically because a
+supplement never replaces or shadows what's already there, only adds
+alongside it — the lane's own snapshot stays rebuildable from scratch without
+risk of losing augmented rows that were never written into it in the first
+place.
+_Avoid_: overlay (wrong connotation — implies covering/replacing what's
+underneath), merge (already means the qrels-conflict-precedence step
+specifically, a different operation)
+
 **Dark forest**:
 The feature-blind ~20% of the target dataset: random draws from queries that
 entered no cell, deliberately unconditioned on any extractor output —
@@ -515,6 +542,21 @@ pass per dataset. Greedy quota-fill selects *from* the table, so no prune
 phase exists; recipe tweaks re-run selection, never re-pay extraction. Also
 the future labeling-stage substrate and the audit trail.
 _Avoid_: 2D table (say feature table), re-extracting per recipe change
+
+**Identifier-span aggregate**:
+`derived.identifier_spans` — the column summing every
+`structured_identifiers.*` span count, so "this query carries no identifier of
+any kind" is one band rather than 54 (d62h). Derived on every read by
+`floors.with_derived` and applied at all three catalog-shaped producers; never
+stored, because a persisted sum can disagree with its parts after a bank
+change, and generated children reach cell matching through `mini_catalog`
+without touching the parquet at all. The `derived.` prefix is load-bearing:
+`SpanCountAxis` and `span_mask` sum everything under a group prefix, so a
+total named `structured_identifiers.*` would be counted twice by the coverage
+charts.
+_Avoid_: writing it into `catalog.parquet`, naming it under a span-group
+prefix (double-count), reading it as a boolean (it is a span count; absence is
+`below: 1`), enumerating member banks in a predicate
 
 **Recipe**:
 The global target distribution of the diversified dataset: quotas over

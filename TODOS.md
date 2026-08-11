@@ -1,5 +1,115 @@
 # TODOS
 
+## Augmented rows reach evaluation via read-time supplement (2026-08-10, SPEC decision 61)
+
+- [x] DONE 2026-08-10: `QuerySupplement` (retrieval/base.py), `_augmented_rows`
+      shared filter + `generation` param wired into `RouteLabels.label()`
+      (labels.py). Tests in tests/test_labels.py. Closes the "labels.py merge
+      of augmentation qrels" item open since d40's grill.
+- [x] `src/scripts/label_routes.py` — terminal sweep (index + label every
+      lane, cheapest corpus first), ports notebooks/route_labels.ipynb §16-17.
+- [x] `provenance` column on every labelled row (2026-08-10): threaded
+      natively through `RetrievalDataset.provenance()` → `QueryContext` →
+      `FusionRow`, not bolted on in `label()` — so `BaselineDataset`/
+      `HybridRoutingDataset` get it too, for free.
+- [x] FIXED same day: `_augmented_rows`'s `floor_based` branch never checked
+      `credit_gate`, so 240 gated rows (the exact ones behind the deferred
+      audit above) leaked into `labels.parquet` unreviewed for
+      beir-nfcorpus/crumb-legal-qa. Caught by eyeballing real provenance
+      values post-label, not by test — tests/test_labels.py now has a
+      regression case. Both lanes re-labelled clean; the other 18 lanes
+      from the interrupted floor_based sweep were never touched by the bug
+      (they hadn't run yet).
+- [x] FOUND AND FIXED later same day: the SAME leak had already reached 8
+      more lanes (bright-theoremqa-questions, crumb-tip-of-the-tongue,
+      crumb-theorem-retrieval, bright-aops, crumb-paper-retrieval,
+      rarb-math, crumb-set-operation-entity-retrieval, quest) — 66 gated
+      rows, from a run against the code before the fix above landed. Purged
+      by query_id (gated in the pool AND absent from `cell_selection.parquet`
+      -> never legitimately admitted). Separately, the naive
+      `provenance.fillna("natural")` backfill (done to close the "how do we
+      know" gap) wrongly overwrote 580 real augmented rows that had NaN
+      provenance for the same reason — corrected from the pool's own
+      provenance column, the actual source of truth. Lesson: a blanket
+      fillna over a column two independent pipelines write into is exactly
+      how a real augmented row silently becomes indistinguishable from a
+      natural one — the next such backfill needs to match on `query_id`
+      against `pool.parquet`, never against nulls alone.
+      Final clean state: 46,856 rows, 714 augmented (all decorate/floor-based
+      — zero cell-based rows have been labelled yet, `--generation
+      cell_based` hasn't been run to completion).
+- [x] `label()` made incremental (2026-08-10): skips per query_id already on
+      disk instead of per whole dataset — `--force` still means "redo
+      everything," the default path now only scores query_ids missing from
+      `labels.parquet` and appends, so adding a handful of new augmented
+      rows to an already-labelled lane no longer re-ranks the whole lane.
+      `RouteLabelSweep.run()`'s own dataset-level pre-skip removed (it would
+      have bypassed this and required `--force` for no reason). Verified
+      live: re-running an already-labelled lane is now a ~7s no-op instead
+      of a full re-rank.
+
+## Cell-based gated rows admitted WITHOUT the audit (2026-08-10, deliberate)
+
+User decision: don't wait for the audit tool below — admit the 377 gated
+cell-based rows now, validate later. `CellFill().admit()` was called against
+an in-memory copy of the pool with `credit_gate` forced to `none` for rows
+where `floor.isin(CELLS_BY_NAME)` — `pool.parquet` on disk was NOT touched,
+so it still honestly records these as unaudited (`coherence_gate` /
+`declaration_audit`). 308 of 377 were actually admitted (69 hit ordinary
+per-cell shortfall/lane-share caps, same as any admission — nothing to do
+with the bypass). `cell_selection.parquet`: 57,653 → 57,961 rows, across 15
+lanes (beir-nfcorpus, crumb-code-retrieval, crumb-legal-qa, rarb-code,
+crumb-clinical-trial, rarb-math, crumb-set-operation-entity-retrieval,
+crumb-tip-of-the-tongue, bright-aops, trec-dl-2022, crumb-paper-retrieval,
+antique, bright-theoremqa-questions, crumb-stack-exchange, scirgen-geo-en).
+
+- [ ] These 308 rows carry real routing labels once `label_routes.py
+      --generation cell_based` runs, but their underlying meaning-
+      preservation/coherence claim has never been human-checked. If the
+      audit tool below eventually rejects a declaration or a floor, its
+      rows already in `labels.parquet` need to be pulled back out — this is
+      the concrete cleanup debt the skip creates.
+- [ ] Re-running this same override is needed for any FUTURE campaign batch
+      that stages more cell-based gated rows — nothing here is a permanent
+      pipeline change, it's a one-off decision to redo each time until the
+      audit tool ships.
+
+## Gated-row human audit (d42h/d40e) — deferred, tool not built (2026-08-10)
+
+617 pool rows are staged and waiting: 113 across 3 DECLARATION_AUDIT entries
+((length_words, up): `length_words:60+` + `pasted_code_fragment`, 60 rows;
+(length_words, down): `bare_acronym` + `single_token_char_blob`, 21 rows;
+OperatorSyntaxRewrite's one declaration: `logical:operator_syntax` +
+`boolean_operator_query`, 32 rows — floors SHARE a declaration, so one pilot
+review unlocks every floor built on it, present and future) and 500 across
+Inject's 24 COHERENCE_GATE floors (per-row, no shared unlock — SPEC d40e's
+per-row LLM meaning-gate needs its own human-audited validation sample
+first).
+
+Confirmed this session (not assumed) why the loop's own `verify()`/
+`structural()` checks cannot substitute: every `structural()` implementation
+checks for *unauthorized addition* only (new content tokens, new spans,
+missing literal surfaces) — none of them check for readability or silently
+dropped/damaged meaning. Decorate's own `structural()` docstring says so
+explicitly: "no parent-relative machine check... the observed restructuring
+cases are exactly what that audit rules on." This is the real, narrow,
+still-needed gap — not leftover caution.
+
+- [ ] Build the audit tool (medium: a notebook, matching every other human-
+      review surface in this repo — route_labels.ipynb, augmentation_supply.ipynb,
+      selection_audit.ipynb). Open questions for when this is picked back up:
+      what exactly gets shown per row (parent query + child query + floor +
+      operator, at minimum); how a verdict gets written back to flip
+      `credit_gate`; for COHERENCE_GATE specifically, whether to review-and-
+      unlock row by row (500 rows, no new machinery) or run a smaller
+      diagnostic sample first to measure whether an LLM would agree with a
+      human often enough to justify building the d40e auto-gate (unlocks
+      nothing itself, a go/no-go measurement) — user has not chosen between
+      these yet.
+- [ ] Until this ships, the 377 cell-eligible gated rows (part of the 617)
+      stay unreachable by `CellFill.admit()` — `_admissible()` only pulls
+      ungated rows into `cell_selection.parquet`.
+
 ## Acceptability view over route labels (2026-08-07, SPEC decision 60)
 
 Design closed via grill-me. Ties are judgment-resolution artifacts (0 of
@@ -843,8 +953,9 @@ Next actions, in order — (1) and (2) block everything else:
       copies for inherit path); QrelSource.CONSTRUCTED inserted at
       rank 2 (closes d40b). first_generation_only=True constructor
       guard on every operator (d43 review). REMAINING (human): d40e
-      coherence pilot gates Inject credit; (code, later): labels.py
-      merge of augmentation qrels so admitted children get labelled.
+      coherence pilot gates Inject credit.
+      "labels.py merge of augmentation qrels" design closed 2026-08-10 —
+      see d61 and the new section below; ready for code-implementer.
 
 ## From corpus-conditioned-routing grill (2026-07-30, SPEC decision 44)
 
@@ -1111,3 +1222,74 @@ Next actions, in order — (1) and (2) block everything else:
       grounded snapshot (for future per-query NDCG correlation, i.e. the
       "labeling view" that d23 explicitly deferred). Unblocked: engine
       benchmark passed 2026-07-21 (src/data/benchmarks/engines.csv).
+
+## Opaque-token repairs: word-shape guard + identifier-class band (2026-08-10, SPEC decision 62)
+
+Design closed via grill-me. Two independent defects put a hex digest on the
+dense route: spaCy tags unseen tokens into closed classes (`nl_share` 1.0 on a
+32-char digest), and `bare_concept_token` bands only `number` out of 54
+identifier columns. Both prior repairs of this class (d56, d50c) were recorded
+against named artifacts and did not survive. Acceptance is the probe table, not
+an aggregate.
+
+Cell side — no re-extraction, lands first:
+
+- [x] Derived identifier-span aggregate column, summed from the
+      `structured_identifiers.*` columns, applied at all three catalog-shaped
+      producers (`TargetComposition.build`, `CellFill._catalog`,
+      `mini_catalog`). Derived, never stored (d62h).
+- [x] `bare_concept_token`, `keyword_telegram_short`,
+      `short_grammatical_question` band identifier absence as a class; the
+      now-subsumed `number` band goes. `bare_concept_token` also gains a
+      `sentence_markers.acronym` guard (`HTTP 502`).
+- [x] `test_a_short_concept_cell_admits_no_identifier` — a cell with a
+      `length_words` ceiling ≤ 10 that demands no identifier presence must band
+      the aggregate. Trigger reads length + identifier demand, never `predicts`.
+- [x] `test_parser_scalars_require_a_natural_language_floor` — any cell banding
+      `nesting_depth` / `statement_count` / `widest_list_size` must band an
+      `nl_share` floor. Passes on all four such cells today; the point is that
+      the next regeneration cannot drop it.
+- [x] `test_band_columns_exist_in_the_catalog` reads through the derivation, not
+      the raw parquet, or the new column fails it.
+- [ ] Re-run `CellFill().build(force=True)` — writes `cell_selection.parquet`,
+      NOT `selection.parquet` (that is `TargetComposition`'s d32 artifact), and
+      `build()` returns the cached file unless forced. Labels are reused on
+      overlap (d49g), so only backfill rows cost retrieval.
+- [x] Carried `cell` staleness on stored labels — NOTHING TO DO, verified
+      2026-08-10. 217 of 46,856 rows (0.46%) carry a `cell` the predicate no
+      longer claims, but `scripts/cell_divergence.py` (the d50e readout) reads
+      `cell` off `cell_selection.parquet` and merges on `(dataset, query_id)`;
+      nothing reads `labels["cell"]`. Rebuilding the selection is the fix. Do
+      not add a refresh method for a column no analysis path consults.
+- [x] Incremental corpus indexing (d62k) — DONE 2026-08-10.
+      `BaseIndexer.missing()` diffs point ids and uploads only the difference;
+      `_index()` keeps the count as the cheap grew?-trigger. Was: one new
+      document re-embedded the whole lane (119,976 docs for `crumb-code-
+      retrieval`). Never fired while lanes are frozen snapshots; fires every
+      round once d50(g) generation writes constructed documents.
+      `tests/test_indexer.py` pins the second-pass-uploads-nothing case.
+- [x] Corpus re-embedding for d62 — NONE NEEDED, verified 2026-08-10. `_index()` guards
+      on `client.count(collection) < len(corpus)` and `ensure_collection()`
+      no-ops when the collection exists; d62 changed no corpus. All 42 selected
+      lanes are already labelled, so already indexed. Re-check after the rebuild
+      with the selected-minus-labelled lane diff: non-empty means a lane needs
+      full corpus indexing.
+
+Bank side — BLOCKED on `src/query-taxonomy` going green (92 round-trip failures
+at `6008f40`):
+
+- [ ] Word-shape guard at the closed-class counting site (`metrics/pos.py`): a
+      digit-bearing token is never a function word. Comment states the rule, not
+      `AUX`.
+- [ ] Rebuild the catalog for digit-bearing queries only — a provable superset
+      of the 0.45% that can change.
+- [ ] Re-check the probe table; `nl_share` on the digest must read 0.0.
+
+Deferred by the grill — do not start (full text in SPEC "Deferred questions"):
+
+- Enumerated function-word lexicon replacing the POS test (d62c). Reopens on
+  evidence only: a pure-alpha out-of-vocabulary token observed landing in a
+  closed class. 0 of 13 sampled.
+- Stale `cell` values on rows labelled under the old predicate (d62f). Scores
+  are unaffected; any per-cell readout over existing labels reads the old
+  partition until a rebuild.

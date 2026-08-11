@@ -2439,6 +2439,174 @@ breadth; strategy labeling is explicitly a later stage.
     The acceptability view is how the dataset stays useful while they
     are.*
 
+61. **Admitted augmented rows reach evaluation by read-time supplement, not
+    by mutating a lane's own snapshot** (grill-me 2026-08-10; closes the
+    "labels.py merge of augmentation qrels" item open since d40's grill).
+    (a) *Diagnosis: two files, one silent gap.* `cell_selection.parquet`
+    records WHICH `query_id`s the composition wants scored; `QuerySubset`
+    (retrieval/base.py) narrows a lane's OWN `queries()`/`qrels()` down to
+    those ids but can only subtract, never add — a query_id absent from the
+    lane's persisted `queries.parquet` silently disappears from evaluation,
+    no error. Confirmed by grep: `CellFill.admit()` never touches any lane's
+    `queries.parquet`. An admitted augmented row would have valid qrels
+    (`AugmentationQrels`, d43d/d59-era `backfill()`) but no query text
+    anywhere retrieval reads from.
+    (b) *The qrels half of this was already designed for, never wired up.*
+    `QrelStore`/`QrelSource` (hybrid_search_rrf_dataset/qrels.py) already
+    merge judgments from multiple sources at READ time — `concat()` plus a
+    declared trust precedence (`HUMAN > CONSTRUCTED > CLICK > LLM`) — and
+    `QrelSource.CONSTRUCTED`'s own docstring names Inject rows explicitly.
+    Nothing calls `QrelStore.from_dataset`-equivalent construction against
+    `AugmentationQrels`'s data today; the mechanism exists, the caller
+    doesn't.
+    (c) *Query text follows the identical pattern: read-time, additive,
+    never a snapshot mutation.* No corpus reindexing or re-embedding is
+    ever needed — confirmed by reading `fusion.py`/`indexer.py`: dense and
+    sparse both embed the query string LIVE inside `rank()`, nothing is
+    precomputed or cached per query, and augmentation never adds documents,
+    only queries pointing at documents already indexed. Given that, physically
+    appending into each lane's `queries.parquet` would be the ONLY reason
+    to ever touch it, and doing so risks silently losing augmented rows on
+    the next `materialize_corpora.py` rebuild of that lane. Resolution:
+    `QuerySupplement`, mirroring `QuerySubset`'s exact shape (wraps a
+    `source: RetrievalDataset`, same constructor pattern) but ADDS rows to
+    `.queries()`/`.qrels()` instead of narrowing them. Named "supplement"
+    specifically over "overlay" (CONTEXT.md, d61): an overlay reads as
+    covering/replacing what's underneath; a supplement only adds alongside
+    it, which is the whole point — the lane's own snapshot stays exactly
+    reproducible from scratch.
+    (d) *Two generations of augmented row need different rules, so the
+    inclusion criterion is parametric, not hard-coded.* `floor` distinguishes
+    them by construction: a bare label (`marker:greeting`, `id:medical`, ...)
+    predates the d51 cell rebuild; a `CELLS_BY_NAME` member postdates it.
+    `generation: Literal["floor_based", "cell_based"] = "cell_based"` (named
+    for what each IS, not a version number). `"floor_based"` includes every
+    such pool row unconditionally — admission never applied to them (they
+    predate `CellFill`; they are already gate-free, `credit_gate="none"`, so
+    there was never a gate to clear either) — retrofitting an admission
+    check onto them would invent a rule that never governed their creation.
+    `"cell_based"` includes only rows whose `query_id` is already in
+    `cell_selection.parquet` — the credit-gate/admission pipeline (d42h)
+    stays the single source of truth for "counted," and a raw, unreviewed
+    `pool.parquet` row (today, most of it) must not become silently
+    evaluable.
+    (e) *One shared filter feeds both halves, so text and qrels can never
+    silently disagree about which rows are in.* A single function resolves
+    `(pool, cell_selection, generation) -> filtered pool rows`; `QuerySupplement`
+    reads `query_id`/`query` off it, the `QrelStore` builder reads
+    `query_id`/`doc_id`/`relevance`/`source` off the matching `AugmentationQrels`
+    rows for the same id set. Verified as a fact, not assumed: every
+    `home_lane` value in the current pool matches a real dataset-registry
+    name, so it is trustworthy as the lane key both pieces key off.
+    (f) *Scope: both halves, one decision.* Query text and qrels are two
+    views of the same filtered row set — building them separately now risks
+    them drifting apart on which rows count as "in" later.
+    — *The lane's own files are the ground truth for what it shipped;
+    augmentation's contribution is additive and provable from
+    `pool.parquet`/`qrels.parquet` alone. Nothing about "did this query get
+    evaluated" should ever require asking "did someone remember to append it
+    somewhere."*
+
+62. **Opaque tokens defeat two measurements at once; both repairs are stated as
+    rules and enforced by tests, never as named instances** (grill-me
+    2026-08-10; extends d56's `NUM` removal and d50(c)'s cell guards, each of
+    which repaired an instance and did not survive).
+    (a) *Diagnosis: two independent defects on one path.* The archetype probe
+    `a3f5d8b9e12c4d56789abcdef0123456` routes `dense_only`. Two inputs are
+    wrong and either alone is sufficient. FEATURE: `natural_language_share`
+    reads 1.0 — spaCy tags the unseen token `AUX`, a closed class, so a hex
+    digest scores as pure grammatical glue, above real prose at 0.4–0.5.
+    MEMBERSHIP: `bare_concept_token` claims it, the cell whose prior is
+    `dense_only`, so the training data teaches the same thing the feature
+    does. Repairing one alone leaves the probe failing.
+    (b) *The tag is a guess on any token the tagger has not seen, and the guess
+    is not systematic.* `deadbeefcafe1234` tags `NOUN` and is harmless; the
+    probe's digest tags `AUX` and counts as glue. d56 diagnosed the `NUM` case
+    as "not tagger noise, a definition mismatch" — true there, since UD really
+    does file numerals closed-class. It does not cover `AUX`: UD files no hex
+    digest as an auxiliary. The root cause is wider than d56 named, which is
+    why removing one tag did not end it.
+    (c) *The rule: a closed-class token must be word-shaped.* A closed class is
+    closed, and no member of English's contains a digit — so a digit-bearing
+    token is never a function word, whatever tag it carries. One condition at
+    the counting site, stated about token shape rather than about `AUX`, so a
+    sibling tag on a future unseen token is already covered. Alternatives
+    measured and refused: excluding `AUX` (the whack-a-mole d56 already lost
+    once); `token.is_alpha` (drops `'s` and `n't`, real function words out of
+    contractions); `token.is_oov` (true for every token under
+    `en_core_web_sm`, so it separates nothing).
+    (d) *Cost is small in aggregate and decisive where it counts.* 18 of 4,000
+    labelled queries change `nl_share` (0.45%), none by more than 0.15 — the
+    same shape as d56's own 24.8%-inflated / 2.0%-band-crossing split. Only a
+    query containing a digit can change value, so the rebuild filters to
+    digit-bearing rows, a provable superset, instead of the full 380K.
+    (e) *Scope is the natural-language bank alone, on evidence.* `MorphologyBank`
+    reads 0.000 on opaque input. `SyntacticDepthBank` genuinely hallucinates —
+    a bare UUID parses to `nesting_depth` 3.0, above a real question at 2.0 —
+    but every cell banding a parser scalar already carries a
+    `natural_language_share` floor, so the NL signal IS the guard for the
+    parser banks and repairing it restores the gate. That convention holds in
+    all four such cells today and nothing enforces it; (g) does.
+    (f) *`bare_concept_token`'s predicate contradicts its own `looks_like`, and
+    the repair must cover identifiers as a class.* The prose says "No digits,
+    no acronyms, no code, nothing verbatim-rare — opaque jargon belongs to the
+    identifier cells"; the predicate says only `length_words < 3` and
+    `number < 1`, and cells.yaml's header rules the predicate the sole matcher.
+    So it claims the digest, `ERR_CONNECTION_RESET` and `HTTP 502` alike. The
+    trap to avoid: the cell DOES band an identifier absence, so a test asking
+    "does this cell forbid an identifier?" passes while the bug stands — it
+    forbids 1 of 54. The invariant is about coverage, which is why the class
+    must be expressible as one column.
+    (g) *Both rules are enforced by tests in `tests/test_cells.py`, because SPEC
+    prose demonstrably cannot enforce them.* d50(c) guarded `uri_in_query` and
+    `opaque_token_any_domain`; d50(d) regenerated the cell set, both cells
+    stopped existing, and neither guard is among today's 44. Two tests, beside
+    the 14 already there: a short cell (a `length_words` ceiling ≤ 10) that
+    demands no identifier presence must band identifier absence as a class; and
+    a cell banding any parser scalar must band a `natural_language_share`
+    floor. The trigger reads length and identifier demand, never `predicts` —
+    d48(d) makes that a falsifiable prior, and a prior must no more drive an
+    invariant than it drives allocation.
+    (h) *The identifier aggregate is derived, never stored.* One column summing
+    the structured-identifier span counts, so the class is one band instead of
+    54 and the invariant is expressible at all. Storing it would create a sum
+    that can disagree with its parts after any bank change — the twin structure
+    CLAUDE.md forbids — and would not even suffice: three producers build
+    catalog-shaped rows, and `mini_catalog` builds them from `QueryFeatures`
+    for generated children without reading the parquet at all. The derivation
+    lives with the existing catalog-column convention and is applied at every
+    producer; nothing is re-extracted.
+    (i) *Sequencing: the cell side now, the bank side behind a green build.*
+    (f)–(h) need no re-extraction and can land immediately; labels key on
+    `(dataset, query_id)` and are reused on overlap (d49g), so a membership
+    change costs labelling only for newly selected rows. (c)–(d) land in the
+    nested `src/query-taxonomy` repo, whose round-trip suite is red (92
+    failures at `6008f40`) — a change made against a red build cannot be shown
+    to have broken nothing.
+    (j) *The probes are the acceptance test, not the aggregate.* Both repairs
+    are judged on `src/hybrid_search_rrf_dataset/probes.py` and
+    `route_experiments.ipynb` §7, where the affected rows are visible. At 0.45%
+    of queries and 3 of 44 cells, neither repair is expected to move a headline
+    mean, and quoting one as evidence either way would be reading noise.
+    (k) *Corpus indexing becomes incremental, because every repair path from
+    here assumes it* (amendment, same session). `_index()` re-uploaded an
+    ENTIRE lane whenever the collection held fewer points than the corpus —
+    119,976 re-embeds to add one document to `crumb-code-retrieval`, O(n)
+    embedding work per O(1) documents added. Harmless while every lane is a
+    frozen snapshot, which is why it had never fired; load-bearing the moment
+    d50(g)'s cell-conditioned generation writes its first constructed document,
+    since that lane then grows every round. `BaseIndexer.missing()` diffs
+    `item_id` — a deterministic `uuid5` of `doc_id`, so the building block was
+    already there — against the collection and uploads only the difference; the
+    point count stays as the cheap "did this corpus grow?" trigger. Accepted
+    limitation, recorded rather than left to be discovered: identity is the
+    point id alone, so edited text under an unchanged `doc_id` is not
+    re-embedded — exactly the behaviour of the count check it replaces.
+    — *Both prior repairs were correct, and both were lost: one to a sibling
+    tag, one to a regeneration. What makes this decision different is not a
+    better patch but that the rule outlives the artifact it was found on — a
+    test fails loudly where a decision paragraph waits to be read.*
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log
@@ -2498,3 +2666,22 @@ breadth; strategy labeling is explicitly a later stage.
 - Stale `beir-nfcorpus_oracle` cache: 323 upstream queries vs the 12 the
   composition selects — rebuild or delete before any oracle-pooled readout is
   quoted as exact.
+- Enumerated function-word lexicon replacing the POS test entirely (d62c).
+  A closed class has finite membership, so membership could be looked up
+  rather than inferred — immune to every tagger guess, alpha or not. Costs a
+  hand-maintained vocabulary and redefines the signal from POS-based to
+  lexicon-based. Reopen on evidence, not taste: a pure-alpha out-of-vocabulary
+  token observed landing in a closed class (0 of 13 sampled).
+- Stale `cell` values on already-labelled rows after a predicate change (d62f).
+  `RouteLabels.CARRIED` copies `cell` onto every label at `label()` time, so
+  rows labelled under the old `bare_concept_token` predicate keep a membership
+  the cell no longer claims — 217 of 46,856 measured. Harmless to the scores,
+  which are measured facts and must NOT be deleted when a row leaves a cell:
+  three retrieval runs bought them, leaving a cell does not make a measurement
+  wrong, and a later predicate may claim the row back. No refresh is needed
+  today and none should be built: the canonical per-cell readout
+  (`scripts/cell_divergence.py`) reads `cell` off `cell_selection.parquet` and
+  merges rankings on `(dataset, query_id)`, exactly as `label()`'s own comment
+  says — so rebuilding the selection makes every joined readout correct and the
+  carried column is a stale copy nothing consults. Reopen only if something
+  starts reading `labels["cell"]` directly.
