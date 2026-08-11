@@ -8,6 +8,7 @@ from hybrid_search_rrf_dataset.retrieval.base import (
     CorpusRecipe,
     MaterializedDataset,
     QuerySubset,
+    QuerySupplement,
     RetrievalDataset,
     SnapshotDataset,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "NFCorpus",
     "OrcasLane",
     "QuerySubset",
+    "QuerySupplement",
     "QuestLane",
     "RarbLane",
     "RetrievalDataset",
