@@ -20,7 +20,7 @@ from dataset_registry import DATASETS
 from dataset_registry.core import RegistryDataset
 
 from composition.fill import DEFERRED, QRELS, FloorLedger
-from composition.floors import SpanFloorDeriver, span_mask
+from composition.floors import SpanFloorDeriver, span_mask, with_derived
 from composition.recipe import Recipe
 from composition.slices import (
     DarkForestSlice,
@@ -68,7 +68,7 @@ class TargetComposition:
     def build(self, *, force: bool = False) -> pd.DataFrame:
         if self.selection_path.exists() and not force:
             return pd.read_parquet(self.selection_path)
-        catalog = (
+        catalog = with_derived(
             pd.read_parquet(self._catalog_path)
             .sort_values(["dataset", "query_id"], kind="stable")
             .reset_index(drop=True)

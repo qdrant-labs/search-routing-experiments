@@ -20,7 +20,7 @@ from query_taxonomy.features import FeatureExtractor
 from composition.cells import CELLS, ArchetypeCell
 from composition.compose import DEFAULT_CATALOG, DEFAULT_OUT_DIR, join_text
 from composition.fill import QRELS, FloorLedger
-from composition.floors import FloorSpec
+from composition.floors import FloorSpec, with_derived
 from composition.mini_catalog import mini_catalog
 from composition.recipe import Recipe
 
@@ -336,7 +336,7 @@ class CellFill:
 
     def _catalog(self) -> pd.DataFrame:
         """The catalog with the decisive labels joined on (dataset, query_id)."""
-        catalog = (
+        catalog = with_derived(
             pd.read_parquet(self._catalog_path)
             .sort_values(["dataset", "query_id"], kind="stable")
             .reset_index(drop=True)

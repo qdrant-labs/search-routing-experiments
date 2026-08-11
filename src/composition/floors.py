@@ -141,3 +141,18 @@ def span_mask(catalog: pd.DataFrame) -> pd.Series:
     """Rows carrying >=1 span of any group — the entity population."""
     columns = [c for c in catalog.columns if c.startswith(SPAN_PREFIXES)]
     return catalog[columns].sum(axis=1) > 0
+
+
+IDENTIFIER_SPANS = "derived.identifier_spans"
+"""Total structured-identifier spans on a row, so "carries no identifier of
+any kind" is one band instead of one per bank. Deliberately OUTSIDE the span
+prefixes: `SpanCountAxis` and `span_mask` sum everything under a group prefix,
+and a total living there would be counted twice."""
+
+
+def with_derived(catalog: pd.DataFrame) -> pd.DataFrame:
+    """The catalog plus the columns no bank emits — derived on every read so
+    the total can never disagree with the parts it sums."""
+    prefix = f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
+    columns = [c for c in catalog.columns if c.startswith(prefix)]
+    return catalog.assign(**{IDENTIFIER_SPANS: catalog[columns].sum(axis=1)})

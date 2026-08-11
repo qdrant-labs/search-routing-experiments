@@ -18,7 +18,9 @@ cells:
   predicate:
   - column: length.length_words
     below: 3
-  - column: structured_identifiers.number
+  - column: derived.identifier_spans
+    below: 1
+  - column: sentence_markers.acronym
     below: 1
   predicts:
   - dense_only
@@ -42,7 +44,7 @@ cells:
     below: 7
   - column: natural_language_signal.natural_language_share
     at_least: 0.4
-  - column: structured_identifiers.number
+  - column: derived.identifier_spans
     below: 1
   predicts:
   - dense_only
@@ -224,7 +226,7 @@ cells:
   - column: length.length_words
     at_least: 3
     below: 7
-  - column: structured_identifiers.number
+  - column: derived.identifier_spans
     below: 1
   predicts:
   - dense_only
