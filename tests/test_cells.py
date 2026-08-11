@@ -12,9 +12,19 @@ from augmentation.operators import _span_names, default_operators, operator_for
 from composition.cell_targets import generation_branches
 from composition.cells import CELLS, ArchetypeCell, AxisBand
 from composition.compose import DEFAULT_CATALOG
+from composition.floors import IDENTIFIER_SPANS, with_derived
 from taxonomy_generators.verify import SpanTarget, Targets
 
 IDENTIFIERS = "structured_identifiers."
+LENGTH_WORDS = "length.length_words"
+NL_SHARE = "natural_language_signal.natural_language_share"
+PARSER_SCALARS = (
+    "syntactic_depth.nesting_depth",
+    "syntactic_depth.statement_count",
+    "coordination.widest_list_size",
+)
+SHORT_CEILING = 10
+"""Word ceiling under which one opaque token dominates the whole query."""
 
 
 def test_cells_have_unique_names():
@@ -215,11 +225,81 @@ def test_a_cut_reads_the_gold_document_when_one_is_known():
     assert "must still be found" not in blind
 
 
+def _length_ceiling(cell: ArchetypeCell) -> float | None:
+    return next(
+        (b.below for b in cell.bands if b.column == LENGTH_WORDS and b.below),
+        None,
+    )
+
+
+def _demands_content(cell: ArchetypeCell) -> bool:
+    """Whether the cell asks for anything positive beyond being short — a span
+    it is built around, or the character mass that marks a blob. A cell that
+    asks for neither is claiming "short and ordinary" and must say the second
+    half out loud."""
+    return bool(cell.required_banks) or any(
+        b.column == "length.length_chars" and b.at_least for b in cell.bands
+    )
+
+
+def _forbids_identifiers(cell: ArchetypeCell) -> bool:
+    return any(
+        b.column == IDENTIFIER_SPANS and b.below is not None and b.below <= 1
+        for b in cell.bands
+    )
+
+
+def test_a_short_concept_cell_admits_no_identifier():
+    """A short cell demanding nothing of its content must forbid identifiers as
+    a CLASS, not one bank at a time — guarding a single column passes this shape
+    of test while every other opaque token still falls in (SPEC d62f)."""
+    sinks = [
+        cell.name
+        for cell in CELLS
+        if (ceiling := _length_ceiling(cell)) is not None
+        and ceiling <= SHORT_CEILING
+        and not _demands_content(cell)
+        and not _forbids_identifiers(cell)
+    ]
+    assert not sinks, sinks
+
+
+def test_parser_scalars_require_a_natural_language_floor():
+    """The parser invents structure on non-sentences — a bare UUID reads
+    nesting_depth 3.0, above a real question — so the scalar only means
+    anything above a natural-language floor."""
+    unguarded = [
+        cell.name
+        for cell in CELLS
+        if any(b.column in PARSER_SCALARS for b in cell.bands)
+        and not any(
+            b.column == NL_SHARE and b.at_least is not None for b in cell.bands
+        )
+    ]
+    assert not unguarded, unguarded
+
+
+def test_derived_identifier_spans_totals_the_banks():
+    frame = pd.DataFrame({
+        f"{IDENTIFIERS}uuid": [1.0, 0.0],
+        f"{IDENTIFIERS}cve": [2.0, 0.0],
+        "sentence_markers.acronym": [5.0, 5.0],
+        LENGTH_WORDS: [1.0, 2.0],
+    })
+    assert list(with_derived(frame)[IDENTIFIER_SPANS]) == [3.0, 0.0]
+
+
+def test_derived_identifier_spans_stays_out_of_the_span_prefixes():
+    """`SpanCountAxis` and `span_mask` sum everything under a group prefix; a
+    total living there would be counted twice."""
+    assert not IDENTIFIER_SPANS.startswith(IDENTIFIERS)
+
+
 @pytest.mark.skipif(not DEFAULT_CATALOG.exists(), reason="feature table not built")
 def test_band_columns_exist_in_the_catalog():
     import pandas as pd
 
-    columns = set(pd.read_parquet(DEFAULT_CATALOG).columns)
+    columns = set(with_derived(pd.read_parquet(DEFAULT_CATALOG)).columns)
     absent = sorted(
         band.column
         for cell in CELLS

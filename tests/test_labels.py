@@ -4,9 +4,12 @@ import pytest
 from hybrid_search_rrf_dataset.labels import (
     AcceptabilityLabels,
     RouteLabels,
+    _augmented_rows,
     route_label,
 )
+from hybrid_search_rrf_dataset.fusion import StrategyName
 from hybrid_search_rrf_dataset.objective import NDCGObjective, RouterObjective
+from hybrid_search_rrf_dataset.retrieval import QuerySupplement
 
 
 @pytest.fixture
@@ -135,3 +138,207 @@ def test_acceptability_per_shape(shaped_frame):
     # sparse alone clears; the others miss by more than the tolerance
     assert view.loc["sparse_wins", "serve"] == "sparse_only"
     assert not bool(view.loc["sparse_wins", "ok_dense_only"])
+
+
+class _StubSource:
+    """A RetrievalDataset stand-in: fixed frames, no corpus/retrieval work."""
+
+    name = "nfcorpus"
+
+    def __init__(self, queries: pd.DataFrame, qrels: pd.DataFrame) -> None:
+        self._queries, self._qrels = queries, qrels
+
+    def queries(self) -> pd.DataFrame:
+        return self._queries
+
+    def qrels(self) -> pd.DataFrame:
+        return self._qrels
+
+    def excluded(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=["query_id", "doc_id"])
+
+    def provenance(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=["query_id", "provenance"])
+
+
+def test_query_supplement_provenance_reports_only_the_extra_rows():
+    source = _StubSource(
+        queries=pd.DataFrame({"query_id": ["1"], "text": ["natural"]}),
+        qrels=pd.DataFrame({"query_id": ["1"], "doc_id": ["D1"], "relevance": [1]}),
+    )
+    supplement = QuerySupplement(
+        source,
+        pd.DataFrame({
+            "query_id": ["aug-1"], "text": ["augmented"], "provenance": ["doc_grounded"],
+        }),
+        pd.DataFrame({"query_id": ["aug-1"], "doc_id": ["D2"], "relevance": [1]}),
+    )
+    prov = supplement.provenance()
+    assert list(prov["query_id"]) == ["aug-1"]
+    assert list(prov["provenance"]) == ["doc_grounded"]
+
+
+def test_query_supplement_provenance_empty_without_a_provenance_column():
+    source = _StubSource(pd.DataFrame(columns=["query_id", "text"]), pd.DataFrame())
+    supplement = QuerySupplement(
+        source,
+        pd.DataFrame({"query_id": ["aug-1"], "text": ["augmented"]}),
+        pd.DataFrame(columns=["query_id", "doc_id", "relevance"]),
+    )
+    assert supplement.provenance().empty
+
+
+def test_query_supplement_adds_rows_without_touching_the_source():
+    source = _StubSource(
+        queries=pd.DataFrame({"query_id": ["1"], "text": ["natural"]}),
+        qrels=pd.DataFrame({"query_id": ["1"], "doc_id": ["D1"], "relevance": [1]}),
+    )
+    supplement = QuerySupplement(
+        source,
+        pd.DataFrame({"query_id": ["aug-1"], "text": ["augmented"]}),
+        pd.DataFrame({"query_id": ["aug-1"], "doc_id": ["D2"], "relevance": [1]}),
+    )
+    assert list(supplement.queries()["query_id"]) == ["1", "aug-1"]
+    assert list(source.queries()["query_id"]) == ["1"], "source frame is untouched"
+    assert list(supplement.qrels()["doc_id"]) == ["D1", "D2"]
+
+
+def test_augmented_rows_floor_based_ignores_admission():
+    """A pre-d51 bare-label row counts even when `wanted` never admitted it —
+    admission never applied to that generation (SPEC d61d)."""
+    pool = pd.DataFrame([{
+        "home_lane": "nfcorpus", "floor": "marker:greeting",
+        "query_id": "q1", "query": "hi there", "credit_gate": "none",
+    }])
+    wanted = pd.DataFrame({"query_id": []})
+    rows = _augmented_rows(pool, wanted, "nfcorpus", "floor_based")
+    assert list(rows["query_id"]) == ["q1"]
+
+
+def test_augmented_rows_floor_based_still_excludes_gated_rows():
+    """2026-08-10 regression: a bare (non-cell) floor can still be gated —
+    id:medical/id:network/etc are floor_based AND coherence_gate. Admission
+    never applying to floor_based must not be read as 'never gated' too."""
+    pool = pd.DataFrame([
+        {"home_lane": "nfcorpus", "floor": "marker:greeting",
+         "query_id": "ungated", "query": "hi there", "credit_gate": "none"},
+        {"home_lane": "nfcorpus", "floor": "id:medical",
+         "query_id": "gated", "query": "MED-123", "credit_gate": "coherence_gate"},
+    ])
+    wanted = pd.DataFrame({"query_id": []})
+    rows = _augmented_rows(pool, wanted, "nfcorpus", "floor_based")
+    assert list(rows["query_id"]) == ["ungated"]
+
+
+def test_augmented_rows_cell_based_requires_admission():
+    """A post-d51 cell-name row only counts once `wanted` (cell_selection)
+    already holds it; an unreviewed pool row must not leak in (SPEC d61d)."""
+    pool = pd.DataFrame([
+        {"home_lane": "nfcorpus", "floor": "bare_concept_token",
+         "query_id": "admitted", "query": "x", "credit_gate": "none"},
+        {"home_lane": "nfcorpus", "floor": "bare_concept_token",
+         "query_id": "not_admitted", "query": "y", "credit_gate": "none"},
+    ])
+    wanted = pd.DataFrame({"query_id": ["admitted"]})
+    rows = _augmented_rows(pool, wanted, "nfcorpus", "cell_based")
+    assert list(rows["query_id"]) == ["admitted"]
+
+
+class _StubStrategy:
+    """A FusionStrategy stand-in that records every query it's asked to
+    rank — the proof an already-labelled query_id was never rescored."""
+
+    def __init__(self, name: StrategyName, rankings: dict, seen: list) -> None:
+        self.name = name
+        self._rankings = rankings
+        self._seen = seen
+
+    def rank(self, query: str) -> dict:
+        self._seen.append(query)
+        return self._rankings.get(query, {})
+
+
+def test_label_never_rescores_a_query_id_already_on_disk(tmp_path):
+    """2026-08-10: label() must be incremental — a query_id already in
+    labels.parquet is never re-ranked, only newly-arrived ones are. Proven
+    by _StubStrategy's call log, not just the row count."""
+    from augmentation.config import AugmentationPaths
+
+    aug_paths = AugmentationPaths(data_dir=tmp_path)  # no pool.parquet here —
+    # _augmented_rows must see an empty pool, never the real project's
+
+    seen: list[str] = []
+    rankings = {"alpha": {"D1": 1.0}, "beta": {"D2": 1.0}}
+
+    def strategies():
+        return (
+            _StubStrategy(StrategyName.DENSE_ONLY, rankings, seen),
+            _StubStrategy(StrategyName.PURE_RRF, rankings, seen),
+            _StubStrategy(StrategyName.SPARSE_ONLY, rankings, seen),
+        )
+
+    selection = pd.DataFrame({
+        "dataset": ["nfcorpus", "nfcorpus"], "query_id": ["q1", "q2"],
+    })
+    labels = RouteLabels(selection, out_dir=tmp_path, augmentation_paths=aug_paths)
+    source = _StubSource(
+        queries=pd.DataFrame({"query_id": ["q1", "q2"], "text": ["alpha", "beta"]}),
+        qrels=pd.DataFrame({
+            "query_id": ["q1", "q2"], "doc_id": ["D1", "D2"], "relevance": [1, 1],
+        }),
+    )
+
+    first = labels.label(source, *strategies(), dataset="nfcorpus")
+    assert sorted(first["query_id"]) == ["q1", "q2"]
+    assert sorted(seen) == ["alpha", "alpha", "alpha", "beta", "beta", "beta"]
+
+    # a 3rd query lands in the selection later (composition growth); q1/q2
+    # must not be reranked even though the same dataset key is reused
+    seen.clear()
+    rankings["gamma"] = {"D3": 1.0}
+    labels.selection = pd.DataFrame({
+        "dataset": ["nfcorpus"] * 3, "query_id": ["q1", "q2", "q3"],
+    })
+    source3 = _StubSource(
+        queries=pd.DataFrame({
+            "query_id": ["q1", "q2", "q3"], "text": ["alpha", "beta", "gamma"],
+        }),
+        qrels=pd.DataFrame({
+            "query_id": ["q1", "q2", "q3"], "doc_id": ["D1", "D2", "D3"],
+            "relevance": [1, 1, 1],
+        }),
+    )
+
+    second = labels.label(source3, *strategies(), dataset="nfcorpus")
+    assert list(second["query_id"]) == ["q3"]
+    assert seen == ["gamma", "gamma", "gamma"]
+
+    on_disk = labels.load()
+    assert sorted(on_disk["query_id"]) == ["q1", "q2", "q3"]
+
+
+def test_label_with_force_rescores_everything(tmp_path):
+    """`force=True` is still the escape hatch for a real redo (a strategy or
+    objective change) — it must rescore query_ids that already have a row."""
+    from augmentation.config import AugmentationPaths
+
+    aug_paths = AugmentationPaths(data_dir=tmp_path)
+    seen: list[str] = []
+    rankings = {"alpha": {"D1": 1.0}}
+    selection = pd.DataFrame({"dataset": ["nfcorpus"], "query_id": ["q1"]})
+    labels = RouteLabels(selection, out_dir=tmp_path, augmentation_paths=aug_paths)
+    source = _StubSource(
+        queries=pd.DataFrame({"query_id": ["q1"], "text": ["alpha"]}),
+        qrels=pd.DataFrame({"query_id": ["q1"], "doc_id": ["D1"], "relevance": [1]}),
+    )
+    def strategies():
+        return (
+            _StubStrategy(StrategyName.DENSE_ONLY, rankings, seen),
+            _StubStrategy(StrategyName.PURE_RRF, rankings, seen),
+            _StubStrategy(StrategyName.SPARSE_ONLY, rankings, seen),
+        )
+
+    labels.label(source, *strategies(), dataset="nfcorpus")
+    seen.clear()
+    labels.label(source, *strategies(), dataset="nfcorpus", force=True)
+    assert seen == ["alpha", "alpha", "alpha"]

@@ -9,6 +9,8 @@ import pandas as pd
 
 from query_taxonomy.features import FeatureExtractor, QueryFeatures
 
+from composition.floors import with_derived
+
 
 def feature_columns(features: QueryFeatures) -> dict[str, float]:
     """The catalog column convention (scripts/feature_table.py): span counts as
@@ -45,4 +47,5 @@ def mini_catalog(
         records.append(record)
     mini = pd.DataFrame(records)
     absent = [column for column in columns if column not in mini.columns]
-    return mini.reindex(columns=[*mini.columns, *absent]).fillna(0.0)
+    filled = mini.reindex(columns=[*mini.columns, *absent]).fillna(0.0)
+    return with_derived(filled)

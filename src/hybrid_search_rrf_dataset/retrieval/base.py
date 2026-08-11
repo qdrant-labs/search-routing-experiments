@@ -38,6 +38,13 @@ class RetrievalDataset(ABC):
         most datasets; applied at scoring time, never by dropping corpus docs."""
         return pd.DataFrame(columns=["query_id", "doc_id"])
 
+    def provenance(self) -> pd.DataFrame:
+        """Per-query origin (query_id, provenance) for queries this dataset
+        knows are NOT its own natural rows. Empty for most datasets — a query
+        absent here is natural by convention (`golden.py`'s `_iter_queries`
+        default), so ordinary sources never need to enumerate the obvious."""
+        return pd.DataFrame(columns=["query_id", "provenance"])
+
     @staticmethod
     def _queries_frame(dataset: Any) -> pd.DataFrame:
         return pd.DataFrame(
@@ -160,6 +167,57 @@ class QuerySubset(RetrievalDataset):
         return excluded[excluded["query_id"].astype(str).isin(self._ids)].reset_index(
             drop=True
         )
+
+
+class QuerySupplement(RetrievalDataset):
+    """A dataset with extra queries and judgments layered on top of a source,
+    keeping the source's own queries/qrels exactly as they are.
+
+    Mirrors `QuerySubset`'s constructor shape but ADDS rows instead of
+    narrowing them — named "supplement" rather than "overlay" (SPEC d61): an
+    overlay reads as covering what's underneath, a supplement only adds
+    alongside it, so the source's own snapshot stays exactly reproducible
+    from scratch. `extra_queries`/`extra_qrels` use the same column contract
+    as `queries()`/`qrels()` respectively.
+    """
+
+    def __init__(
+        self,
+        source: RetrievalDataset,
+        extra_queries: pd.DataFrame,
+        extra_qrels: pd.DataFrame,
+    ) -> None:
+        self.name = source.name
+        self._source = source
+        self._extra_queries = extra_queries
+        self._extra_qrels = extra_qrels
+
+    def corpus(self) -> pd.DataFrame:
+        return self._source.corpus()
+
+    def queries(self) -> pd.DataFrame:
+        added = pd.concat(
+            [self._source.queries(), self._extra_queries[QUERY_COLUMNS]],
+            ignore_index=True,
+        )
+        return added.drop_duplicates("query_id", keep="first").reset_index(drop=True)
+
+    def qrels(self) -> pd.DataFrame:
+        added = pd.concat(
+            [self._source.qrels(), self._extra_qrels[QREL_COLUMNS]],
+            ignore_index=True,
+        )
+        return added.drop_duplicates(
+            ["query_id", "doc_id"], keep="first"
+        ).reset_index(drop=True)
+
+    def excluded(self) -> pd.DataFrame:
+        return self._source.excluded()
+
+    def provenance(self) -> pd.DataFrame:
+        if "provenance" not in self._extra_queries.columns:
+            return pd.DataFrame(columns=["query_id", "provenance"])
+        return self._extra_queries[["query_id", "provenance"]]
 
 
 class CorpusRecipe(NamedTuple):

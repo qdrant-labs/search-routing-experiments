@@ -32,9 +32,21 @@ def test_fit_predict_smoke(train_frame):
 
 
 def test_everything_fires_serves_cheapest(train_frame):
-    router = AcceptabilityRouter(Representation.ENGINEERED, threshold=0.0)
+    router = AcceptabilityRouter(
+        Representation.ENGINEERED,
+        threshold=0.0,
+        priority=AcceptabilityRouter.COST_ORDER,
+    )
     routes = router.fit(train_frame).predict_routes(train_frame)
     assert routes == [StrategyName.SPARSE_ONLY] * len(train_frame)
+
+
+def test_no_priority_serves_most_probable(train_frame):
+    """The default rule carries no cost policy — highest P(ok) wins."""
+    router = AcceptabilityRouter(Representation.ENGINEERED).fit(train_frame)
+    probs = router.probabilities(train_frame)
+    for i, route in enumerate(router.predict_routes(train_frame)):
+        assert probs[route.value][i] == max(p[i] for p in probs.values())
 
 
 def test_probabilities_shape(train_frame):
