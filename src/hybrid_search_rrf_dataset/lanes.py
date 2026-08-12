@@ -46,7 +46,9 @@ class Lane(NamedTuple):
 
 
 LANES: dict[str, Lane] = {
-    "beir-nfcorpus": Lane(NFCorpus()),
+    # grade 1 (95% of the qrel file) marks weakly-related docs; counting
+    # them as successes lets every route "succeed" and manufactures ties
+    "beir-nfcorpus": Lane(NFCorpus(), min_relevance=2),
     # own materialize(): MSMarcoDev sizes from corpus_size, not the recipe;
     # corpus_target is its fallback for that param (100K matches the value
     # this lane was already indexed at) — pin it, don't let the recipe apply.
