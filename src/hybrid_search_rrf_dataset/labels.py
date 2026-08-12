@@ -387,33 +387,40 @@ class RouteLabels:
     def coverage(self) -> pd.DataFrame:
         """Per-dataset progress: selected rows vs labelled, and the shape split.
 
-        `qrels_ready` counts selected rows whose lane has qrels on disk but no
-        label yet — the corpus-pending state between pass 1 and pass 2 (SPEC
-        d39b). `unlabelled` is just `selected - labelled`; it asserts no
-        cause. In practice a row is unlabelled because its lane's qrels are
-        not fetched, its corpus is not indexed, or the source never judged it.
+        Every column counts SELECTED rows only, via a key join —
+        labels.parquet keeps rows from earlier, larger selections (measured
+        scores are never deleted when a row leaves the selection), so a bare
+        per-dataset label count overstates progress and once drove
+        `unlabelled` negative. `qrels_ready` counts selected rows whose lane
+        has qrels on disk but no label yet — the corpus-pending state between
+        pass 1 and pass 2 (SPEC d39b). A row is unlabelled because its lane's
+        qrels are not fetched, its corpus is not indexed, or the source never
+        judged it.
         """
         labels = self.load()
-        counts = (
-            labels.groupby(["dataset", "shape"]).size().unstack(fill_value=0)
+        shapes = (
+            labels[["dataset", "query_id", "shape"]]
+            .drop_duplicates(["dataset", "query_id"])
             if "shape" in labels.columns and not labels.empty
-            else pd.DataFrame()
+            else pd.DataFrame(columns=["dataset", "query_id", "shape"])
         )
-        none_yet: pd.Series = pd.Series(dtype=int)
+        merged = self.selection[["dataset", "query_id"]].merge(
+            shapes, on=["dataset", "query_id"], how="left"
+        )
         rows = []
-        for dataset, selected in self.selection["dataset"].value_counts().items():
-            shapes = counts.loc[dataset] if dataset in counts.index else none_yet
-            done = int(shapes.sum())
+        for dataset, picked in merged.groupby("dataset", sort=False):
+            done = int(picked["shape"].notna().sum())
+            counts = picked["shape"].value_counts()
             rows.append(
                 {
                     "dataset": dataset,
-                    "selected": int(selected),
+                    "selected": len(picked),
                     "labelled": done,
                     "qrels_ready": self._qrels_ready(dataset, done),
-                    "unlabelled": int(selected) - done,
-                    ROUTES_DIFFER: int(shapes.get(ROUTES_DIFFER, 0)),
-                    ALL_TIED: int(shapes.get(ALL_TIED, 0)),
-                    ALL_ZERO: int(shapes.get(ALL_ZERO, 0)),
+                    "unlabelled": len(picked) - done,
+                    ROUTES_DIFFER: int(counts.get(ROUTES_DIFFER, 0)),
+                    ALL_TIED: int(counts.get(ALL_TIED, 0)),
+                    ALL_ZERO: int(counts.get(ALL_ZERO, 0)),
                 }
             )
         return pd.DataFrame(rows).sort_values(
