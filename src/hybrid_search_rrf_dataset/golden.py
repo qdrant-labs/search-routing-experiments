@@ -69,6 +69,9 @@ class GoldenRoutingDataset(FusionRow):
 
     route_scores: dict[str, float] = Field(default_factory=dict)
     route_rankings: dict[str, list[str]] = Field(default_factory=dict)
+    route_raw_scores: dict[str, list[float]] = Field(default_factory=dict)
+    """Each route's own retrieval score (cosine/BM25/RRF-fused), parallel to
+    `route_rankings[route]` by position"""
 
 
 class QueryContext(BaseModel):
@@ -354,11 +357,10 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
     default_dir: ClassVar[Path] = Path("data/golden_routing")
 
     def build_row(self, ctx: QueryContext) -> GoldenRoutingDataset:
+        rankings = {s.name: self._ranked(s, ctx) for s in self._routes}
         assessed = {
-            strategy.name: self.objective.assess(
-                self._ranked(strategy, ctx), ctx.gold_qrel
-            )
-            for strategy in self._routes
+            name: self.objective.assess(ranking, ctx.gold_qrel)
+            for name, ranking in rankings.items()
         }
         scores = {name: s for name, (s, _) in assessed.items()}
         serve = derive_route(scores)
@@ -370,6 +372,10 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
             strategy_name=serve,
             route_scores=scores,
             route_rankings={name: r for name, (_, r) in assessed.items()},
+            route_raw_scores={
+                name: [rankings[name][doc] for doc in r]
+                for name, (_, r) in assessed.items()
+            },
         )
 
 
