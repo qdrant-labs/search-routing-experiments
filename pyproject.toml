@@ -20,7 +20,7 @@ dependencies = [
     "datasets (>=4.0.0)",
     "mlcroissant (>=1.1.0,<2.0.0)",
     "gitpython (>=3.1.50,<4.0.0)",
-    "query-taxonomy @ file:///Users/andrei/projects/hybrid-search-rrf-dataset/src/query-taxonomy",
+    "query-taxonomy",
     "rstr (>=3.2.2)",
     "mcp (>=1.28.1,<2.0.0)",
     "litellm (>=1.93.0,<2.0.0)",
@@ -47,7 +47,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-query-taxonomy = { develop = true }
+query-taxonomy = { path = "src/query-taxonomy", develop = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -60,5 +60,6 @@ build-backend = "poetry.core.masonry.api"
 dev = [
     "ipykernel (>=7.3.0,<8.0.0)",
     "ruff (>=0.15.20,<0.16.0)",
-    "pytest (>=9.1.1,<10.0.0)"
+    "pytest (>=9.1.1,<10.0.0)",
+    "nbclient (>=0.11.0,<0.12.0)"
 ]
