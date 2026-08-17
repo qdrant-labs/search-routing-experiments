@@ -290,8 +290,8 @@ def test_derived_identifier_spans_totals_the_banks():
 
 
 def test_derived_identifier_spans_stays_out_of_the_span_prefixes():
-    """`SpanCountAxis` and `span_mask` sum everything under a group prefix; a
-    total living there would be counted twice."""
+    """`SpanCountAxis` sums everything under a group prefix; a total living
+    there would be counted twice."""
     assert not IDENTIFIER_SPANS.startswith(IDENTIFIERS)
 
 

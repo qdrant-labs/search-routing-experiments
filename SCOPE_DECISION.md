@@ -472,6 +472,35 @@ decision to the customer with an instrument. No per-query model anywhere.
 
 ---
 
+## Weaknesses with no other home
+
+Folded from `WEAKNESSES.md` (deleted 2026-08-17). Its items #1, #2, #3, #7 and #11 all
+prescribed the same composition fix for the logistic-regression router, which the NO-GO
+retired; #6, #8, #10, #12, #13 and #16 are recorded in VERDICT.md with their numbers. These
+five had no home in either document and are unmeasured either way, so they survive verbatim.
+
+**Near-duplicate pairs (~5.5%) may straddle splits.** Cos>0.95 pairs (measured, d33) can leak
+eval → train because the split isn't near-dup-aware. Random_within_lane numbers may be inflated
+by an unknown amount. Fix: near-duplicate-aware split per SPEC d46f, or upstream dataset dedup.
+The clusters themselves already exist — `feasibility_gate.py` built `dup_clusters.parquet`.
+
+**Labels stack-pinned to bge-small + Qdrant/bm25.** Swap the dense encoder and the labels
+change; the router isn't portable across encoder choices. The R2 pilot never ran. Fix:
+two-encoder kappa pilot (~500 rows) per SPEC d30 R2.
+
+**Every intervention measured on the same eval slice.** F1, F2, F1', F3 flags and the
+corpus-stat sweeps were all evaluated against the same 497 random-within-lane + 586 rarb-math
+held-out rows. Fix: reserve a separate final-eval slice, unlocked only at commit-to-ship time.
+
+**Probability calibration never checked.** `p_sparse = 0.826` is used as if it were a
+probability. LR with `class_weight="balanced"` isn't automatically calibrated; if it's off, the
+tuner's operating point is wrong for reasons unrelated to feature quality. Fix: calibration
+curve on a held-out slice, Platt scaling if needed.
+
+**The tuner conflates fire-thresholds with abstention thresholds.** One grid picks both
+when-to-fire dense/sparse and how-often-to-hedge to rrf. A per-class recall floor plus a
+separate abstention constraint would separate them. Relevant to direction 6.
+
 ## What comes next
 
 A design interview with this document as the starting plan, working through the open questions

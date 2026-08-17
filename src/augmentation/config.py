@@ -14,7 +14,7 @@ Two kinds of value live here, and the difference is load-bearing:
   one entry plus its pilot.
 
 Paths resolve from the package rather than the process cwd — the convention
-`composition/compose.py` and `labels.py` already follow — so a script run
+`composition/cellfill.py` and `labels.py` already follow — so a script run
 from the repo root and a notebook run from `src/` read the same artifacts.
 """
 

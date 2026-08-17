@@ -360,3 +360,62 @@ Not applicable.
 4. **Cheaper auto-fusion comparison.** Fill the classifier cache once (~38K calls,
    embarrassingly parallel) and Gates 1–3 become permanent offline instruments instead
    of a spend decision.
+
+---
+
+*The two sections below are ported verbatim from the retired `VIABILITY_PLAN.md` (§10, §11). Their `§n` cross-references point into that plan, which is in git history at commit 26b9a93 — the rest of it was either copied into this file before any result was seen or superseded by SCOPE_DECISION.md.*
+
+## Steering probe, run 2026-08-12
+
+One assumption tested in advance, on a machine with no DVC pull and no repository install, to check whether Phases 2 and 3 are worth their compute. Scripts and the six commands to reproduce are in `docs/probe/`: a throwaway venv with only `fastembed` and `qdrant-client`, a curl of the BEIR nfcorpus zip, an isolated Qdrant on port 6399. Nothing local is touched.
+
+**Setup.** nfcorpus, one of the 16 lanes: 3,633 documents, 323 test queries, median 16 judged per query, matching WEAKNESSES #10. Dense `bge-small-en-v1.5`, sparse `Qdrant/bm25` with the IDF modifier, both logged at depth 200 with raw scores, scored with 0.7·HitRate@1 + 0.3·NDCG@10.
+
+### 10.1 Result
+
+| fixed arm | mean objective |
+|---|---|
+| rrf_k10 | 0.4584 |
+| rrf_k60 | 0.4562 |
+| rrf_k2, Qdrant default | 0.4536 |
+| weighted, w=0.5 | 0.4300 |
+| weighted, w=0.7 | 0.4277 |
+| weighted, w=0.3 | 0.4257 |
+| DBSF | 0.4222 |
+| dense_only | 0.4027 |
+| sparse_only | 0.3963 |
+
+Best constant of the three project routes: `pure_rrf`, 0.4536. Best fixed arm overall: `rrf_k10`, 0.4584. Per-query oracle over the three routes 0.5037; over all nine arms 0.5297. Decisive queries 23 of 323, 7.1%.
+
+**What it changes.**
+
+1. **RRF is not the weak link.** Every RRF variant beats DBSF by ~0.034 and weighted fusion by ~0.028. `PureRRFStrategy`'s premise, that rank fusion dilutes a confident top-1 and that this is what routing exists to avoid, does not hold here: RRF is the strongest fixed arm. Moving to another fixed fusion buys +0.0048 over the best project route. **This does not test C2**, which is router versus best fixed fusion, and there is no router arm here. What it establishes is that the alternatives the project deleted without measuring are worse than the one it kept, which lowers the odds a better fixed fusion is waiting. §7.1 is bounded on that basis, not because C2 was answered.
+2. **Tuning k is not worth a campaign.** k=2, 10, and 60 span 0.005. If the sweep reproduces that, the knob is closed.
+3. **The wider action space is where the ceiling moves.** Nine arms raise the oracle from 0.5037 to 0.5297, and that 0.026 is half again the 0.0502 the three-route oracle offers over the best constant. It is a ceiling, not an achievement, and more arms means more classes over the same thin decisive supply. But the three-route frame was a choice with a measurable cost, which belongs in the next plan.
+4. **Best constant is per lane, and the reported bar may be wrong.** Here it is `pure_rrf`, with dense back at 0.4027; globally it is always-dense, and PLAN.md compares against const-dense while d44(a) records best-constant-per-collection as 6.3% better than always-dense. Different populations, so they cannot be subtracted, but the shape is real: the router may be beating an easier bar than a customer would deploy. Hence C1's per-collection bar.
+5. **Decisive scarcity recurs off-pipeline.** 7.1% here against 10.3% overall, from an independent implementation — consistent with scarcity being structural, but one lane on a non-comparable population (see limits) cannot settle it, so treat this as a prior, not a finding.
+
+**Limits, all unrepaired.** No router arm, so nothing speaks to C2 directly. "All 323 test queries" is not the project's *answerable* set, which drops `all_zero` rows (`labels.py:39-64`), so the means and the 7.1% are not like-for-like with 10.3%. Fusion is Python, not Qdrant's `Fusion.RRF`, so calling k=2 "the Qdrant default" is unverified against server ranking and ties. The sparse arm uses the IDF modifier while `src/composition/indexer.py` leaves `modifier=None`, so it may be a different sparse system until label provenance says otherwise. DBSF's mean ± 3σ and the weighted arms' per-query min-max are this probe's normalizations, and three weights are not a sweep. One lane, one encoder pair, no confidence intervals. The five points above are the most this can support; anything stronger needs the trained router in the comparison.
+
+---
+
+## Cut, with reasons
+
+Named so nobody re-adds them mid-run.
+
+- **Offline DBSF or weighted-fusion sweep from stored artifacts.** Impossible: raw component scores were never persisted (`golden.py:66`, `objective.py:59-63`). This was the plan's original centrepiece, and it is why Phase 2 exists.
+- **Exact RRF-k sweep from stored rankings.** Ranks 11 onward are gone, so a document can enter a fused top-10 when k changes and no one-sided bound exists. A top-10-only approximation is triage; keep triage numbers out of the verdict.
+- **The d44(d)/d45(g) judge spike.** Needs a frontier model and there is no budget. A local substitute measures agreement with qrel-limited labels, which cannot settle viability.
+- **LightGBM, new features, LUPI, composition redesign, augmentation runs.** Downstream of the verdict; d45(h) already gates composition and augmentation behind the measurement.
+- **Auto-fusion comparison as evidence.** ~~A surface classifier scored against corpus-outcome labels answers a different question. The bar is the best constant.~~ **REVERSED 2026-08-12 by Andrei:** auto-fusion, the deployed LLM-based classifier, is a first-class comparison baseline even though the product target is broader than that deployment. Auto-fusion is the second conjunct of the ship bar — C1b in §1's table; a ship requires beating both it and the best constant by > Δmin (d37(h)'s best-constant bar survives as the first conjunct, C1). The machinery exists: `AutoFusionRouter` (`router.py:715`) with cache at `route_labels/autofusion_cache.parquet`, already pluggable into `RouterExperiment` (`router.py:828`). Phase 0 reports the cache's row coverage so the marginal HTTP-call cost of scoring it on held-out rows is known before Phase 1 commits to it.
+- **Another single-lane `rarb-math` holdout run.** One lane cannot support a transfer claim.
+- **Manufactured sub-collections.** Shards of one corpus are not independent corpora, so this raises the collection count more than the evidence. Settled in §8: collections are a diversity instrument, and C3 rests on the external corpus.
+
+### Objections heard and kept anyway
+
+An adversarial pass argued for two deletions this plan declines, recorded so the argument is neither lost nor re-litigated mid-run.
+
+- **The judge gate and named worker roles** were called bureaucracy that consumes attention without producing data. They stay because this plan runs mostly unattended, and the failure mode they guard against, an agent reinterpreting a threshold after seeing a result, costs more than the overhead. §3.4's boundary between the latitude and the gate exists because of that objection.
+- **Per-archetype eval** was called a diagnostic with no branch in the verdict, which is true. It stays because it is cheap and is the only thing explaining why a claim passed or failed. It is now labelled a diagnostic so nobody mistakes it for evidence.
+
+The same pass argued the central framing was benchmark-internal, that the experimental claims could all pass on a product with no buyer. That was accepted: it became C5, settled in §8 by the two-tier deployment target.

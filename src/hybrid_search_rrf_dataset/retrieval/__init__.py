@@ -34,7 +34,6 @@ from hybrid_search_rrf_dataset.retrieval.irds import (
     MSMarcoDev,
     NFCorpus,
     OrcasLane,
-    SciFact,
     TrecDL2022,
 )
 
@@ -64,7 +63,6 @@ __all__ = [
     "QuestLane",
     "RarbLane",
     "RetrievalDataset",
-    "SciFact",
     "ScirgenGeoLane",
     "SnapshotDataset",
     "TrecDL2022",

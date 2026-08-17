@@ -105,7 +105,7 @@ class AugmentationLoop:
         # engines=None: cells band spaCy stats (natural_language_share,
         # nesting_depth), and a regex-only extractor reports those as
         # measured=None — a target the model can never satisfy, so it burns its
-        # whole round budget chasing one. Same parity MiniFill keeps (d42g).
+        # whole round budget chasing one. Same parity the cell fill keeps (d42g).
         self.engine = engine or Augmenter(
             self.config.engine,
             seed=self.config.seed,

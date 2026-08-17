@@ -105,7 +105,7 @@ class GoldenCase:
 
 
 # Frozen 2026-08-13 out of route_experiments.ipynb cell 1d9fc66a — the probe
-# gate's second instrument (VIABILITY_PLAN.md §1); edit only with a dated reason.
+# gate's second instrument (VERDICT.md thresholds); edit only with a dated reason.
 GOLDEN_SET_AUTO_FUSION: tuple[GoldenCase, ...] = (
     GoldenCase("who founded apple?", 2, 0),
     GoldenCase("how does photosynthesis work in plants", 2, 0),

@@ -1,8 +1,8 @@
 """Per-cell dense-vs-sparse DIVERGENCE audit (SPEC d50e pre-label screen):
 for each archetype cell, top-10 Jaccard of the dense_only vs sparse_only
 retrieved doc lists — low overlap means the routes retrieve different docs,
-so a routing signal is present. This is the composition_embeddings "Act 4"
-dense-vs-sparse Jaccard, now grouped by cell instead of run live on Qdrant.
+so a routing signal is present. Grouped by cell, off stored labels, rather
+than run live on Qdrant as the retired embeddings audit did.
 
     poetry run python src/scripts/cell_divergence.py
 

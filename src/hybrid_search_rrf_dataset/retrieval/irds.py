@@ -256,10 +256,6 @@ class NFCorpus(BeirDataset):
     subset = "nfcorpus"
 
 
-class SciFact(BeirDataset):
-    name = "scifact"
-
-
 class DBPediaLane(IRDatasetsMaterialized):
     """BEIR DBpedia-Entity test slice — graded 0/1/2 qrels (d39d keeps
     min_relevance=1; the zero-retrieval sensitivity cell is the escape

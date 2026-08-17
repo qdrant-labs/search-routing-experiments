@@ -551,9 +551,8 @@ any kind" is one band rather than 54 (d62h). Derived on every read by
 stored, because a persisted sum can disagree with its parts after a bank
 change, and generated children reach cell matching through `mini_catalog`
 without touching the parquet at all. The `derived.` prefix is load-bearing:
-`SpanCountAxis` and `span_mask` sum everything under a group prefix, so a
-total named `structured_identifiers.*` would be counted twice by the coverage
-charts.
+`SpanCountAxis` sums everything under a group prefix, so a total named
+`structured_identifiers.*` would be counted twice.
 _Avoid_: writing it into `catalog.parquet`, naming it under a span-group
 prefix (double-count), reading it as a boolean (it is a span count; absence is
 `below: 1`), enumerating member banks in a predicate

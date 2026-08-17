@@ -1,6 +1,6 @@
 """Route labels for the composition's rows — the golden set.
 
-`TargetComposition` decides *which* queries the dataset contains; this decides
+`CellFill` decides *which* queries the dataset contains; this decides
 *which route* each of them should take. One row per labelled (dataset,
 query_id), appended dataset by dataset as each source's corpus and qrels become
 available. Rows whose dataset has no usable corpus stay unlabelled and are

@@ -262,7 +262,7 @@ class BaseIndexer(ABC, Generic[T]):
 
         Note: bypasses `EmbeddingCache` — the qdrant-client streaming path
         doesn't compose with the (id -> vector) cache. For repeated runs on
-        the same items with local models, use `upload_iter`.
+        the same items with local models, use `upload`.
         """
         self.client.upload_points(
             collection_name=self.collection_name,
@@ -304,34 +304,6 @@ class BaseIndexer(ABC, Generic[T]):
                 vectors[i][cfg.name] = vec
         for i in range(len(batch)):
             yield PointStruct(id=ids[i], vector=vectors[i], payload=payloads[i])
-
-    def upload_iter(
-        self,
-        items: Iterable[T | dict[str, Any]],
-        batch_size: int = 64,
-        total: int | None = None,
-    ) -> None:
-        """Stream `items` into Qdrant one batch at a time.
-
-        Untyped dicts are validated into `item_type` per-batch via pydantic,
-        so sources that don't fit in memory (HF datasets, JSONL iterators)
-        work directly. Each batch flows through the same `upload()` path,
-        so caching and embedding behavior stay identical.
-
-        Pass `total` when the source has a known length (e.g. `len(dataset)`)
-        so the progress bar shows an ETA; omit it for open-ended streams.
-        """
-        batch: list[T] = []
-        progress = tqdm(items, total=total, desc=f"upload:{self.collection_name}")
-        for item in progress:
-            if isinstance(item, dict):
-                item = self.item_type.model_validate(item)
-            batch.append(item)  # type: ignore[arg-type]
-            if len(batch) >= batch_size:
-                self.upload(batch, batch_size=batch_size)
-                batch = []
-        if batch:
-            self.upload(batch, batch_size=batch_size)
 
     def _vectors_for(
         self,
