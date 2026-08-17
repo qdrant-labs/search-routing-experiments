@@ -1,5 +1,78 @@
 # TODOS
 
+## Ceiling levers — one re-measurement arbitrates all three (2026-08-12, SPEC decision 64)
+
+Design closed via grill-me. Context: this session's harness repairs
+(val loss now uses the training objective — the old unweighted-BCE val
+metric RISES as pos_weighted training converges, so every fold restored
+epoch-0 weights; cost dropped from thresholds and serving) invalidate every
+number in `arm_results_panel_v3.parquet`. `src/router_playground.ipynb` is
+the new per-run instrument.
+
+Before the re-run (ordering is load-bearing — the relabel changes labels):
+
+- [ ] Raise beir-nfcorpus `min_relevance` in lanes.py (§1b audit: 95.3%
+      grade-1 qrels) + relabel:
+      `poetry run python src/scripts/label_routes.py --only beir-nfcorpus --force`
+- [ ] Fix `GoldenRoutingBuilder` round-trip contradiction (~147 rows) —
+      also blocks Option A regardless.
+- [ ] Rebuild or delete the stale `beir-nfcorpus_oracle` cache.
+- [ ] Implement the two new arms (d64c): `zipf_channel` (wordfreq dep;
+      query-local rarity scalars as input block) and `feature_branch`
+      (taxonomy features as third privileged-branch TARGETS — the
+      serve-safe form of arm 2).
+
+The re-run batch (readout arbitrates every lever):
+
+- [ ] 10-lane panel sweep, all arms incl. the two new, fresh results path.
+- [ ] Learning curve: 25/50/100% of fit rows, fixed val split
+      (playground). Flat by 50→100% ⇒ composition lever closed this cycle;
+      still sloping ⇒ buy decisive rows in thin archetypes (d50g), never
+      fat-lane mass.
+- [ ] TIE_WEIGHT sweep 0/0.25/1.0 (playground) — free decisive-rows proxy.
+
+Decision rules on the readout:
+
+- [ ] Input arms: adopt whichever beats design on differ_agreement,
+      checked on sparse-win rows; both win ⇒ combined arm gets its own
+      attribution run first (deferred question).
+- [ ] Option A (LLM-judge tied tails, PPI spine): arms move ⇒ waits;
+      all arms flat under honest training ⇒ labels are prime suspect,
+      A jumps the queue.
+- [ ] Serve-time constraint stays HARD (d64b): raw query string only —
+      generalize features via branches, never extract at inference.
+
+## Encoder router (2026-08-11, SPEC decision 63)
+
+Design closed via grill-me + compressed sanity-check (KEEP; flips if
+LightGBM matches the design arm on holdout routes_differ — then ship the
+trees). Evidence reports in docs/research/. Prototype against dataset v2
+now; the arm comparison of record waits for the v3 dataset build.
+
+- [ ] `src/encoder_router/` package (own package, composition/ precedent):
+      training-table builder (bge embeddings, char-3–5-gram SVD fit on
+      train queries, predicate multi-hot targets, â target blocks), model
+      (encoder → z; cell branch ĉ = 44 sigmoids, BCE + per-cell pos_weight;
+      corpus branch â = z-scored MSE; route heads on concat(z, ĉ, â) —
+      feed-forward wiring, d63b), hand training loop (λ annealed down,
+      Du-et-al cosine gate), LOLO-CV eval harness reused by every arm.
+- [ ] New offline artifacts for â (no LLM spend): per-lane corpus profile
+      (corpus.parquet scan + ~5K-doc sampled taxonomy extraction — retires
+      d48i's CorpusIndex), per-query gold-doc profile + query↔gold lexical
+      overlap, fold-local route-outcome rates (training rows only).
+- [ ] `src/encoder_experiments.ipynb`: arms 1–7 as user-run cells, per-cell
+      AP monitoring for ĉ, offline linear probe (per-feature
+      recoverability — diagnostic, zero gradient, d63f).
+- [ ] Deps: torch (direct pin), lightgbm (arm 5), via poetry.
+- [ ] GATE for reportable numbers (d63g): the v3 dataset build — taxonomy
+      round-trip fix → d62 word-shape guard → re-extraction → predicate
+      re-eval, bundled with more data and better augmentation. Every v2
+      run is shakedown only and must be labelled as such.
+- [ ] Deferred (mirrored in SPEC): PFD teacher-student if arm 1 ≤ arm 3;
+      prototype/contrastive shaping if ĉ flatlines; multilingual serving;
+      gold-doc aggregation + sampling-size defaults. (The rarity-channel
+      trigger is superseded by d64c's direct `zipf_channel` arm.)
+
 ## Augmented rows reach evaluation via read-time supplement (2026-08-10, SPEC decision 61)
 
 - [x] DONE 2026-08-10: `QuerySupplement` (retrieval/base.py), `_augmented_rows`
@@ -680,17 +753,16 @@ Open (priority order):
       on `(score_dense, score_pure_rrf, score_sparse)`. Same input, same
       serving API, richer training signal. Derive `route` via existing
       cost-order rule + margin-based hedge to `pure_rrf`.
-- [ ] LightGBM v2 (SPEC d45c). Query-only ceiling test with a learner
-      that captures interactions. Behind the same `predict(query) →
-      StrategyName` API. If it beats the LR meaningfully, LR is a
-      distillation target; if not, LR sits at the query-only ceiling.
-- [ ] LUPI prototype (PLAN.md option B — auxiliary corpus
-      reconstruction). Small MLP encoder on query features, two heads
-      (one predicts corpus features as auxiliary loss during training,
-      dropped at inference; one predicts route). First real test of
-      whether privileged corpus features at training lift the query-only
-      ceiling. Options A (dropout on corpus features) and C (teacher-
-      student distillation) documented as fallback / heavier variants.
+- [x] LightGBM v2 (SPEC d45c) — SUBSUMED by SPEC d63 arm 5 (2026-08-11):
+      same learner, richer inputs (embedding ⊕ SVD ⊕ features), same
+      ceiling question, shared eval harness.
+- [x] LUPI prototype (PLAN.md option B) — SUPERSEDED by SPEC d63
+      (2026-08-11): grew into the encoder-router design after the
+      three-report research pass. Key deltas from option B: feed-forward
+      (hallucination) wiring instead of dropped heads, cell-predicate +
+      gold-doc + outcome targets instead of feature reconstruction,
+      frozen bge ⊕ char-ngram-SVD input instead of query features.
+      Option C (teacher-student) is a d63 deferred question.
 - [x] Composition redesign (SPEC d45h5) — LANDED as SPEC d48,
       2026-08-04. 32 archetype cells in `src/composition/cells.json`,
       generation brief

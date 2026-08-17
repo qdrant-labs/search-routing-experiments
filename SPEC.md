@@ -2607,6 +2607,160 @@ breadth; strategy labeling is explicitly a later stage.
     better patch but that the rule outlives the artifact it was found on — a
     test fails loudly where a decision paragraph waits to be read.*
 
+63. **The encoder router: frozen input channels, one latent, feed-forward
+    privileged branches** (grill-me 2026-08-11; supersedes d46's encoder
+    line and d47's LUPI-option-B item; evidence base:
+    `docs/research/qpp-retrieval-routing.md`,
+    `docs/research/lupi-privileged-information.md`,
+    `docs/research/tooling-mlp-router.md` — a three-report literature pass
+    standing in for arch-validator).
+    (a) *Input = frozen bge-small embedding ⊕ hashed char-3–5-gram SVD
+    (~128 dims, fit on training queries) — complete transforms, nothing
+    curated.* bge-small supersedes d46's "NOT bge-small-en": a frozen
+    encoder's weights never see labels, and the stack coupling lives in
+    the labels themselves, so hiding the embedding would not decouple it.
+    The d46 worry stays falsifiable, not vetoed: arm 7 trains the identical
+    architecture on multilingual-e5-small; if bge wins only
+    random_within_lane and loses holdout routes_differ, d46 was right and
+    e5 ships. The SVD block is the complete lexical channel — every
+    substring counts, so identifiers, digits, and casing survive with zero
+    per-format judgment; completeness, not curation, is what makes an
+    input unbiased. Evidence: lexical inputs beating frozen embeddings on
+    route classes (RAGRouter-Bench), XGBoost-on-frozen-embedding beating
+    fine-tuned DeBERTa at moderate scale (LTRR). Fine-tuning the encoder
+    is arm 6, run once as the published ceiling (the BERT-QPP/CIKM'21
+    regime starts ~500K labels; we have ~40K).
+    (b) *One MLP encoder → latent z; two supervised branches whose outputs
+    FEED the route layers (hallucination wiring, Hoffman 2016) — not
+    dropped heads.* Cell branch ĉ: Linear(z→44) sigmoids, BCE with
+    per-cell pos_weight, graded against per-row evaluation of EVERY cell
+    predicate (multi-hot, recomputed offline at build time) — never the
+    fill's stored single assignment, which bakes quota and tie-break
+    bookkeeping into the geometry; overlapping multi-hot targets force the
+    latent to encode shared archetype factors instead of 44 islands.
+    Corpus branch â: z-scored MSE over three named blocks — per-lane
+    corpus stats (corpus.parquet scan + taxonomy extraction over ~5K
+    sampled docs per lane; retires d48i's CorpusIndex wish), per-query
+    gold-doc stats (taxonomy over the row's qrel docs at the lane's
+    min_relevance, plus query↔gold lexical overlap — per-query targets are
+    what break the ~15-lane lane-ID degeneracy), and fold-local
+    route-outcome stats (ok-rate per route + decisive share, computed from
+    training rows only; named outcome stats because they are a property of
+    corpus × selection, never of the corpus alone). Route layers consume
+    concat(z, ĉ, â) at train AND serve: the model imputes at inference the
+    privileged knowledge it cannot see, and the skip connection on z lets
+    training down-weight unreliable estimates. The branch losses exist
+    only at training — without them ĉ and â are anonymous hidden units;
+    with them they are meaningful, inspectable estimates.
+    (c) *Route output = the three d60 acceptability heads under the
+    existing cheapest-acceptable serve rule*, so LR and encoder router are
+    compared under identical serving.
+    (d) *Training frame: every labelled row, masked route loss.* all_zero
+    rows contribute zero route gradient (d60d holds) but still supervise
+    both branches; all_tied rows supervise all five outputs; near-duplicate
+    clusters (cos>0.95) never straddle a split.
+    (e) *Seven arms, one eval harness.* (1) the design; (2) taxonomy
+    features as extra input, corpus branch only — do features earn input
+    status; (3) no branches — does branch supervision help at all;
+    (4) shuffled branch targets — information or regularization, the
+    TMLR-2025 mandatory control; (5) LightGBM ×3 on arm-2 inputs — is the
+    MLP the right learner at this scale; (6) fine-tuned bge + 3 heads,
+    once — the ceiling; (7) e5-small control — settles (a) empirically.
+    Eval: leave-one-lane-out CV over every lane with the spread reported
+    (the binding small number is ~15 lanes, not 40K rows), routes_differ
+    as the headline slice (every published query-side predictor is weakest
+    exactly where dense and sparse disagree), baselines const-dense /
+    LR+priority / auto-fusion / production hard classifier, the 7
+    archetype probes as the standing smoke test. Branch losses z-scored,
+    λ annealed down (branch targets are ground truth from step 0, unlike a
+    distillation teacher), gradient cosine-gated (Du et al. 2018) so a
+    branch cannot hurt the route loss by construction, λ tuned on the
+    route validation metric only.
+    (f) *No feature column ever supervises the model.* The per-feature
+    recoverability question ("can the embedding see identifiers?") is an
+    offline linear probe on frozen inputs and latent — a diagnostic with
+    zero gradient. This is where the curation-bias objection closes: the
+    only human-designed structures that touch the weights are
+    dataset-native — cells, gold docs, outcomes — each already policed by
+    its own falsification loop.
+    (g) *Sequencing: prototype on dataset v2 now; reportable numbers ride
+    the v3 dataset build.* The catalog is stale in the exact columns cell
+    predicates read (d56e/d62 re-extraction owed, blocked on the taxonomy
+    repo's 92 red round-trip tests), so v2 cell targets are wrong for
+    digit-bearing queries. Rather than a bug-fix rerun, the extractor
+    repairs land inside the v3 build together with more data and better
+    augmentation. v2 numbers are shakedown; v3 numbers are the arm
+    comparison of record.
+    (h) *Code shape: own package `src/encoder_router/` (the composition/
+    precedent — user's call over the single-module recommendation),
+    experiments surfaced through a notebook the user runs; deps: torch
+    (direct pin), lightgbm.* Plain PyTorch with a hand loop — every
+    tabular framework surveyed makes the branches harder, not easier.
+    sanity-check 2026-08-11: KEEP — rungs 1–3 (production classifier, LR,
+    AcceptabilityRouter) are measured below the ceiling this exists to
+    lift; the GBDT rung is embedded as arm 5; revisit if arm 5 matches
+    arm 1 on holdout routes_differ (then ship the trees).
+    — *The through-line of the grill: every "which features?" question
+    dissolved into "which dataset-native structure already owns this?" —
+    cells over span columns, predicates over assignments, measured
+    outcomes over hand priors. The model is supervised by the dataset's
+    own artifacts, and the dataset was built to be exactly that.*
+
+64. **Ceiling levers ride one re-measurement** (grill-me 2026-08-12; the
+    "remaining levers" triage after the playground exposed the harness).
+    (a) *Nothing is adopted until the arm sweep re-runs on the repaired
+    harness.* This session's fixes invalidate every v3 panel number: early
+    stopping restored epoch-0 weights on every fold (validation used
+    unweighted BCE, which RISES as the pos_weighted training objective
+    converges — the two losses disagreed about what "better" means), and
+    serving/threshold-tuning carried a cost discount now removed (thresholds
+    maximize raw captured score; serve = most probable head among those
+    clearing thresholds, rrf hedge when none fires; cost never picks between
+    heads). Re-run the 10-lane panel on a fresh results path, plus a
+    learning curve (25/50/100% of fit rows, fixed val split) — hours of
+    compute, zero new design, and every lever below reads its go/no-go off
+    this readout.
+    (b) *The serve-time constraint stays hard: the router sees the raw query
+    string only.* No extractor, no corpus, no spaCy at inference — "we
+    generalize features, we do not extract them": feature knowledge enters
+    through privileged branches that teach the model to estimate at serve
+    time what it cannot compute there. Bundled static data (a frequency
+    table) is admissible; a runtime dependency is not. CONTEXT.md updated.
+    (c) *Two new arms instead of the d63 proxy trigger.* `zipf_channel`:
+    design inputs ⊕ query-local rarity scalars from a background-frequency
+    table (wordfreq dep; min/mean/max token Zipf, share below a rarity
+    cutoff, share absent from the table — the hex digest maxes the last).
+    `feature_branch`: taxonomy features as a third privileged branch's
+    TARGETS (the admissible form of arm 2, whose serve-time inputs violate
+    (b)). Supersedes d63's deferred "rarity input channel if arm 2 > arm 1
+    on sparse wins" — for the same compute the sweep measures both designs
+    directly. Adoption rule: beats design on differ_agreement, checked
+    specifically on sparse-win rows.
+    (d) *Labels: the cheap repairs land BEFORE the re-run; the expensive one
+    waits for it.* Now: raise beir-nfcorpus min_relevance (the §1b audit:
+    95.3% of its qrels are grade 1, weak positives counted as full
+    successes) and relabel that lane; fix the two Option A blockers
+    (GoldenRoutingBuilder round-trip contradiction, stale nfcorpus oracle
+    cache) — they are correctness debts regardless. Option A itself
+    (LLM-judge tied-row tails, PPI spine) is spend, gated on the readout:
+    if the new arms move differ_agreement, inputs were binding and A waits;
+    if every arm stays flat under honest training, label noise is the prime
+    suspect and A jumps the queue. Ordering is load-bearing: the relabel
+    changes one lane's labels, so after-the-sweep would mix label regimes.
+    (e) *Composition gated on the learning curve; "more data" means decisive
+    rows in thin archetypes, never more of the same.* Flat by 50→100% ⇒ the
+    lever closes this cycle (the v3 build continues on its own d63g gate).
+    Still sloping at 100% ⇒ the buy order is d50(g) cell-conditioned
+    generation — which means finally unblocking distractor borrowing — not
+    more fat-lane natural rows, which mostly add ties. Bundled proxy, free
+    with the re-run batch: a TIE_WEIGHT sweep (0 / 0.25 / 1.0) — if
+    excluding ties helps validation, that is the same
+    decisive-rows-matter-most hypothesis confirmed before any generation
+    spend.
+    — *The through-line: every lever already had a standing decision or a
+    designed next step; what was missing was a trustworthy measurement to
+    arbitrate between them. One re-run buys arbitration for all three.*
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log
@@ -2685,3 +2839,31 @@ breadth; strategy labeling is explicitly a later stage.
   says — so rebuilding the selection makes every joined readout correct and the
   carried column is a stale copy nothing consults. Reopen only if something
   starts reading `labels["cell"]` directly.
+- PFD teacher-student wiring (teacher sees query+corpus, student distills
+  its logits) — the literature's strongest-evidenced privileged-information
+  alternative (Taobao, +5% online), deliberately not a v1 arm. Reopen if
+  arm 1 fails to beat arm 3 (d63b).
+- Prototype/contrastive cell shaping (learned archetype anchors in latent
+  space instead of the linear multi-hot branch). Reopen if the cell branch
+  flatlines — per-cell AP ≈ 0 despite pos_weight (d63b).
+- Sparse-leg/Zipf rarity stats as a third input channel — RESOLVED by
+  d64(c) 2026-08-12: the conditional trigger is replaced by a direct
+  `zipf_channel` arm in the re-run sweep; adoption reads off its own
+  measured readout, not the arm-2 proxy.
+- If BOTH d64(c) arms (`zipf_channel`, `feature_branch`) beat design:
+  ship one, or both — a combined arm needs its own run to attribute the
+  gain before it ships.
+- Whether the label-side serve oracle (d60e cheapest-acceptable at
+  tolerance 0.3) should also drop cost, now that router serving is
+  quality-only (d64a) — differ_agreement currently compares a cost-free
+  router against a cost-aware oracle, so a residual disagreement band is
+  structural, not model error.
+- d50(g) distractor borrowing — opened only if the d64(a) learning curve
+  still slopes at 100%; flat curve keeps it closed this cycle.
+- Multilingual serving: bge-small is English-only; arm 7 previews the
+  encoder swap, but real multilingual routing also needs multilingual
+  probes and a decision on ngram-SVD script coverage (d63a).
+- Gold-doc aggregation for multi-qrel rows (v1 default: mean over docs at
+  the lane's min_relevance) and the ~5K-docs-per-lane sampling size —
+  implementation defaults; revisit only if per-lane variance is large
+  (d63b).

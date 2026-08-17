@@ -40,13 +40,13 @@ is layered from broad to adversarial:
   zero; (b) a hand-authored confusing-query table, candidates harvested from the measured
   slice, expected routes hand-ruled by the author, frozen into `probes.py`.
 
-| Claim | Metric | Passes if | Fails if |
-|---|---|---|---|
-| C1 | (router − best constant) mean objective, grouped split, answerable rows, constant chosen **on the training split** | clustered bootstrap 95% CI lower bound > Δmin | CI upper bound < Δmin |
-| C1b | (router − auto-fusion) mean objective, same grouped split, same answerable rows, auto-fusion served cache-first from `AutoFusionRouter` | clustered bootstrap 95% CI lower bound > Δmin | CI upper bound < Δmin |
-| C2 | (router − train-selected best fixed fusion), paired, identical candidate sets at depth 50 | router ahead by > Δmin, or within ±Δmin **and** cheaper than **that same arm** | fixed fusion ahead, or equal quality with no cost advantage over it |
-| C3 | (router − best constant) on **one corpus from outside the pipeline** (§7.4), with the 16-lane rotation as supporting evidence | external corpus positive by > Δmin, rotation not contradicting it | external corpus not positive by > Δmin, or rotation pooled CI upper bound < Δmin |
-| C4 | reranked routed vs reranked always-dense, same candidate depth | routed ahead by > Δmin | CI upper bound < Δmin, or not applicable if the deployment has no reranker |
+| Claim | Metric                                                                                                                                  | Passes if                                                                      | Fails if                                                                         |
+| -------| -----------------------------------------------------------------------------------------------------------------------------------------| --------------------------------------------------------------------------------| ----------------------------------------------------------------------------------|
+| C1    | (router − best constant) mean objective, grouped split, answerable rows, constant chosen **on the training split**                      | clustered bootstrap 95% CI lower bound > Δmin                                  | CI upper bound < Δmin                                                            |
+| C1b   | (router − auto-fusion) mean objective, same grouped split, same answerable rows, auto-fusion served cache-first from `AutoFusionRouter` | clustered bootstrap 95% CI lower bound > Δmin                                  | CI upper bound < Δmin                                                            |
+| C2    | (router − train-selected best fixed fusion), paired, identical candidate sets at depth 50                                               | router ahead by > Δmin, or within ±Δmin **and** cheaper than **that same arm** | fixed fusion ahead, or equal quality with no cost advantage over it              |
+| C3    | (router − best constant) on **one corpus from outside the pipeline** (§7.4), with the 16-lane rotation as supporting evidence           | external corpus positive by > Δmin, rotation not contradicting it              | external corpus not positive by > Δmin, or rotation pooled CI upper bound < Δmin |
+| C4    | reranked routed vs reranked always-dense, same candidate depth                                                                          | routed ahead by > Δmin                                                         | CI upper bound < Δmin, or not applicable if the deployment has no reranker       |
 
 **Three states, not two.** PASS, FAIL, and INCONCLUSIVE when the CI straddles Δmin.
 INCONCLUSIVE is not a soft pass: the verdict reports "not proven", which under this standard

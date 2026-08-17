@@ -727,13 +727,15 @@ _Avoid_: LLM baseline (ambiguous with the list-preference judge),
 auto-classifier
 
 **Privileged corpus features**:
-Corpus features (avg-IDF, OOV share, N, avgdl, vocab overlap) that enter
-the model at training but are masked at inference — the deployment target
-is unknown at ship time, so a `query → route` surface is a hard
-constraint. Learning Using Privileged Information (Vapnik 2015). Lets the
-model learn corpus effects it never sees at serve time.
+Corpus-side knowledge that enters the model at training only — since d63,
+the corpus branch â's three target blocks: per-lane corpus stats (scan +
+sampled doc extraction), the per-query [[gold-doc-block]], and fold-local
+[[route-outcome-stats]]. Masked as an INPUT at inference (deployment
+target unknown at ship time, so `query → route` is a hard constraint); at
+serve time the model feeds its own â estimate forward instead (Vapnik
+2015 LUPI, feed-forward wiring — see [[privileged-branch]]).
 _Avoid_: `collection_stats` at inference (that was d47(b), retired
-2026-08-04)
+2026-08-04), aux-A (say corpus branch / â)
 
 **Per-archetype eval**:
 Grouping held-out decisive rows by feature signature (`has_uri`,
@@ -742,3 +744,76 @@ headroom captured per group. Surfaces coverage gaps in the composition —
 the aggregate metric hides archetype-level failures where a small
 fraction of rows carries a big qualitative gap (URL case: 0.1% of eval,
 invisible in the mean).
+
+### Encoder router
+
+**Encoder router**:
+The d63 route model: frozen input channels (bge-small embedding ⊕
+char-3–5-gram SVD fit on training queries), one MLP encoder to a latent,
+two feed-forward privileged branches, two acceptability heads (sparse,
+dense — rrf is the [[hedge]], never predicted). Serve rule since
+2026-08-12: the most probable head among those clearing their tuned
+thresholds; none fires → the rrf hedge. Cost never picks between heads —
+thresholds are tuned on raw captured score. Lives in `src/encoder_router/`;
+serving sees the raw query string ONLY (no extractor, no corpus, no spaCy)
+— the model generalizes features via its branches, it never extracts them.
+_Avoid_: NN router / MLP router (name the artifact), LUPI option B (dead
+— d63's wiring superseded it), cheapest-acceptable serving (dead
+2026-08-12 — cost-discounted thresholds went with it), feature extraction
+at serve time (the constraint is the design)
+
+**Privileged branch**:
+A supervised side output of the encoder router graded against
+training-only knowledge, whose PREDICTION feeds the route layers at serve
+time: the cell branch ĉ (44 sigmoids graded against evaluation of every
+cell predicate — never the fill's single assignment, which is quota
+bookkeeping) and the corpus branch â (regression against the three
+[[privileged-corpus-features]] blocks). The loss pins the branch's
+meaning; the feed-forward puts it to work. A branch is never an inference
+input — always an inference estimate.
+_Avoid_: aux head (silent about the wiring), dropped head (that variant
+lost the grill), hallucination head (mechanism citation, not the concept)
+
+**Gold-doc block**:
+Per-query taxonomy stats of the row's qrel documents (at the lane's
+min_relevance, mean over several) plus query↔gold lexical overlap — the
+per-query third of â's targets, and what breaks the ~15-lane lane-ID
+degeneracy of purely per-lane targets. Overlap is the closest measurable
+cause of a sparse win.
+_Avoid_: golden set (that is the labelled dataset itself), doc features
+(ambiguous with the corpus sample)
+
+**Route-outcome stats**:
+Per-lane acceptability rates (ok-rate per route + decisive share)
+computed from TRAINING rows only, fold-locally — a property of corpus ×
+selected queries, so never called corpus stats; the target-aware third of
+â's targets.
+_Avoid_: corpus win rates (hides the selection dependence), whole-lane
+computation (test labels leak into training targets through the average)
+
+### Serving
+
+**Serve-time budget**:
+The four conditions a feature must meet to be readable when a query arrives
+(settled 2026-08-17, replacing the blanket "raw query string only" ban):
+computed once ahead of the query; read with no network call and no model load;
+available on every training row; and produced by the same code path at
+training and at serving. Admits per-collection statistics, cluster centroids,
+and the regex banks; still excludes the spaCy pipeline.
+_Avoid_: query-only API (retired), "never extract at inference" (that was a
+category ban; this is a cost-and-provenance rule)
+
+**Compress**:
+The final serving step — projecting an already-retrieved superset of results
+onto the chosen route's view. Named so the zero-cost property is visible in
+the signature: nothing is retrieved, so choosing among lists already held is
+free.
+_Avoid_: select / filter (both imply a retrieval), rerank (no score changes)
+
+**Presearch gate**:
+The route model's own confidence on the results-free call, deciding whether to
+commit to one leg before searching or to retrieve both and decide afterward.
+One model serves both regimes, so results must be dropped out during training
+or the results-free call is out of distribution.
+_Avoid_: a second classifier (one model, two call sites), CAN_PRESEARCH as a
+separate component
