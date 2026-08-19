@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from dataclasses import replace
+from itertools import combinations
 from pathlib import Path
 from typing import Final
 
@@ -290,6 +292,96 @@ class LaneCorpusStats:
         return max(means, key=lambda route: means[route])
 
 
+class QueryCorpusStats:
+    """Per-QUERY corpus-relative stats keyed (dataset, query_id) — the v3
+    unit's corpus dimension. Where LaneCorpusStats keeps per-lane means, this
+    keeps every row, and it populates each lane's pair co-occurrence so PMI has
+    data (LaneCorpusStats leaves pair_document_frequencies empty -> no PMI)."""
+
+    def __init__(
+        self,
+        store: CollectionIndexStore | None = None,
+        labels_path: Path = LABELS_PATH,
+        out_path: Path | None = None,
+    ) -> None:
+        self._store = store or CollectionIndexStore()
+        self._labels_path = labels_path
+        self._out_path = out_path or (
+            labels_path.parent / "query_corpus_stats.parquet"
+        )
+
+    def build(self, *, force: bool = False) -> pd.DataFrame:
+        if self._out_path.exists() and not force:
+            return pd.read_parquet(self._out_path)
+        labels = pd.read_parquet(
+            self._labels_path, columns=["dataset", "query_id", "query"]
+        ).astype({"query_id": str})
+        dirs = self._store.indexable()
+        rows: list[dict[str, object]] = []
+        for key, group in tqdm(labels.groupby("dataset", sort=True), unit="lane"):
+            lane = dirs.get(str(key))
+            if lane is None or not self._store.path(lane).exists():
+                print(f"[skip] {key}: no corpus index on disk")
+                continue
+            tok = self._store.tokenizer
+            tokens = {
+                qid: tok.tokens(str(text))
+                for qid, text in zip(group["query_id"], group["query"], strict=True)
+            }
+            pairs, vocab = self._wanted_pairs(tokens.values())
+            index = replace(
+                self._store.load(lane),
+                pair_document_frequencies=self._pair_counts(lane, pairs, vocab),
+            )
+            banks = [cls(index) for cls in CORPUS_RELATIVE_BANKS]
+            for qid, toks in tokens.items():
+                stats = {
+                    stat.name: stat.value
+                    for bank in banks
+                    for stat in bank.compute(toks)
+                }
+                rows.append({"dataset": key, "query_id": qid, **stats})
+        frame = pd.DataFrame(rows)
+        self._out_path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_parquet(self._out_path, index=False)
+        return frame
+
+    @staticmethod
+    def _wanted_pairs(
+        token_lists,
+    ) -> tuple[set[frozenset[str]], set[str]]:
+        """Distinct query term-pairs (PMI needs exactly these) + the query
+        vocabulary (to prune each document's tokens before pairing)."""
+        vocab: set[str] = set()
+        pairs: set[frozenset[str]] = set()
+        for toks in token_lists:
+            unique = set(toks)
+            vocab |= unique
+            for a, b in combinations(sorted(unique), 2):
+                pairs.add(frozenset((a, b)))
+        return pairs, vocab
+
+    def _pair_counts(
+        self, lane: str, pairs: set[frozenset[str]], vocab: set[str]
+    ) -> dict[frozenset[str], int]:
+        """Documents co-occurring each query pair — one corpus pass, restricted
+        to the query vocabulary so only the wanted pairs are ever formed."""
+        if not pairs:
+            return {}
+        corpus = pd.read_parquet(self._store._paths.lane_corpus(lane))
+        texts = corpus["text"].fillna("")
+        if "title" in corpus.columns:
+            texts = (corpus["title"].fillna("") + " " + texts).str.strip()
+        counts: Counter[frozenset[str]] = Counter()
+        for text in tqdm(texts, desc=f"pairs:{lane}", unit="doc", leave=False):
+            terms = sorted(set(self._store.tokenizer.tokens(str(text))) & vocab)
+            for a, b in combinations(terms, 2):
+                pair = frozenset((a, b))
+                if pair in pairs:
+                    counts[pair] += 1
+        return dict(counts)
+
+
 def _band(correct: int) -> str:
     if correct >= _DISCRIMINATES:
         return "corpus stats discriminate our lanes"
@@ -312,11 +404,24 @@ def main() -> None:
         help="target from every labelled row, not the decisive ones only "
         "(diagnostic: keeps lanes with no decisive row)",
     )
+    parser.add_argument(
+        "--per-query",
+        action="store_true",
+        help="build per-query corpus stats (incl. PMI) keyed (dataset, "
+        "query_id) for the v3 unit, instead of the per-lane side test",
+    )
     args = parser.parse_args()
 
     store = CollectionIndexStore()
     print(f"indexable lanes: {sorted(store.indexable())}")
     store.build_all(force=args.force)
+
+    if args.per_query:
+        frame = QueryCorpusStats(store).build(force=args.force)
+        print(f"per-query corpus stats: {len(frame):,} rows, "
+              f"cols {[c for c in frame.columns if c not in ('dataset', 'query_id')]}")
+        print(f"-> {QueryCorpusStats(store)._out_path}")
+        return
 
     probe = LaneCorpusStats(store, decisive_only=not args.all_rows)
     frame = probe.build(force=args.force)
