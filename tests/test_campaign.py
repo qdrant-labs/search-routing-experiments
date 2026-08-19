@@ -336,6 +336,35 @@ def test_a_floor_that_always_faults_costs_at_most_the_k_ceiling(tmp_path):
     assert row["accepted"] == 0
 
 
+def test_run_alone_honours_the_ceiling_without_the_campaign(tmp_path):
+    """`--floor` calls run() directly. Its ceiling used to default to None, so
+    the 'worst-case-provable ceiling on wasted spend' held only via the
+    campaign and a manual run chewed through every eligible parent."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    config = AugmentationConfig(paths=paths)
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("marker:greeting").to_parquet(sheet_path, index=False)
+    engine = AlwaysFaultsEngine()
+    loop = AugmentationLoop(
+        _many(50), config=config, engine=engine,
+        operators=(ModelDecorate(config),),
+        sheet_path=sheet_path, pool=GeneratedPool(paths),
+        qrels=AugmentationQrels(paths),
+    )
+
+    banked = loop.run("marker:greeting", n=5)
+
+    assert banked.empty
+    assert engine.calls == FAULT_STREAK, (
+        f"run() stopped after {engine.calls} faults, not {FAULT_STREAK} — "
+        "50 parents were available to burn"
+    )
+    # opting out explicitly still burns the whole queue, for a caller that
+    # genuinely wants that
+    loop.run("marker:greeting", n=5, max_consecutive_faults=None)
+    assert engine.calls > FAULT_STREAK * 2
+
+
 def test_a_floor_that_recovers_after_one_lost_chance_still_gets_fully_served(tmp_path):
     """Losing a chance is not the end — a floor that starts failing and then
     genuinely recovers must bank its full need, not just escape with a few

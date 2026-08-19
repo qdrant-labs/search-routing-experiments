@@ -36,6 +36,17 @@ _DEFAULT_DECORATIONS = {
 
 _DEFAULT_FORMAL_FLOORS = ("logical:math_expression", "logical:code_fragment")
 
+MAX_CHANCES = 3
+"""How many separate turns a floor gets before it is dropped for the rest of
+the run — not a timeout, a fairness budget: 3 chances x FAULT_STREAK faults
+each is the fixed, worst-case-provable ceiling on wasted spend."""
+FAULT_STREAK = 3
+"""Consecutive faulty parent attempts (an engine error, a structural
+rejection, or a measured-but-failed target all count the same) that end a
+floor's current turn and spend one chance. `AugmentationLoop.run` defaults to
+this too, so the ceiling above holds on EVERY path — the campaign used to be
+the only caller passing it, which left `--floor` unbounded."""
+
 
 class StatDirection(StrEnum):
     """Which way along an axis a rewrite moves the scalar."""

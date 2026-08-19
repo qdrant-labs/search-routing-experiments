@@ -416,7 +416,7 @@ class AugmentationLoop:
         *,
         n: int | None = None,
         exclude: frozenset[str] = frozenset(),
-        max_consecutive_faults: int | None = None,
+        max_consecutive_faults: int | None = FAULT_STREAK,
     ) -> pd.DataFrame:
         """Produce up to `n` ACCEPTED candidates for one floor (default:
         ceil of the floor's missing credit) and append them to the pool.
@@ -429,7 +429,9 @@ class AugmentationLoop:
         `max_consecutive_faults` stops the attempt loop the moment that many
         non-accepted attempts happen in a row, rather than continuing to
         `need` or exhausting `queue` — a fault (dropped for any reason) is
-        d59's unified signal, not just an engine error. `produced.attrs`
+        d59's unified signal, not just an engine error. It defaults to the
+        campaign's own `FAULT_STREAK` so the ceiling holds on every path;
+        pass None to chew through the whole queue deliberately. `produced.attrs`
         then carries `stopped_early` (True only when THIS is why the loop
         ended, never on hitting `need` or running out of parents) and
         `attempted_ids` (every parent tried this call, accepted or not) —
