@@ -22,9 +22,18 @@ from augmentation.operators import DecorateOperator, InjectOperator, StatRewrite
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
 from query_taxonomy.features import FeatureExtractor
-from taxonomy_generators.verify import verify
+from taxonomy_generators.verify import VerifyReport, verify
 
 IDENT = "structured_identifiers."
+
+
+class ModelDecorate(DecorateOperator):
+    """Decorate with its deterministic path switched off. The scheduler's
+    contract is about ENGINE faults, which only a model-served family can
+    raise — stat_rewrite UP is the real one, decorate is the cheap stand-in."""
+
+    def apply(self, parent, floor, text, requirement=()):
+        return None
 
 
 class AlwaysFaultsEngine:
@@ -39,6 +48,11 @@ class AlwaysFaultsEngine:
         return AugmentationOutcome(
             text=None, accepted=False, attempts=1, error=ErrorCase.ROUNDS_EXHAUSTED,
         )
+
+    def accept(self, text, targets):
+        """Every path faults, including the deterministic one — otherwise a
+        family that stopped calling the model would quietly stop faulting."""
+        return VerifyReport(passed=False, checks=())
 
 
 class FaultsThenSucceeds:
@@ -142,17 +156,19 @@ def test_plan_still_resolves_a_bare_floor_label_gate_free(tmp_path):
     gate-free Decorate) must keep working exactly as before."""
     paths = AugmentationPaths(data_dir=tmp_path)
     config = AugmentationConfig(paths=paths)
+    # five parents for a `missing` of five: the assertion below is about the
+    # pilot cap not applying, so supply must not be what caps it
     selection = pd.DataFrame([{
-        "dataset": "beir-nfcorpus", "query_id": "q1",
+        "dataset": "beir-nfcorpus", "query_id": f"q{i}",
         "query": "hello there, what is the capital of France",
         "checkable": True,
-    }])
+    } for i in range(5)])
     sheet_path = tmp_path / "sheet.parquet"
     _sheet("marker:greeting").to_parquet(sheet_path, index=False)
     loop = AugmentationLoop(
         selection,
         config=config,
-        operators=(DecorateOperator(config),),
+        operators=(ModelDecorate(config),),
         sheet_path=sheet_path,
         pool=GeneratedPool(paths),
         qrels=AugmentationQrels(paths),
@@ -176,7 +192,7 @@ def test_plan_reports_no_operator_for_an_unregistered_bare_floor(tmp_path):
     sheet_path = tmp_path / "sheet.parquet"
     _sheet("nonexistent:floor").to_parquet(sheet_path, index=False)
     loop = AugmentationLoop(
-        selection, config=config, operators=(DecorateOperator(config),),
+        selection, config=config, operators=(ModelDecorate(config),),
         sheet_path=sheet_path, pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
     )
 
@@ -197,7 +213,7 @@ def test_a_floor_that_always_faults_costs_at_most_the_k_ceiling(tmp_path):
     engine = AlwaysFaultsEngine()
     loop = AugmentationLoop(
         _many(15), config=config, engine=engine,
-        operators=(DecorateOperator(config),),
+        operators=(ModelDecorate(config),),
         sheet_path=sheet_path, pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
     )
 
@@ -225,7 +241,7 @@ def test_a_floor_that_recovers_after_one_lost_chance_still_gets_fully_served(tmp
     )
     loop = AugmentationLoop(
         _many(15), config=config, engine=engine,
-        operators=(DecorateOperator(config),),
+        operators=(ModelDecorate(config),),
         sheet_path=sheet_path, pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
     )
 

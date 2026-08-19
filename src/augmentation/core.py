@@ -163,6 +163,18 @@ class Operator(ABC):
         """Parents that fit, in preference order — a table filter (d42e),
         never an LLM."""
 
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple[AxisBand, ...] = (),
+    ) -> str | None:
+        """The rewritten text when this operator needs no model, else None and
+        the row goes to the LLM. Takes the working text rather than the
+        parent's query because a cell's calls feed each other."""
+        return None
+
     @abstractmethod
     def instruction(
         self,

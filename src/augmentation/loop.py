@@ -20,6 +20,7 @@ from augmentation.core import (
     SurfaceOrigin,
 )
 from augmentation.dispatch import (
+    Call,
     CellPlan,
     Stage,
     Step,
@@ -247,12 +248,20 @@ class AugmentationLoop:
                     error=ErrorCase.INCOMPATIBLE_PARENT,
                 )
                 return spend.stamp(best or outcome), targets
-            outcome = self.engine.run(
-                self.brief(floor, call.steps, parent),
-                f"Query: {text}",
-                targets,
-                tool_loop=any(op.declaration.tool_loop for op in call.operators),
-            )
+            produced = self._deterministic(floor, call, parent, text)
+            if produced is not None:
+                report = self.engine.accept(produced, targets)
+                outcome = AugmentationOutcome(
+                    text=produced, accepted=report.passed, attempts=1,
+                    checks=report.checks,
+                )
+            else:
+                outcome = self.engine.run(
+                    self.brief(floor, call.steps, parent),
+                    f"Query: {text}",
+                    targets,
+                    tool_loop=any(op.declaration.tool_loop for op in call.operators),
+                )
             spend.add(outcome)
             if not outcome.accepted:
                 return spend.stamp(best or outcome), targets
@@ -260,12 +269,37 @@ class AugmentationLoop:
         assert best is not None, f"{floor!r} planned no calls"
         return spend.stamp(best), targets
 
+    @staticmethod
+    def _deterministic(
+        floor: str, call: Call, parent: pd.Series, text: str
+    ) -> str | None:
+        """The call's text when every one of its steps can be served without a
+        model — None the moment one step needs the LLM, because the brief is
+        written per call and a half-served call would lose the other half."""
+        working = text
+        for step in call.steps:
+            if step.operator is None:
+                return None
+            produced = step.operator.apply(parent, floor, working, step.requirement)
+            if produced is None:
+                return None
+            working = produced
+        return working
+
     def _one_call(
         self, floor: str, planned: tuple[Operator, ...], parent: pd.Series
     ) -> tuple[AugmentationOutcome, Targets]:
         """The floor path: one operator, its own postcondition, one call."""
         operator = planned[0]
         targets = operator.targets(floor, parent)
+        text = operator.apply(parent, floor, str(parent["query"]))
+        if text is not None:
+            # deterministic operator: local re-measure IS the acceptance, so
+            # the row costs no completion, no tokens, and reproduces from seed
+            report = self.engine.accept(text, targets)
+            return AugmentationOutcome(
+                text=text, accepted=report.passed, attempts=1, checks=report.checks,
+            ), targets
         outcome = self.engine.run(
             self.brief(floor, (Step((), Stage.QUERY_ONLY, operator),), parent),
             f"Query: {parent['query']}",

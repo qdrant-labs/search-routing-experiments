@@ -32,6 +32,7 @@ from augmentation.core import (
     SurfaceOrigin,
     Operator,
 )
+from augmentation.corruption import CorruptOperator
 from augmentation.dispatch import WORD_AXES
 from augmentation.supply import SupplyIndex, lane_dirs
 from composition.catalog_axes import StatAxis, stat_column
@@ -39,12 +40,20 @@ from composition.cells import CELL_TO_BANKS, CELLS_BY_NAME, AxisBand
 from composition.floors import STAT_AXES, identifier_floor_key
 from query_taxonomy.core import FeatureSpan
 from query_taxonomy.features import FeatureExtractor
+from query_taxonomy.metrics.general import STOPWORDS
 from query_taxonomy.taxonomy import FeatureGroup
 from taxonomy_generators.registry import generator_for
 from taxonomy_generators.verify import SpanTarget, StatTarget, Targets
 
 _WORD = re.compile(r"[a-z0-9]+")
 _WORD_BOUNDED_NOT = re.compile(r"\bNOT\b")
+_WRITTEN_CONJUNCTION = re.compile(r"\b(?:and|or)\b")
+_WORD_TOKEN = re.compile(r"\w+")
+"""The length bank's own tokenization — a surface's cost in words must be
+counted the way the band that judges it counts."""
+
+SHARE_COLUMN = "natural_language_signal.natural_language_share"
+WORDS_COLUMN = "length.length_words"
 
 
 @lru_cache(maxsize=1)
@@ -101,6 +110,50 @@ def _explained_by_surfaces(
         any(lo <= span.start and span.end <= hi for lo, hi in ranges)
         for span in spans
     )
+
+
+@lru_cache(maxsize=1)
+def _zipf():
+    from wordfreq import zipf_frequency
+
+    return zipf_frequency
+
+
+def _shorten(text: str, limit: int, protected: tuple[str, ...], gold: str) -> str:
+    """Drop `\\w+` tokens until at most `limit` remain, commonest-first, keeping
+    anything inside a copied surface and anything the gold document also uses —
+    the machine reading of "keep what keeps the document answering"."""
+    keep_ranges = [
+        (m.start(), m.end())
+        for surface in protected
+        for m in re.finditer(re.escape(surface), text)
+    ]
+    gold_words = set(_WORD.findall(gold.lower()))
+    tokens = list(re.finditer(r"\w+", text))
+    droppable = [
+        token for token in tokens
+        if not any(lo < token.end() and token.start() < hi for lo, hi in keep_ranges)
+    ]
+    surplus = len(tokens) - max(limit, 0)
+    if surplus <= 0:
+        return text
+
+    def expendability(token: re.Match) -> tuple[int, int, float]:
+        word = token.group(0).lower()
+        # stopwords go first, then words the document never uses, then the
+        # commonest survivors — rarity is what ties a query to one document
+        return (word not in STOPWORDS, word in gold_words, -_zipf()(word, "en"))
+
+    cut = sorted(sorted(droppable, key=lambda t: t.start()), key=expendability)
+    dropped = sorted(
+        ((t.start(), t.end()) for t in cut[:surplus]), reverse=True
+    )
+    for start, end in dropped:
+        text = text[:start] + text[end:]
+    # ponytail: naive punctuation repair — collapse the gaps a cut leaves and
+    # reattach orphaned marks. A real detokenizer if the audit ever complains.
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+([,.;:!?])", r"\1", text).strip(" ,;:")
 
 
 def _span_total(catalog: pd.DataFrame) -> pd.Series:
@@ -160,6 +213,23 @@ class DecorateOperator(Operator):
         return pool[pool["checkable"]].sample(
             frac=1.0, random_state=self._order_seed
         )
+
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Weave the marker's own phrase in directly — the same list that used
+        to reach the model as examples, seeded per row so a re-run reproduces."""
+        marker = self.marker(floor)
+        rng = Random(f"{self._order_seed}:{parent['query_id']}:{marker}")
+        phrase = generator_for(f"sentence_markers:{marker}").sample(rng, 1)[0]
+        body = text.strip()
+        if rng.random() < 0.5:
+            return f"{phrase}, {body}"
+        return f"{body.rstrip('?.!')}, {phrase}"
 
     def instruction(
         self, floor: str, parent: pd.Series, requirement: tuple = ()
@@ -265,6 +335,22 @@ class OperatorSyntaxRewrite(Operator):
             .sample(frac=1.0, random_state=self._order_seed)
         )
 
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Uppercase the coordination already written out, else promote a comma
+        list; a parent whose coordination is neither falls through to the model."""
+        upper = _WRITTEN_CONJUNCTION.sub(lambda m: m.group(0).upper(), text)
+        if upper != text:
+            return upper
+        if "," in text:
+            return re.sub(r"\s*,\s*", " AND ", text)
+        return None
+
     def instruction(
         self, floor: str, parent: pd.Series, requirement: tuple = ()
     ) -> str:
@@ -318,7 +404,10 @@ class StatRewrite(Operator):
             "structural)"
         ),
         credit_gate=CreditGate.DECLARATION_AUDIT,
-        tool_loop=True,
+        # the cut is deterministic now, so only expansion is bought — and the
+        # loop's measured retry serves it without the round budget the model
+        # spent thrashing between verify and submit
+        tool_loop=False,
     )
 
     def __init__(self, config: AugmentationConfig | None = None) -> None:
@@ -434,6 +523,40 @@ class StatRewrite(Operator):
             .drop(columns=["__value", "__spans", "__distance"])
         )
 
+    def _cuts(self, floor: str, parent: pd.Series, requirement: tuple) -> bool:
+        """Whether THIS parent has to shrink — the same read `instruction` makes,
+        so the deterministic and model paths never disagree on direction."""
+        _, low, high = self._band(floor, requirement)
+        current = parent.get("stat_value")
+        return (current is not None and float(current) >= high) or not np.isfinite(low)
+
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Serve the cut by scoring terms, not by writing: keep what ties the
+        query to its gold document, drop filler. Expansion stays with the model
+        — `need-neutral elaboration` has no machine definition, and a padding
+        template would teach the router the template instead of the register."""
+        axis, _, high = self._band(floor, requirement)
+        if axis.stat != "length_words" or not self._cuts(floor, parent, requirement):
+            return None
+        # the spans already in the text are why this parent was selected, so
+        # the cut must not eat them: at `length_words < 3` only two tokens
+        # survive and an acronym otherwise competes with any other rare word
+        carried = tuple(
+            span.text for spans in _spans_by_name(text).values() for span in spans
+        )
+        return _shorten(
+            text,
+            limit=int(high - 1) if np.isfinite(high) else 0,
+            protected=tuple(str(s) for s in (parent.get("surfaces") or ())) + carried,
+            gold=str(parent.get("gold_text") or ""),
+        )
+
     def instruction(
         self, floor: str, parent: pd.Series, requirement: tuple = ()
     ) -> str:
@@ -458,8 +581,7 @@ class StatRewrite(Operator):
             f"Rewrite the user's query so that its {axis.stat} lands "
             f"{band}.{current_note} Preserve the information need exactly: "
             "expand only with need-neutral elaboration, restatement, or "
-            "context the answer does not depend on. Use the verify tool to "
-            "measure, iterate until the target passes."
+            "context the answer does not depend on."
         )
 
     @staticmethod
@@ -482,8 +604,7 @@ class StatRewrite(Operator):
             f"{high:g}, keeping every inserted surface character for character. "
             f"{grounding}If no wording under that limit can still be answered "
             "by the document, reply with the shortest version that can, and "
-            "say nothing else. Use the verify tool to measure, iterate until "
-            "the target passes."
+            "say nothing else."
         )
 
     def targets(
@@ -714,6 +835,7 @@ OPERATOR_FAMILIES: tuple[type[Operator], ...] = (
     OperatorSyntaxRewrite,
     StatRewrite,
     InjectOperator,
+    CorruptOperator,
 )
 """Registry order = dispatch order: the first family that `serves()` the
 floor wins."""

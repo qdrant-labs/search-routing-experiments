@@ -147,6 +147,12 @@ class AugmentationPaths(BaseModel):
     def catalog(self) -> Path:
         return self.data_dir / "feature_table" / "catalog.parquet"
 
+    @property
+    def corruption_census(self) -> Path:
+        """Per-lane natural corruption rates — what makes a degree a delta
+        over the lane rather than a hand-set number."""
+        return self.data_dir / "corruption_census.parquet"
+
     def lane_qrels(self, lane: str) -> Path:
         return self.data_dir / lane / "qrels.parquet"
 

@@ -38,6 +38,10 @@ class ScriptedAugmenter:
             checks=report.checks,
         )
 
+    def accept(self, text, targets):
+        """The deterministic path's only grader — same verify, no completion."""
+        return verify(text, targets, extractor=self._extractor)
+
 
 def _loop(tmp_path, text: str, sheet: pd.DataFrame, parents) -> AugmentationLoop:
     paths = AugmentationPaths(data_dir=tmp_path)
@@ -176,9 +180,10 @@ def test_a_free_scalar_mint_costs_zero_extra_calls(tmp_path):
 
     banked = loop.run("version_pinned_technical", n=1)
     assert len(banked) == 1, "Inject alone should satisfy the whole cell"
-    assert len(loop.engine.calls) == 1, (
+    assert loop.engine.calls == [], (
         "StatRewrite must be skipped — Inject's own surface already lands "
-        "the length in [3, 10), so a second call would edit nothing"
+        "the length in [3, 10), so a second call would edit nothing. It has no "
+        "deterministic path, so had it been planned it would show up here."
     )
 
 
