@@ -6,7 +6,7 @@ by doctrine — the five signals are verify-only acceptance filters (d26),
 never generated. Overrides shadow defaults by feature name.
 """
 
-from query_taxonomy import FEATURE_BANKS
+from query_taxonomy import FEATURE_BANKS, split_bank
 from query_taxonomy.core import RegexBank
 from query_taxonomy.taxonomy import FeatureGroup
 
@@ -25,9 +25,13 @@ def build_registry(
         shadows[override.feature] = override
 
     generators: dict[FeatureGroup, tuple[SurfaceGenerator, ...]] = {}
-    for group, bank_classes in FEATURE_BANKS.items():
+    for group, bank_specs in FEATURE_BANKS.items():
         members: list[SurfaceGenerator] = []
-        for bank_cls in bank_classes:
+        for spec in bank_specs:
+            # a registry entry is a bank type or a (type, kwargs) pair since
+            # calibrated values inject at construction; the kwargs belong to
+            # stat banks, which this loop skips by doctrine anyway
+            bank_cls, _kwargs = split_bank(spec)
             if not issubclass(bank_cls, RegexBank):
                 continue
             default = PatternGenerator(bank_cls)
