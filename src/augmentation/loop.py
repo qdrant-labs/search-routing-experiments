@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
-from augmentation.config import AugmentationConfig
+from augmentation.config import FAULT_STREAK, AugmentationConfig
 from augmentation.core import (
     NOTHING_ELSE,
     AugmentedCandidate,
@@ -34,8 +34,10 @@ from augmentation.dispatch import (
 from augmentation.engine import AugmentationOutcome, Augmenter, ErrorCase, Spend
 from augmentation.operators import default_operators
 from augmentation.parents import ParentPool
+from augmentation.constructed import ConstructedDocs
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
+from augmentation.synthetic import SyntheticOperator
 from composition.cells import CELLS_BY_NAME
 from query_taxonomy.features import FeatureExtractor
 from taxonomy_generators.verify import Targets
@@ -96,6 +98,7 @@ class AugmentationLoop:
         sheet_path: Path | str | None = None,
         pool: GeneratedPool | None = None,
         qrels: AugmentationQrels | None = None,
+        docs: ConstructedDocs | None = None,
         parents: ParentPool | None = None,
     ) -> None:
         self.selection = selection
@@ -117,6 +120,7 @@ class AugmentationLoop:
         )
         self.pool = pool or GeneratedPool(self.config.paths)
         self.qrels = qrels or AugmentationQrels(self.config.paths)
+        self.docs = docs or ConstructedDocs(self.config.paths)
         self._sheet_path = Path(sheet_path or self.config.paths.order_sheet)
 
     def order_sheet(self) -> pd.DataFrame:
@@ -307,6 +311,78 @@ class AugmentationLoop:
             tool_loop=operator.declaration.tool_loop,
         )
         return outcome, targets
+
+    def synthesize(
+        self,
+        floor: str,
+        n: int,
+        *,
+        source_dataset: str,
+        max_consecutive_faults: int | None = FAULT_STREAK,
+    ) -> pd.DataFrame:
+        """The synthetic rung: rows for a cell no parent can reach.
+
+        Two calls per row, query first — a query that misses its bands costs
+        one completion instead of two, and the document is only ever written
+        for a query that already measures into the cell. `source_dataset`
+        names the lane whose corpus lends the constructed collection its
+        distractors; it is not read from, only recorded.
+        """
+        operator = SyntheticOperator(self.config)
+        if not operator.serves(floor):
+            raise ValueError(f"{floor!r} is not a cell — nothing to synthesize")
+        spend = Spend()
+        faults = FaultStreak(max_consecutive_faults)
+        minted: list[AugmentedCandidate] = []
+        already = self.docs.written_for()
+        bar = tqdm(total=n, desc=f"synthesize:{floor}", unit="row")
+        index = 0
+        while len(minted) < n and not faults.tripped():
+            parent = pd.Series({
+                "query_id": f"syn-{floor}-{index}",
+                "dataset": source_dataset,
+                "query": "",
+                "floors": [],
+                "branch_index": index,
+            })
+            index += 1
+            if str(parent["query_id"]) in already:
+                continue        # a rerun never regenerates a banked row
+            targets = operator.targets(floor, parent)
+            outcome = self.engine.run(
+                operator.instruction(floor, parent), "", targets
+            )
+            spend.add(outcome)
+            faults.record(str(parent["query_id"]), accepted=outcome.accepted)
+            if not outcome.accepted:
+                bar.write(f"- {parent['query_id']}: dropped — {outcome.checks}")
+                continue
+            answer = self.engine.run(
+                operator.document(floor, outcome.text),
+                f"Query: {outcome.text}",
+                Targets(),
+            )
+            spend.add(answer)
+            if not answer.text:
+                bar.write(f"- {parent['query_id']}: query kept, no document")
+                continue
+            doc_id = self.docs.add(
+                query_id=str(parent["query_id"]),
+                source_dataset=source_dataset,
+                text=answer.text,
+            )
+            candidate = operator.candidate(parent, floor, outcome).model_copy(
+                update={"grounding_doc_id": doc_id}
+            )
+            minted.append(candidate)
+            self.pool.append([candidate])
+            self.qrels.mint_constructed(candidate.query_id, doc_id)
+            bar.update(1)
+            bar.write(f"+ {candidate.query_id}: {outcome.text!r}")
+        bar.close()
+        produced = pd.DataFrame([c.model_dump() for c in minted])
+        print(f"  {spend.summary(len(minted))}")
+        return produced
 
     def hungry(self) -> pd.DataFrame:
         """The readout: every hungry floor, who serves it, and whether its

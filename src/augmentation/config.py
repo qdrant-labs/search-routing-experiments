@@ -133,6 +133,13 @@ class AugmentationPaths(BaseModel):
         return self.augmentation_dir / "qrels.parquet"
 
     @property
+    def constructed_docs(self) -> Path:
+        """The synthetic rung's own document store — deliberately outside any
+        lane dir, because a constructed doc must never reach a collection
+        whose labels are already paid for."""
+        return self.augmentation_dir / "constructed_docs.parquet"
+
+    @property
     def order_sheet(self) -> Path:
         return self.data_dir / "composition" / "order_sheet.parquet"
 

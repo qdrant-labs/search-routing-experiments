@@ -126,6 +126,15 @@ class CellPlan(NamedTuple):
         return bool(self.unsatisfied)
 
     @property
+    def reachable(self) -> int:
+        """How many rows of THIS cell rung 1 can actually produce. Zero while
+        any band is unserved: those rows are real, but they land in whatever
+        cell they measure into, so they fill this one not at all. Whatever the
+        demand asks for beyond this is the synthetic rung's, which is what
+        "no corpus supplies the surface" means in practice."""
+        return 0 if self.unsatisfied else len(self.parents)
+
+    @property
     def operators(self) -> tuple[Operator, ...]:
         return tuple(step.operator for step in self.mints if step.operator)
 

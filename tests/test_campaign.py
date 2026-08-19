@@ -183,6 +183,117 @@ def test_plan_still_resolves_a_bare_floor_label_gate_free(tmp_path):
     assert row["target_rows"] == 5   # gate-free: full `missing`, no pilot cap
 
 
+def test_a_cell_short_of_parents_routes_the_remainder_to_synthesis(tmp_path):
+    """`version_pinned_technical` needs more rows than it has parents, so the
+    plan must split the demand rather than claim parents can cover it."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    paths.catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
+        "length.length_words": 2.0,
+    }]).to_parquet(paths.catalog, index=False)
+    config = AugmentationConfig(paths=paths)
+    parent = {
+        "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
+        "query": "nginx config", "floors": [],
+        "surfaces": ("2.1.3",), "bank": "version_string",
+        "grounding_doc_id": "DOC-1", "length.length_words": 2.0,
+    }
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("version_pinned_technical").to_parquet(sheet_path, index=False)
+    loop = AugmentationLoop(
+        pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"]),
+        config=config,
+        operators=(PassThroughInject(config), StatRewrite(config)),
+        sheet_path=sheet_path, pool=GeneratedPool(paths),
+        qrels=AugmentationQrels(paths), parents=OneParent(parent),
+    )
+
+    row = AugmentationCampaign(loop, pilot_n=5).plan().iloc[0]
+    assert row["target_rows"] == 1, "one parent reaches one row"
+    assert row["synthetic_rows"] == 4, "the rest is the synthetic rung's"
+    assert row["action"] == PRODUCE
+
+
+class RecordingLoop(AugmentationLoop):
+    """Records what the campaign asks the synthetic rung for, without paying
+    for it."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.synthesized: list[tuple[str, int, str]] = []
+
+    def synthesize(self, floor, n, *, source_dataset, **kwargs):
+        self.synthesized.append((floor, n, source_dataset))
+        return pd.DataFrame([{"query_id": f"syn-{floor}-{i}"} for i in range(n)])
+
+
+def test_run_hands_the_unreachable_remainder_to_the_synthetic_rung(tmp_path):
+    """The gate is a fork, not a stop sign: what rung 1 cannot reach must
+    actually reach the rung that can, with a lane to borrow distractors from."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    paths.catalog.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{
+        "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
+        "length.length_words": 2.0,
+    }]).to_parquet(paths.catalog, index=False)
+    config = AugmentationConfig(paths=paths)
+    parent = {
+        "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
+        "query": "nginx config", "floors": [],
+        "surfaces": ("2.1.3",), "bank": "version_string",
+        "grounding_doc_id": "DOC-1", "length.length_words": 2.0,
+    }
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("version_pinned_technical").to_parquet(sheet_path, index=False)
+    loop = RecordingLoop(
+        pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"]),
+        config=config, engine=AlwaysFaultsEngine(),
+        operators=(PassThroughInject(config), StatRewrite(config)),
+        sheet_path=sheet_path, pool=GeneratedPool(paths),
+        qrels=AugmentationQrels(paths), parents=OneParent(parent),
+    )
+
+    summary = AugmentationCampaign(loop, pilot_n=5).run()
+
+    assert loop.synthesized == [("version_pinned_technical", 4, "beir-nfcorpus")], (
+        "the remainder must reach synthesize(), with the cell's own lane"
+    )
+    row = summary[summary["floor"] == "version_pinned_technical"].iloc[0]
+    assert row["synthesized"] == 4, "synthetic rows must show in the summary"
+
+
+def test_a_cell_with_no_parents_is_not_given_an_arbitrary_lane(tmp_path):
+    """No parents means no lane to borrow distractors from. Picking one would
+    be inventing policy, so the campaign reports and leaves it."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    config = AugmentationConfig(paths=paths)
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("version_pinned_technical").to_parquet(sheet_path, index=False)
+    loop = RecordingLoop(
+        pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"]),
+        config=config, engine=AlwaysFaultsEngine(),
+        operators=(PassThroughInject(config), StatRewrite(config)),
+        sheet_path=sheet_path, pool=GeneratedPool(paths),
+        qrels=AugmentationQrels(paths),
+    )
+
+    AugmentationCampaign(loop, pilot_n=5).run()
+
+    assert loop.synthesized == []
+
+
+def test_a_cell_whose_band_nobody_serves_reaches_zero_however_many_parents():
+    """The case parent-count gating waves straight through: an unserved band
+    means every row lands in some other cell, so rung 1 fills this one never."""
+    from augmentation.dispatch import CellPlan, Stage, Step
+
+    crowded = pd.DataFrame([{"query_id": f"q{i}"} for i in range(400_000)])
+    unserved = Step((), Stage.CORPUS, None)
+    assert CellPlan("c", crowded, (), ()).reachable == 400_000
+    assert CellPlan("c", crowded, (), (unserved,)).reachable == 0
+
+
 def test_plan_reports_no_operator_for_an_unregistered_bare_floor(tmp_path):
     """A bare floor nothing serves must still say so — distinctly from a
     cell whose stages leave no servable parent."""

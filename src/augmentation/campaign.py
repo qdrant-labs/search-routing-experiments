@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 from tqdm.auto import tqdm
 
+from augmentation.config import FAULT_STREAK, MAX_CHANCES
 from augmentation.core import CreditGate
 from augmentation.loop import AugmentationLoop
 from composition.cells import CELLS_BY_NAME
@@ -28,16 +29,14 @@ PRODUCE = "produce"
 SKIP_STAGED = "skip: pilot staged"
 SKIP_NO_OPERATOR = "skip: no operator"
 SKIP_UNSERVABLE = "skip: not servable"
+NEEDS_SYNTHESIS = "needs: synthetic rung"
 DROPPED_EXHAUSTED_CHANCES = "dropped: exhausted chances"
 
-MAX_CHANCES = 3
-"""How many separate turns a floor gets before it is dropped for the rest of
-the run (d59) — not a timeout, a fairness budget: 3 chances x FAULT_STREAK
-faults each is the fixed, worst-case-provable ceiling on wasted spend."""
-FAULT_STREAK = 3
-"""Consecutive faulty parent attempts (d59's unified signal — an engine
-error, a structural rejection, or a measured-but-failed target all count
-the same) that end a floor's current turn and spend one chance."""
+__all__ = [
+    "DROPPED_EXHAUSTED_CHANCES", "FAULT_STREAK", "MAX_CHANCES", "PRODUCE",
+    "SKIP_NO_OPERATOR", "SKIP_STAGED", "SKIP_UNSERVABLE",
+    "AugmentationCampaign",
+]
 
 
 @dataclass
@@ -81,7 +80,7 @@ class AugmentationCampaign:
         rows: list[dict[str, object]] = []
         for line in self.loop.order_sheet().itertuples(index=False):
             try:
-                result, _ = self.loop.demand(line.floor)
+                result, available = self.loop.demand(line.floor)
             except ValueError:
                 # a cell whose stages leave no servable parent, or a bare
                 # floor nothing registers for — demand() raises either way
@@ -90,22 +89,38 @@ class AugmentationCampaign:
                     if line.floor not in CELLS_BY_NAME
                     else SKIP_UNSERVABLE
                 )
+                cell = line.floor in CELLS_BY_NAME
                 rows.append({
                     "floor": line.floor, "missing": line.missing,
                     "operator": None, "gate": None,
-                    "action": action, "target_rows": 0,
+                    "action": NEEDS_SYNTHESIS if cell else action,
+                    "target_rows": 0,
+                    "synthetic_rows": math.ceil(float(line.missing)) if cell else 0,
+                    # no parents at all means no lane to borrow distractors
+                    # from — named by a human or not synthesized
+                    "source_dataset": None,
                 })
                 continue
             planned = self.loop.planned(line.floor, result)
             gate = self.loop.owner(planned).declaration.credit_gate
-            if gate is CreditGate.NONE:
-                action, target = PRODUCE, math.ceil(float(line.missing))
+            want = math.ceil(float(line.missing))
+            if gate is not CreditGate.NONE:
+                want = self.pilot_n - int(staged.get(line.floor, 0))
+            if want <= 0:
+                action, target, synthetic = SKIP_STAGED, 0, 0
             else:
-                remaining = self.pilot_n - int(staged.get(line.floor, 0))
-                if remaining <= 0:
-                    action, target = SKIP_STAGED, 0
-                else:
-                    action, target = PRODUCE, remaining
+                # what rung 1 can actually REACH, not how many parents exist:
+                # a cell with a band nobody serves has 400,000 parents and
+                # reaches it zero times. A bare floor has no cell plan and no
+                # bands to leave unserved, so its parents are its reach.
+                reachable = result.reachable if result else len(available)
+                target = min(want, reachable)
+                # only a CELL can fall through to synthesis — a bare floor
+                # short of parents is exhausted supply, not a generation target
+                synthetic = (want - target) if line.floor in CELLS_BY_NAME else 0
+                action = PRODUCE if target else (
+                    NEEDS_SYNTHESIS if synthetic else SKIP_UNSERVABLE
+                )
             rows.append({
                 "floor": line.floor,
                 "missing": line.missing,
@@ -113,13 +128,59 @@ class AugmentationCampaign:
                 "gate": str(gate),
                 "action": action,
                 "target_rows": target,
+                "synthetic_rows": synthetic,
+                # the lane this cell's own rows live in, so the constructed
+                # collection borrows distractors from plausible neighbours
+                # rather than from whichever corpus happened to be first
+                "source_dataset": (
+                    available["dataset"].mode().iat[0]
+                    if "dataset" in available.columns and not available.empty
+                    else None
+                ),
             })
         plan = pd.DataFrame(rows)
         total = int(plan["target_rows"].sum())
-        print(f"campaign plan — {len(plan)} hungry floors, "
-              f"{total:,} target rows (>= {total:,} LLM calls):")
+        # rows, not calls: a floor served entirely by deterministic operators
+        # buys no completion at all, so the old ">= N LLM calls" read as a
+        # spend estimate that is now wrong by most of its magnitude
+        print(
+            f"campaign plan — {len(plan)} hungry floors, {total:,} target rows "
+            f"from parents, {int(plan['synthetic_rows'].sum()):,} needing the "
+            "synthetic rung:"
+        )
         print(plan.to_string(index=False))
         return plan
+
+    def _synthesize(self, plan: pd.DataFrame) -> dict[str, int]:
+        """Serve the shortfall rung 1 cannot reach, one cell at a time.
+
+        Only the planned remainder: a cell whose parents were reachable but
+        whose attempts faulted is the chances scheduler's problem, and
+        retrying rung 1 is cheaper than generating a row from nothing. A cell
+        with no parents at all has no lane to borrow distractors from, so it
+        waits for a human to name one rather than getting an arbitrary lane.
+        """
+        wanted = plan[
+            (plan["synthetic_rows"] > 0) & plan["source_dataset"].notna()
+        ]
+        made: dict[str, int] = {}
+        for row in wanted.itertuples(index=False):
+            produced = self.loop.synthesize(
+                row.floor,
+                int(row.synthetic_rows),
+                source_dataset=str(row.source_dataset),
+            )
+            made[row.floor] = len(produced)
+        unnamed = plan[
+            (plan["synthetic_rows"] > 0) & plan["source_dataset"].isna()
+        ]
+        for row in unnamed.itertuples(index=False):
+            print(
+                f"{row.floor}: {int(row.synthetic_rows)} rows need the synthetic "
+                "rung but no lane to borrow distractors from — name one and "
+                "call loop.synthesize() directly"
+            )
+        return made
 
     def _schedule(
         self, produce_rows: pd.DataFrame
@@ -182,16 +243,22 @@ class AugmentationCampaign:
         produce_rows = plan[plan["action"] == PRODUCE]
         skipped_rows = plan[plan["action"] != PRODUCE]
         turns, dropped = self._schedule(produce_rows)
+        synthesized = self._synthesize(plan)
 
         results = [
             {
                 **row._asdict(),
                 "action": DROPPED_EXHAUSTED_CHANCES if row.floor in dropped else PRODUCE,
                 "accepted": turns[row.floor].accepted,
+                "synthesized": synthesized.get(row.floor, 0),
             }
             for row in produce_rows.itertuples(index=False)
         ] + [
-            {**row._asdict(), "accepted": 0}
+            {
+                **row._asdict(),
+                "accepted": 0,
+                "synthesized": synthesized.get(row.floor, 0),
+            }
             for row in skipped_rows.itertuples(index=False)
         ]
         summary = pd.DataFrame(results)
@@ -203,6 +270,7 @@ class AugmentationCampaign:
         print(
             f"\ncampaign done: {int(summary['accepted'].sum()):,} rows accepted "
             f"({gate_free:,} credit-eligible, {staged:,} gated audit samples) "
+            f"+ {int(summary['synthesized'].sum()):,} from the synthetic rung "
             f"| pool now {len(pool):,} rows"
         )
         if dropped:
