@@ -215,6 +215,41 @@ def test_the_cut_never_eats_the_span_the_row_is_generated_for(extractor):
     assert "USA" in cut, f"the acronym was cut away: {cut!r}"
 
 
+def _surfaces(*docs: str, bank: str = "code_identifier") -> pd.DataFrame:
+    return pd.DataFrame([
+        {"doc_id": d, "bank": bank, "floor": "id:tech", "surface": "cPGES"}
+        for d in docs
+    ])
+
+
+def test_surfaces_on_unjudged_docs_cannot_change_the_pairs():
+    """`eligible` drops surfaces on unjudged docs before the claimability
+    filter — 99% of the mined supply on most lanes. That is safe only because
+    `_grounded_pairs` merges on qrels and reads `doc_surf` solely for docs it
+    drew from them, so an unjudged doc is unreachable rather than merely
+    unlikely. Pin it: adding unjudged noise must change nothing."""
+    qrels = pd.DataFrame([
+        {"query_id": "q1", "doc_id": "d1", "relevance": 1},
+        {"query_id": "q1", "doc_id": "d2", "relevance": 1},
+    ]).astype({"query_id": str, "doc_id": str})
+    judged = _surfaces("d1", "d2")
+    noisy = pd.concat([judged, _surfaces("nope-1", "nope-2")], ignore_index=True)
+
+    lean = InjectOperator._grounded_pairs(
+        qrels, judged, InjectOperator._offers(judged, 1)
+    )
+    fat = InjectOperator._grounded_pairs(
+        qrels, noisy, InjectOperator._offers(noisy, 1)
+    )
+    def pairs(frame):
+        return sorted(
+            (r.query_id, r.grounding_doc_id, tuple(r.grounding_doc_ids))
+            for r in frame.itertuples(index=False)
+        )
+
+    assert pairs(lean) == pairs(fat) and len(lean) == 1
+
+
 class PoisonRunEngine:
     """Accepts exactly as the real engine does, but fails the test if the loop
     ever spends a completion."""
