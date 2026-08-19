@@ -759,19 +759,22 @@ class AutoFusionRouter:
     ) -> list[StrategyName]:
         """Route every row of `frame` (needs `dataset`, `query_id`, `query`).
         Cache hits skip the network; only misses trigger a POST. Saves cache
-        once at end iff any miss fired."""
+        once iff any miss fired — in a `finally`, so a query the endpoint
+        refuses mid-batch cannot discard the scores already paid for."""
         routes: list[StrategyName] = []
         misses = 0
-        for _, row in tqdm(
-            frame.iterrows(), total=len(frame), desc=desc, leave=False
-        ):
-            key = (str(row["dataset"]), str(row["query_id"]))
-            if key not in self._cache:
-                self._cache[key] = self._client.score(str(row["query"]))
-                misses += 1
-            routes.append(_production_route(self._cache[key]))
-        if misses:
-            self._save_cache()
+        try:
+            for _, row in tqdm(
+                frame.iterrows(), total=len(frame), desc=desc, leave=False
+            ):
+                key = (str(row["dataset"]), str(row["query_id"]))
+                if key not in self._cache:
+                    self._cache[key] = self._client.score(str(row["query"]))
+                    misses += 1
+                routes.append(_production_route(self._cache[key]))
+        finally:
+            if misses:
+                self._save_cache()
         return routes
 
 

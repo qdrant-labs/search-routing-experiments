@@ -103,6 +103,9 @@ class LLMScoreClient:
     """
 
     SCORE_MAX = 9
+    MAX_BYTES = 4096
+    """The server's cap is on encoded bytes, not characters — measured: every
+    payload it refused was >4096 bytes, none was under."""
 
     def __init__(
         self,
@@ -121,11 +124,16 @@ class LLMScoreClient:
         self._api_key = key
         self._timeout = request_timeout
 
+    @classmethod
+    def fit(cls, query: str) -> str:
+        """`query` cut to the server's byte cap, never mid-character."""
+        return query.encode()[: cls.MAX_BYTES].decode(errors="ignore")
+
     def score(self, query: str) -> int:
         response = requests.post(
             self._api_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"text": query[:4096]},  # server rejects longer text
+            json={"text": self.fit(query)},
             timeout=self._timeout,
         )
         response.raise_for_status()

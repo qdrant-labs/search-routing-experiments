@@ -62,8 +62,16 @@ class Objective(BaseModel, metaclass=ABCMeta):
         ranked = sorted(ranking.items(), key=lambda kv: -kv[1])
         return [doc_id for doc_id, _ in ranked[: self.top_k]]
 
-    def ndcg(self, ranking: dict[str, float], relevant: dict[str, int]) -> float:
-        """NDCG@k over an already-thresholded relevant set.
+    def ndcg(self, ordered: list[str], relevant: dict[str, int]) -> float:
+        """NDCG@k over exactly the persisted top-k ids, best first.
+
+        Scored from the same `ordered()` list a row stores, not the raw
+        ranking dict: ranx sorts its input with numpy's unstable sort, which
+        scrambles score ties differently from `ordered()`'s stable sort, so
+        passing the dict let a tied gold doc count toward the score while
+        falling outside the stored top-k (the parquet round-trip bug). Synthetic
+        descending scores reproduce `ordered`'s order under ranx; NDCG reads
+        ranks, not score magnitudes, so non-tie values are unchanged.
 
         Shared by `NDCGObjective` and `RouterObjective`'s tie-breaker so the
         two cannot drift apart. ranx applies linear gain, so a grade-2 doc
@@ -74,12 +82,13 @@ class Objective(BaseModel, metaclass=ABCMeta):
         query and identical across routes, so it divides out and the argmax is
         unaffected — but absolute values are not comparable to published NDCG.
         """
-        if not relevant or not ranking:
+        if not relevant or not ordered:
             return 0.0
+        run = {doc: float(len(ordered) - i) for i, doc in enumerate(ordered)}
         return float(
             evaluate(
                 Qrels({"q": relevant}),
-                Run({"q": ranking}),
+                Run({"q": run}),
                 f"ndcg@{self.top_k}",
             )
         )
@@ -129,7 +138,7 @@ class RouterObjective(Objective):
         if not relevant:
             return 0.0, top
         hit = self.hit_weight if top and top[0] in relevant else 0.0
-        return hit + self.ndcg_weight * self.ndcg(ranking, relevant), top
+        return hit + self.ndcg_weight * self.ndcg(top, relevant), top
 
 
 class NDCGObjective(Objective):
@@ -152,7 +161,5 @@ class NDCGObjective(Objective):
     def assess(
         self, ranking: dict[str, float], gold_qrel: dict[str, int]
     ) -> tuple[float, list[str]]:
-        return (
-            self.ndcg(ranking, self.relevant(gold_qrel)),
-            self.ordered(ranking),
-        )
+        top = self.ordered(ranking)
+        return self.ndcg(top, self.relevant(gold_qrel)), top
