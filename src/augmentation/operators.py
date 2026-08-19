@@ -728,11 +728,6 @@ class InjectOperator(Operator):
             qrels_path = self._paths.lane_qrels(lane)
             if surfaces.empty or not qrels_path.exists():
                 continue
-            floor_surfaces = self._supply.claimable(
-                self.drawable(surfaces, floor), lane
-            )
-            if floor_surfaces.empty:
-                continue
             lane_pool = self.unsatisfied(
                 pool[(pool["dataset"] == key) & pool["checkable"]], floor
             )
@@ -743,6 +738,20 @@ class InjectOperator(Operator):
             qrels = qrels[qrels["relevance"] >= min_rel].astype(
                 {"query_id": str, "doc_id": str}
             )
+            # only a JUDGED doc can ever ground a pair — `_grounded_pairs`
+            # merges on qrels and reads `doc_surf` solely for docs it drew from
+            # them — so an unjudged doc's surfaces cannot reach any output.
+            # Dropping them here is what keeps the claimability filter off
+            # ~99% of the mined supply on most lanes.
+            drawable = self.drawable(surfaces, floor)
+            drawable = drawable[
+                drawable["doc_id"].astype(str).isin(set(qrels["doc_id"]))
+            ]
+            # claimability still precedes `_offers`: a surface the bank no
+            # longer claims must not count toward the `wanted` threshold
+            floor_surfaces = self._supply.claimable(drawable, lane)
+            if floor_surfaces.empty:
+                continue
             offers = self._offers(floor_surfaces, wanted)
             if offers.empty:
                 continue
@@ -803,21 +812,27 @@ class InjectOperator(Operator):
         Parents whose surfaces reach only one judged doc are dropped, not
         minted: their key would be a single doc at ceiling — a fake tie no route
         can break (d43d fix)."""
+        # a dict, not the Series: this is looked up once per (candidate row x
+        # judged doc), and Series.get pays index machinery every time
         doc_surf = (
             floor_surfaces.astype({"doc_id": str})
             .groupby("doc_id")["surface"].agg(frozenset)
+            .to_dict()
         )
         rel_docs = qrels.groupby("query_id")["doc_id"].agg(list).to_dict()
         cand = qrels.merge(offers, on="doc_id")
         if cand.empty:
             return cand
-        grounding = cand.apply(
-            lambda row: tuple(sorted(
+        empty: frozenset[str] = frozenset()
+
+        def grounded(row: pd.Series) -> tuple[str, ...]:
+            wanted = frozenset(row["surfaces"])   # once per row, not per doc
+            return tuple(sorted(
                 doc for doc in rel_docs.get(row["query_id"], ())
-                if set(row["surfaces"]) <= doc_surf.get(doc, frozenset())
-            )),
-            axis=1,
-        )
+                if wanted <= doc_surf.get(doc, empty)
+            ))
+
+        grounding = cand.apply(grounded, axis=1)
         cand = cand.assign(grounding_doc_ids=grounding, __depth=grounding.map(len))
         cand = cand[cand["__depth"] >= 2]
         if cand.empty:
