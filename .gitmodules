@@ -1,0 +1,3 @@
+[submodule "src/query-taxonomy"]
+	path = src/query-taxonomy
+	url = git@github.com:qdrant-labs/query-taxonomy.git
