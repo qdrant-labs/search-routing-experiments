@@ -710,11 +710,16 @@ class InjectOperator(Operator):
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
         """Rung-1 pairs (d43f): checkable parents the demand does not already
-        cover, whose own gold doc carries enough surfaces of it — joined per
-        lane from the supply index + lane qrels. One deterministic doc and its
-        `wanted` surfaces ride along as `grounding_doc_id` / `surfaces` /
-        `bank`; all come from ONE doc and ONE bank, so the minted key and the
-        span target each stay single-valued."""
+        cover, whose own JUDGED docs carry enough surfaces of it — joined per
+        lane from the supply index + lane qrels (relevance at the lane's own
+        `min_relevance`, so a graded lane's below-threshold docs are not
+        counted). Its `wanted` surfaces and one primary `grounding_doc_id` ride
+        along, plus `grounding_doc_ids` — EVERY judged doc the surfaces still
+        occur in. Only parents with >= 2 such docs survive: a single-doc key
+        scores 1.0 for every route that finds it (a fake tie at ceiling), so a
+        shallower pair would mint pure waste (d43d fix)."""
+        from hybrid_search_rrf_dataset.lanes import LANES
+
         pool = self.parent_pool(selection)
         wanted = self.wanted(floor)
         frames: list[pd.DataFrame] = []
@@ -723,7 +728,9 @@ class InjectOperator(Operator):
             qrels_path = self._paths.lane_qrels(lane)
             if surfaces.empty or not qrels_path.exists():
                 continue
-            floor_surfaces = self.drawable(surfaces, floor)
+            floor_surfaces = self._supply.claimable(
+                self.drawable(surfaces, floor), lane
+            )
             if floor_surfaces.empty:
                 continue
             lane_pool = self.unsatisfied(
@@ -731,31 +738,99 @@ class InjectOperator(Operator):
             )
             if lane_pool.empty:
                 continue
+            min_rel = LANES[key].min_relevance if key in LANES else 1
             qrels = pd.read_parquet(qrels_path)
-            qrels = qrels[qrels["relevance"] >= 1].astype(
+            qrels = qrels[qrels["relevance"] >= min_rel].astype(
                 {"query_id": str, "doc_id": str}
             )
             offers = self._offers(floor_surfaces, wanted)
             if offers.empty:
                 continue
-            pairs = (
-                qrels.merge(offers, on="doc_id")
-                .sort_values(["query_id", "doc_id", "bank"], kind="stable")
-                .drop_duplicates("query_id")
-                .rename(columns={"doc_id": "grounding_doc_id"})
-            )
+            pairs = self._grounded_pairs(qrels, floor_surfaces, offers)
+            if pairs.empty:
+                continue
             matched = lane_pool.assign(
                 query_id=lane_pool["query_id"].astype(str)
             ).merge(
-                pairs[["query_id", "grounding_doc_id", "bank", "surfaces"]],
+                pairs[
+                    ["query_id", "grounding_doc_id", "grounding_doc_ids",
+                     "bank", "surfaces"]
+                ],
                 on="query_id",
             )
             if not matched.empty:
                 frames.append(matched)
         if not frames:
             return pool.iloc[0:0]
-        return pd.concat(frames, ignore_index=True).sample(
-            frac=1.0, random_state=self._order_seed
+        return self._keeps_headroom(
+            pd.concat(frames, ignore_index=True), floor
+        ).sample(frac=1.0, random_state=self._order_seed)
+
+    @staticmethod
+    def _keeps_headroom(matched: pd.DataFrame, floor: str) -> pd.DataFrame:
+        """Parents whose natural-language share still clears the cell's floor
+        once the surfaces land. The share is function words over all words, and
+        an identifier is neither, so k injected tokens move it from `s` to
+        `s*n/(n+k)` — arithmetic on two columns the catalog already carries.
+        Nobody instructs this band, so a parent without the headroom fails a
+        constraint it was never told about; it is cheaper never to pick it."""
+        cell = CELLS_BY_NAME.get(floor)
+        floors = [
+            band.at_least
+            for band in (cell.bands if cell else ())
+            if not band.is_span
+            and band.member == "natural_language_share"
+            and band.at_least is not None
+        ]
+        needed = {SHARE_COLUMN, WORDS_COLUMN}
+        if not floors or matched.empty or not needed <= set(matched.columns):
+            return matched
+        added = matched["surfaces"].map(
+            lambda offered: sum(len(_WORD_TOKEN.findall(str(s))) for s in offered)
+        )
+        words = matched[WORDS_COLUMN]
+        after = matched[SHARE_COLUMN] * words / (words + added).replace(0, np.nan)
+        return matched[after >= max(floors)]
+
+    @staticmethod
+    def _grounded_pairs(
+        qrels: pd.DataFrame, floor_surfaces: pd.DataFrame, offers: pd.DataFrame
+    ) -> pd.DataFrame:
+        """One (query, surfaces) pair per parent whose injected surfaces occur
+        in >= 2 of its judged docs. `grounding_doc_ids` carries all of them (the
+        mint writes the key against every one); `grounding_doc_id` is the
+        primary doc the surfaces were read from, kept for the gold-text cut.
+        Parents whose surfaces reach only one judged doc are dropped, not
+        minted: their key would be a single doc at ceiling — a fake tie no route
+        can break (d43d fix)."""
+        doc_surf = (
+            floor_surfaces.astype({"doc_id": str})
+            .groupby("doc_id")["surface"].agg(frozenset)
+        )
+        rel_docs = qrels.groupby("query_id")["doc_id"].agg(list).to_dict()
+        cand = qrels.merge(offers, on="doc_id")
+        if cand.empty:
+            return cand
+        grounding = cand.apply(
+            lambda row: tuple(sorted(
+                doc for doc in rel_docs.get(row["query_id"], ())
+                if set(row["surfaces"]) <= doc_surf.get(doc, frozenset())
+            )),
+            axis=1,
+        )
+        cand = cand.assign(grounding_doc_ids=grounding, __depth=grounding.map(len))
+        cand = cand[cand["__depth"] >= 2]
+        if cand.empty:
+            return cand
+        # one pair per query: the deepest grounding set, then stable by doc/bank
+        return (
+            cand.sort_values(
+                ["query_id", "__depth", "doc_id", "bank"],
+                ascending=[True, False, True, True], kind="stable",
+            )
+            .drop_duplicates("query_id")
+            .drop(columns="__depth")
+            .rename(columns={"doc_id": "grounding_doc_id"})
         )
 
     @staticmethod
@@ -775,6 +850,28 @@ class InjectOperator(Operator):
         )
         enough = grouped[grouped["surfaces"].map(len) >= wanted]
         return enough.assign(surfaces=enough["surfaces"].map(lambda s: s[:wanted]))
+
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Append the copied surfaces verbatim, and hand the row back to the
+        model when the bank does not CLAIM them where they land. Containment
+        and claimability are different properties: version_string is
+        keyword-gated, so a bare `17.2` appended to a query is literally
+        present and still measures zero — only a rewrite that supplies the
+        gate word can satisfy that target."""
+        missing = [str(s) for s in parent["surfaces"] if str(s) not in text]
+        placed = f"{text.rstrip()} {' '.join(missing)}" if missing else text
+        claimed = _regex_extractor().resolve(
+            placed, groups=[FeatureGroup.STRUCTURED_IDENTIFIERS]
+        ).spans.get(FeatureGroup.STRUCTURED_IDENTIFIERS, {})
+        if len(claimed.get(str(parent["bank"]), ())) < len(parent["surfaces"]):
+            return None
+        return placed
 
     def instruction(
         self, floor: str, parent: pd.Series, requirement: tuple = ()
@@ -825,9 +922,13 @@ class InjectOperator(Operator):
 
     def candidate(self, parent, floor, outcome):
         base = super().candidate(parent, floor, outcome)
-        return base.model_copy(
-            update={"grounding_doc_id": str(parent["grounding_doc_id"])}
-        )
+        ids = parent.get("grounding_doc_ids")
+        return base.model_copy(update={
+            "grounding_doc_id": str(parent["grounding_doc_id"]),
+            "grounding_doc_ids": tuple(str(d) for d in ids)
+            if ids is not None
+            else (),
+        })
 
 
 OPERATOR_FAMILIES: tuple[type[Operator], ...] = (

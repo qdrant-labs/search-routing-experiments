@@ -7,9 +7,38 @@ was already on disk somewhere and just wasn't visible yet.
 import pandas as pd
 
 from augmentation.config import AugmentationPaths
+from augmentation.core import AnswerKeyPath, AugmentedCandidate
 from augmentation.qrels import AugmentationQrels
 
 LANE = "beir-nfcorpus"
+
+
+def test_mint_writes_parent_grades_against_every_grounding_doc(tmp_path):
+    """d43d/#6 fix: Inject mints against ALL judged docs the surface reaches,
+    at the parent's REAL grades — not one synthetic relevance=1 that a graded
+    lane thresholds straight to all_zero."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    lane_dir = paths.data_dir / LANE
+    lane_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {"query_id": "p1", "doc_id": "docA", "relevance": 2},
+        {"query_id": "p1", "doc_id": "docB", "relevance": 1},  # no surface
+        {"query_id": "p1", "doc_id": "docC", "relevance": 3},
+    ]).to_parquet(lane_dir / "qrels.parquet", index=False)
+    candidate = AugmentedCandidate(
+        query_id="aug-id-tech-p1", query="laptops SKU-1", floor="id:tech",
+        operator="inject", provenance="doc_grounded", generated_from="p1",
+        parent_dataset=LANE, home_lane=LANE,
+        grounding_doc_id="docA", grounding_doc_ids=("docA", "docC"),
+        meaning_preserved=False, answer_key=AnswerKeyPath.MINTED, attempts=1,
+    )
+
+    written = AugmentationQrels(paths).mint(candidate)
+
+    assert written == 2
+    saved = AugmentationQrels(paths).load()
+    assert dict(zip(saved["doc_id"], saved["relevance"])) == {"docA": 2, "docC": 3}
+    assert set(saved["source"]) == {"constructed"}
 
 
 def _pool_row(query_id: str, generated_from: str, answer_key: str = "inherit") -> dict:

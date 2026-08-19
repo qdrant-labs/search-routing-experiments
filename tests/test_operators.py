@@ -393,6 +393,48 @@ def test_offers_drops_a_doc_short_of_the_demand():
     assert InjectOperator._offers(surfaces, 2).empty
 
 
+def _qrels(*rows: tuple[str, str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"query_id": q, "doc_id": d, "relevance": 1} for q, d in rows]
+    ).astype({"query_id": str, "doc_id": str})
+
+
+def test_grounded_pairs_needs_two_judged_docs_and_carries_them_all():
+    """d43d fix: a surface in >= 2 of the parent's judged docs mints a
+    depth-2 key; a surface reaching only one judged doc is dropped, not
+    minted into a fake tie at ceiling."""
+    qrels = _qrels(("q1", "d1"), ("q1", "d2"), ("q2", "d3"))
+    surfaces = _surfaces(
+        ("d1", "uuid", "U-1"),   # U-1 in two of q1's judged docs
+        ("d2", "uuid", "U-1"),
+        ("d3", "uuid", "U-9"),   # U-9 in one of q2's judged docs
+    )
+    offers = InjectOperator._offers(surfaces, 1)
+    pairs = InjectOperator._grounded_pairs(qrels, surfaces, offers)
+
+    assert list(pairs["query_id"]) == ["q1"]   # q2 dropped: depth 1
+    row = pairs.iloc[0]
+    assert set(row["grounding_doc_ids"]) == {"d1", "d2"}
+    assert row["grounding_doc_id"] in {"d1", "d2"}
+    assert row["surfaces"] == ("U-1",)
+
+
+def test_grounded_pairs_wanted_two_needs_both_surfaces_in_the_same_docs():
+    """A count-2 cell needs BOTH surfaces to co-occur in >= 2 judged docs —
+    a doc carrying only one of the pair does not deepen the key."""
+    qrels = _qrels(("q1", "d1"), ("q1", "d2"), ("q1", "d3"))
+    surfaces = _surfaces(
+        ("d1", "code_identifier", "aa"), ("d1", "code_identifier", "bb"),
+        ("d2", "code_identifier", "aa"), ("d2", "code_identifier", "bb"),
+        ("d3", "code_identifier", "aa"),   # only one of the pair — not grounding
+    )
+    offers = InjectOperator._offers(surfaces, 2)
+    pairs = InjectOperator._grounded_pairs(qrels, surfaces, offers)
+
+    assert list(pairs["query_id"]) == ["q1"]
+    assert set(pairs.iloc[0]["grounding_doc_ids"]) == {"d1", "d2"}
+
+
 _PARENT = pd.Series({
     "surfaces": ("cPGES",), "bank": "code_identifier", "floors": [],
 })

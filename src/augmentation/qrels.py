@@ -1,9 +1,10 @@
 """Answer keys born with the row (d43d): `data/augmentation/qrels.parquet`.
 
 Minted the moment a candidate is accepted. Two paths, per the operator's
-declared answer key: MINTED (Inject, synthetic) writes one
-source='constructed' row against the grounding doc; INHERIT copies the
-parent's judgments under the child's query_id keeping source='human' —
+declared answer key: MINTED (Inject) writes source='constructed' rows against
+every judged doc the injected surface still occurs in, at the parent's own
+grades — a narrowed query keeps its parent's depth (d43d fix); INHERIT copies
+the parent's judgments under the child's query_id keeping source='human' —
 the judgment is still a human's, only the query changed under a declared
 operator — with `inherited_from` recording the transfer. QrelStore merges
 by its declaration-order precedence at labeling.
@@ -54,23 +55,39 @@ class AugmentationQrels:
         if candidate.query_id in set(existing["query_id"]):
             return 0
         if candidate.answer_key is AnswerKeyPath.MINTED:
-            rows = pd.DataFrame([{
-                "query_id": candidate.query_id,
-                "doc_id": str(candidate.grounding_doc_id),
-                "relevance": 1,
-                "source": "constructed",
-                "inherited_from": None,
-            }])
+            rows = self._minted_rows(candidate)
         else:
             rows = self._inherit_rows(
                 candidate.query_id, candidate.home_lane, candidate.generated_from
             )
-            if rows.empty:
-                return 0
+        if rows.empty:
+            return 0
         merged = pd.concat([existing, rows[list(_COLUMNS)]], ignore_index=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         merged.to_parquet(self.path, index=False)
         return len(rows)
+
+    def mint_constructed(self, query_id: str, doc_id: str) -> int:
+        """The synthetic rung's key: the one document written to answer this
+        query. Depth of one is honest here — nobody judged anything else
+        against it — and it does not collapse to a ceiling tie the way a
+        minted Inject key would, because the constructed-docs collection
+        carries borrowed distractors for the routes to disagree over."""
+        existing = self.load()
+        if query_id in set(existing["query_id"]):
+            return 0
+        row = pd.DataFrame(
+            [{
+                "query_id": query_id, "doc_id": doc_id, "relevance": 1,
+                "source": "constructed", "inherited_from": None,
+            }],
+            columns=_COLUMNS,
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        pd.concat([existing, row], ignore_index=True).to_parquet(
+            self.path, index=False
+        )
+        return 1
 
     def backfill(self, pool: pd.DataFrame) -> pd.DataFrame:
         """Retry the inherit-path lookup for every pool row with no qrels
@@ -111,6 +128,31 @@ class AugmentationQrels:
             f"{len(unlabelable)} still have no judgment anywhere"
         )
         return pd.DataFrame({"query_id": unlabelable})
+
+    def _minted_rows(self, candidate: AugmentedCandidate) -> pd.DataFrame:
+        """Inject's answer key: the parent's own human grades for every judged
+        doc the injected surface still occurs in. Eligibility guaranteed >= 2
+        such docs, so the narrowed child keeps its parent's depth instead of
+        collapsing to a single doc that scores 1.0 for every route (a fake tie
+        at ceiling — d43d fix). source stays 'constructed' — the query/doc
+        PAIRING is Inject's; only the grade is the parent's real judgment, not
+        the old synthetic 1 that graded lanes then thresholded to all_zero."""
+        keep = {str(d) for d in candidate.grounding_doc_ids} or (
+            {str(candidate.grounding_doc_id)}
+            if candidate.grounding_doc_id is not None
+            else set()
+        )
+        parent = self._parent_judgments(candidate.home_lane, candidate.generated_from)
+        rows = parent[parent["doc_id"].astype(str).isin(keep)]
+        if rows.empty:
+            return pd.DataFrame(columns=_COLUMNS)
+        return pd.DataFrame({
+            "query_id": candidate.query_id,
+            "doc_id": rows["doc_id"].astype(str),
+            "relevance": rows["relevance"].astype(int),
+            "source": "constructed",
+            "inherited_from": None,
+        })
 
     def _inherit_rows(
         self, query_id: str, home_lane: str, generated_from: str

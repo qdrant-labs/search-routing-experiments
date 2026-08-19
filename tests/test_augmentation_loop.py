@@ -108,11 +108,18 @@ def test_two_surfaces_reach_a_count_band_and_bank_one_row(tmp_path):
         "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
         "query": "alternative medicine", "floors": [],
         "surfaces": ("cPGES", "lipoxinA4"), "bank": "code_identifier",
-        "grounding_doc_id": "MED-1",
+        "grounding_doc_id": "MED-1", "grounding_doc_ids": ("MED-1", "MED-2"),
         f"{IDENT}code_identifier": 0.0,
         "natural_language_signal.natural_language_share": 0.0,
         "length.length_words": 2.0,
     }
+    # the surfaces reach two of q1's judged docs — the mint borrows their real
+    # grades (d43d fix) rather than inventing a single relevance=1
+    (tmp_path / "beir-nfcorpus").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {"query_id": "q1", "doc_id": "MED-1", "relevance": 2},
+        {"query_id": "q1", "doc_id": "MED-2", "relevance": 1},
+    ]).to_parquet(tmp_path / "beir-nfcorpus" / "qrels.parquet", index=False)
     # zero function words: 1 in 9 tokens is already 0.111 > 0.1
     child = "cPGES lipoxinA4"
     loop = _loop(tmp_path, child, _sheet("symbol_pile_no_grammar"), OneParent(parent))
@@ -125,12 +132,15 @@ def test_two_surfaces_reach_a_count_band_and_bank_one_row(tmp_path):
     assert row["grounding_doc_id"] == "MED-1"
 
     keys = loop.qrels.load()
-    assert list(keys["source"]) == ["constructed"]
-    assert list(keys["doc_id"]) == ["MED-1"]
+    assert set(keys["source"]) == {"constructed"}
+    assert dict(zip(keys["doc_id"], keys["relevance"])) == {"MED-1": 2, "MED-2": 1}
 
-    asked = loop.engine.calls[0][2]
-    count = next(t for t in asked.spans if t.feature == "code_identifier")
-    assert count.min_count == 2, "the band's count must reach the target"
+    # Both of this cell's steps are deterministic now — injection places the
+    # surfaces, the cut scores terms — so it buys no completion at all. The
+    # count band is proven by the row banking: nothing banks unless the local
+    # re-measure found both spans.
+    assert loop.engine.calls == [], "this cell should cost nothing"
+    assert "cPGES" in row["query"] and "lipoxinA4" in row["query"]
 
 
 def test_a_child_missing_one_surface_is_refused(tmp_path):

@@ -93,6 +93,11 @@ class AugmentedCandidate(BaseModel):
     parent_dataset: str
     home_lane: str
     grounding_doc_id: str | None = None
+    grounding_doc_ids: tuple[str, ...] = ()
+    """Every judged doc the injected surface still occurs in. The minted key is
+    written against ALL of them, so a narrowed query keeps its parent's judgment
+    depth — a single-doc key scores 1.0 for every route that finds it, a fake
+    tie at ceiling that teaches the router nothing (d43d fix)."""
     meaning_preserved: bool
     answer_key: AnswerKeyPath
     attempts: int
