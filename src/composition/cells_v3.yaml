@@ -1,0 +1,64 @@
+# v3 archetype cells — ADDITIVE to cells.yaml (the 44 v2 cells are frozen and
+# reused by v3). These band on the new taxonomy columns the v3 catalog adds
+# (corruption, term_rarity, subword_fragmentation, unknown_token_rate). Bands
+# are raw units grounded in the v3-catalog distribution; `predicts` is an
+# a-priori prior to be TESTED by labelling, never used to allocate. Thin cells
+# (encoding/paste/truncation are ~0.4% of natural queries) are GENERATION
+# targets, never pruned — the cells-are-a-priori-not-supply doctrine.
+cells:
+  - name: rare_term_query
+    predicate:
+      - {column: term_rarity.rare_share, at_least: 0.25}
+    predicts: [sparse]
+    rationale: >
+      A quarter or more of the query's terms are globally rare (wordfreq).
+      Rare tokens are the exact-match anchor a sparse route grips; dense may
+      smooth them away. Global rarity, not this-corpus IDF.
+    source: v3-taxonomy
+    looks_like: a query built around uncommon/technical vocabulary
+
+  - name: fragmented_query
+    predicate:
+      - {column: subword_fragmentation.max_pieces_per_word, at_least: 4}
+    predicts: [dense]
+    rationale: >
+      Some word shatters into >=4 WordPiece pieces — the dense model sees
+      subword debris rather than a concept. Where dense most struggles; a prior
+      that dense is nonetheless the survivable route is under test.
+    source: v3-taxonomy
+    looks_like: a query with a long or unusual term (phosphorylation-class)
+
+  - name: typo_bearing_query
+    predicate:
+      - {column: corruption.typo, at_least: 1}
+    predicts: [dense]
+    rationale: >
+      Carries a keyword-adjacent misspelling (OOV yet one edit from a frequent
+      word). Sparse exact-match breaks on the damaged token; dense embeddings
+      tolerate it. A robustness archetype; thin naturally, a generation target.
+    source: v3-taxonomy
+    looks_like: a real query with a single-character typo (confgure -> configure)
+
+  - name: high_oov_query
+    predicate:
+      - {column: unknown_token_rate.unknown_token_rate, at_least: 0.25}
+    predicts: [dense]
+    rationale: >
+      A quarter or more of the word-shaped tokens are absent from the frequency
+      table — novel/technical vocabulary BM25 cannot rarity-weight. Dense is the
+      only route that can generalize; the prior is under test.
+    source: v3-taxonomy
+    looks_like: a query dense with jargon or novel terms
+
+  - name: artifact_corrupted_query
+    any_of:
+      - {column: corruption.encoding_artifact, at_least: 1}
+      - {column: corruption.paste_residue, at_least: 1}
+      - {column: corruption.truncation, at_least: 1}
+    predicts: [hybrid]
+    rationale: >
+      Text-damage artifacts (mojibake, copy-paste residue, truncation) that
+      degrade both routes; the hedge (RRF) is the safe prior. ~0.4% of natural
+      queries, so primarily a GENERATION target for the robustness axis.
+    source: v3-taxonomy
+    looks_like: a query with encoding junk, HTML residue, or a cut-off ending
