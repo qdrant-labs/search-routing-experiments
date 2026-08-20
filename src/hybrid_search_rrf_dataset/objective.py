@@ -24,7 +24,9 @@ class Objective(BaseModel, metaclass=ABCMeta):
     top_k: int = Field(default=10, gt=0)
     min_relevance: int = Field(default=1, ge=1)
     """Grades below this are irrelevant. TREC-DL's 0-3 scale needs 2; qrels
-    that are already binary need 1. Set per dataset, not globally."""
+    that are already binary need 1. Set per dataset, not globally — so it
+    cannot enter `name` without splitting comparability per lane; a cache's
+    value is fingerprinted by `golden.ScoringRegime` instead."""
 
     @property
     @abstractmethod

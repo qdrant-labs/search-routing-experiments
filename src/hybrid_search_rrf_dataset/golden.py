@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterator, Mapping
 from pathlib import Path
@@ -72,6 +73,26 @@ class GoldenRoutingDataset(FusionRow):
     route_raw_scores: dict[str, list[float]] = Field(default_factory=dict)
     """Each route's own retrieval score (cosine/BM25/RRF-fused), parallel to
     `route_rankings[route]` by position"""
+
+
+REGIME_SUFFIX = ".provenance.json"
+"""Sidecar naming, shared with `scripts/rederive_labels.py`."""
+
+
+class ScoringRegime(BaseModel):
+    """The scoring inputs `metric_name` cannot show — the relevance threshold
+    and each route's fetch depth.
+
+    Written beside a cache and compared on load, because `Objective.name` is
+    invariant to both: nfcorpus' `min_relevance` 1→2 and `fetch_limit`
+    1000→50 each moved scores under an unchanged name.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    objective: str
+    min_relevance: int
+    fetch_limit: dict[str, int]
 
 
 class QueryContext(BaseModel):
@@ -163,10 +184,23 @@ class FusionBuilder(ABC, Generic[T]):
             for qid, docs in (excluded or {}).items()
         }
 
+    @property
+    @abstractmethod
+    def strategies(self) -> list[FusionStrategy]:
+        """Every route this builder queries."""
+
+    @property
+    def regime(self) -> ScoringRegime:
+        return ScoringRegime(
+            objective=self.objective.name,
+            min_relevance=self.objective.min_relevance,
+            fetch_limit={str(s.name): s.fetch_limit for s in self.strategies},
+        )
+
     def _ranked(self, strategy: FusionStrategy, ctx: QueryContext) -> dict[str, float]:
         """Rank, then drop the query's excluded docs before scoring. Exclusion is per-query: a doc excluded here
-        can be another query's gold, so the corpus keeps it and the fetch
-        depth (1000) refills the cutoff."""
+        can be another query's gold, so the corpus keeps it and the strategy's
+        own `fetch_limit` refills the cutoff."""
         ranking = strategy.rank(ctx.query)
         banned = self._excluded.get(ctx.query_id)
         if not banned:
@@ -249,6 +283,9 @@ class FusionBuilder(ABC, Generic[T]):
         out.mkdir(parents=True, exist_ok=True)
         file = out / "rows.parquet"
         pd.DataFrame([r.model_dump() for r in rows]).to_parquet(file, index=False)
+        file.with_suffix(REGIME_SUFFIX).write_text(
+            self.regime.model_dump_json(indent=2) + "\n"
+        )
         return file
 
     @classmethod
@@ -273,18 +310,40 @@ class FusionBuilder(ABC, Generic[T]):
         file = Path(path or self.default_dir) / "rows.parquet"
         if file.exists():
             rows = type(self).load(path)
-            stale = {r.metric_name for r in rows} - {self.objective.name}
-            if stale:
-                raise ValueError(
-                    f"{file} holds rows scored with {sorted(stale)}, but this "
-                    f"builder is configured for {self.objective.name!r}. Delete "
-                    f"the file to rebuild, or point at a different path — "
-                    f"mixing objectives silently would corrupt every comparison."
-                )
+            self._assert_reusable(file, rows)
             return rows
         rows = self.build(dataset, start_id=start_id, qrels=qrels)
         self.save(rows, path)
         return rows
+
+    def _assert_reusable(self, file: Path, rows: list[T]) -> None:
+        """Refuse a cache scored under a different objective or regime."""
+        stale = {r.metric_name for r in rows} - {self.objective.name}
+        if stale:
+            raise ValueError(
+                f"{file} holds rows scored with {sorted(stale)}, but this "
+                f"builder is configured for {self.objective.name!r}. Delete "
+                f"the file to rebuild, or point at a different path — "
+                f"mixing objectives silently would corrupt every comparison."
+            )
+        sidecar = file.with_suffix(REGIME_SUFFIX)
+        if not sidecar.exists():
+            warnings.warn(
+                f"{file} carries no {REGIME_SUFFIX} sidecar, so its "
+                f"min_relevance and fetch_limit cannot be checked against "
+                f"{self.regime.model_dump()} — reuse is unverified. Rebuild "
+                f"to record them.",
+                stacklevel=3,
+            )
+            return
+        cached = ScoringRegime.model_validate_json(sidecar.read_text())
+        if cached != self.regime:
+            raise ValueError(
+                f"{file} was scored under {cached.model_dump()}, but this "
+                f"builder is configured for {self.regime.model_dump()}. Both "
+                f"move the score while leaving metric_name untouched. Delete "
+                f"the file to rebuild, or point at a different path."
+            )
 
 
 class SingleStrategyBuilder(FusionBuilder[T], ABC):
@@ -299,6 +358,10 @@ class SingleStrategyBuilder(FusionBuilder[T], ABC):
     ) -> None:
         super().__init__(objective=objective, excluded=excluded)
         self.strategy = strategy
+
+    @property
+    def strategies(self) -> list[FusionStrategy]:
+        return [self.strategy]
 
 
 class RoutingBuilder(FusionBuilder[T], ABC):
@@ -321,8 +384,12 @@ class RoutingBuilder(FusionBuilder[T], ABC):
         super().__init__(objective=objective, excluded=excluded)
         self._routes = [dense_strategy, hybrid_strategy, sparse_strategy]
 
+    @property
+    def strategies(self) -> list[FusionStrategy]:
+        return self._routes
+
     def _by_name(self, name: StrategyName) -> FusionStrategy:
-        return next(s for s in self._routes if s.name == name)
+        return next(s for s in self.strategies if s.name == name)
 
 
 class BaselineBuilder(SingleStrategyBuilder[BaselineDataset]):
@@ -365,7 +432,7 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
     default_dir: ClassVar[Path] = Path("data/golden_routing")
 
     def build_row(self, ctx: QueryContext) -> GoldenRoutingDataset:
-        rankings = {s.name: self._ranked(s, ctx) for s in self._routes}
+        rankings = {s.name: self._ranked(s, ctx) for s in self.strategies}
         assessed = {
             name: self.objective.assess(ranking, ctx.gold_qrel)
             for name, ranking in rankings.items()
@@ -424,7 +491,7 @@ class HybridRoutingBuilder(RoutingBuilder[HybridRoutingDataset]):
         self._client = client or LLMScoreClient()
 
     def _route(self, score: int) -> FusionStrategy:
-        dense, hybrid, sparse = self._routes
+        dense, hybrid, sparse = self.strategies
         if 0 <= score <= self._dense_max:
             return dense
         if self._dense_max < score <= self._hybrid_max:

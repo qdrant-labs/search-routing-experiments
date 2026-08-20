@@ -1,11 +1,19 @@
-"""The classify payload's cap, and the assess score/ranking round-trip invariant."""
+"""The classify payload's cap, the assess score/ranking round-trip invariant,
+and the cache-reuse guard."""
 
 from pathlib import Path
+from typing import ClassVar
 
 import pandas as pd
 import pytest
 
-from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder, LLMScoreClient
+from hybrid_search_rrf_dataset.fusion import FusionStrategy, StrategyName
+from hybrid_search_rrf_dataset.golden import (
+    BaselineBuilder,
+    BaselineDataset,
+    GoldenRoutingBuilder,
+    LLMScoreClient,
+)
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
 GOOAQ_ORACLE = Path(__file__).resolve().parents[1] / "src/data/route_labels/gooaq_oracle"
@@ -79,3 +87,72 @@ def test_truncation_never_splits_a_character():
     head = "a" * (LLMScoreClient.MAX_BYTES - 1)
 
     assert LLMScoreClient.fit(head + "é" + "tail") == head
+
+
+class _FixedDepth(FusionStrategy):
+    """A route that carries only its fetch depth — no client, no retrieval."""
+
+    name: ClassVar[StrategyName] = StrategyName.DENSE_ONLY
+
+    def __init__(self, fetch_limit: int) -> None:
+        self.fetch_limit = fetch_limit
+
+    def rank(self, query: str) -> dict[str, float]:
+        return {}
+
+
+def _cached(out: Path, objective: RouterObjective, fetch_limit: int) -> None:
+    """One saved single-route cache, sidecar included."""
+    row = BaselineDataset(
+        id=0,
+        query_id="q1",
+        dataset_name="lane",
+        query="q",
+        qdrant_answer=["d1"],
+        metric=1.0,
+        metric_name=objective.name,
+        strategy_name=StrategyName.DENSE_ONLY,
+    )
+    BaselineBuilder(_FixedDepth(fetch_limit), objective=objective).save([row], out)
+
+
+def test_reuse_refuses_a_cache_scored_at_another_min_relevance(tmp_path):
+    """beir-nfcorpus went 1→2 (6b8bf4b) nine hours after the labels were
+    written and metric_name never moved, so the guard saw nothing."""
+    _cached(tmp_path, RouterObjective(min_relevance=1), 50)
+    builder = BaselineBuilder(
+        _FixedDepth(50), objective=RouterObjective(min_relevance=2)
+    )
+
+    with pytest.raises(ValueError, match="min_relevance"):
+        builder.build_or_load(None, tmp_path)  # type: ignore[arg-type]
+
+
+def test_reuse_refuses_a_cache_fetched_at_another_depth(tmp_path):
+    """fetch_limit 1000→50 (2443aa1) moved score_pure_rrf on 7% of rows, and
+    it lives on the strategy — nothing the objective can see."""
+    _cached(tmp_path, RouterObjective(), 1000)
+    builder = BaselineBuilder(_FixedDepth(50), objective=RouterObjective())
+
+    with pytest.raises(ValueError, match="fetch_limit"):
+        builder.build_or_load(None, tmp_path)  # type: ignore[arg-type]
+
+
+def test_reuse_accepts_a_cache_scored_under_the_same_regime(tmp_path):
+    _cached(tmp_path, RouterObjective(), 50)
+    builder = BaselineBuilder(_FixedDepth(50), objective=RouterObjective())
+
+    assert len(builder.build_or_load(None, tmp_path)) == 1  # type: ignore[arg-type]
+
+
+def test_a_cache_without_a_sidecar_still_loads_but_says_so(tmp_path):
+    """The 42 shipped oracle caches predate the sidecar: they must keep
+    loading, unverified but not silently."""
+    _cached(tmp_path, RouterObjective(), 50)
+    (tmp_path / "rows.provenance.json").unlink()
+    builder = BaselineBuilder(
+        _FixedDepth(50), objective=RouterObjective(min_relevance=3)
+    )
+
+    with pytest.warns(UserWarning, match="sidecar"):
+        assert len(builder.build_or_load(None, tmp_path)) == 1  # type: ignore[arg-type]
