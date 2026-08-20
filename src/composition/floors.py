@@ -61,10 +61,23 @@ any kind" is one band instead of one per bank. Deliberately OUTSIDE the span
 prefixes: `SpanCountAxis` sums everything under a group prefix, and a total
 living there would be counted twice."""
 
+CORRUPTION_SPANS = "derived.corruption_spans"
+"""Total corruption spans on a row, so the damage LADDER (clean / one span /
+two or more) is one band — `AxisBand` reads a single column and cannot sum the
+four corruption kinds."""
+
+DERIVED_TOTALS = {
+    IDENTIFIER_SPANS: FeatureGroup.STRUCTURED_IDENTIFIERS,
+    CORRUPTION_SPANS: FeatureGroup.CORRUPTION,
+}
+
 
 def with_derived(catalog: pd.DataFrame) -> pd.DataFrame:
     """The catalog plus the columns no bank emits — derived on every read so
-    the total can never disagree with the parts it sums."""
-    prefix = f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
-    columns = [c for c in catalog.columns if c.startswith(prefix)]
-    return catalog.assign(**{IDENTIFIER_SPANS: catalog[columns].sum(axis=1)})
+    a total can never disagree with the parts it sums."""
+    return catalog.assign(**{
+        name: catalog[
+            [c for c in catalog.columns if c.startswith(f"{group.value}.")]
+        ].sum(axis=1)
+        for name, group in DERIVED_TOTALS.items()
+    })

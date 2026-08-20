@@ -5,6 +5,12 @@
 # a-priori prior to be TESTED by labelling, never used to allocate. Thin cells
 # (encoding/paste/truncation are ~0.4% of natural queries) are GENERATION
 # targets, never pruned — the cells-are-a-priori-not-supply doctrine.
+#
+# No corpus-relative cell lives here. A cell must be recomputable from query
+# text alone (admit() re-measures produced text; the mini_catalog membership
+# gate), while avg_idf/oov_share/min_pmi need a CorpusIndex and change per
+# collection. Corpus-relative diversity is a stratum axis in the v3 selector
+# (corpus_idf / corpus_oov / corpus_pmi in select_v3_prototype.py) instead.
 cells:
   - name: rare_term_query
     predicate:
@@ -62,3 +68,204 @@ cells:
       queries, so primarily a GENERATION target for the robustness axis.
     source: v3-taxonomy
     looks_like: a query with encoding junk, HTML residue, or a cut-off ending
+
+  # -------------------------------------------------------------------------
+  # The orphaned identifier banks (adversarial review, Tier 1 #11): 26 shipped
+  # banks that no v2 cell references, so a query carrying one has no predicate
+  # path into any archetype. Pooled by bank DOMAIN, mirroring the v2 pooled
+  # style (bare_machine_token, registry_structured_identifier), one cell per
+  # domain family. Overlap with the v2 siblings is structurally zero — none of
+  # these banks appears in any v2 any_of — so each cell EXTENDS a named v2
+  # sibling rather than competing with it.
+  # -------------------------------------------------------------------------
+  - name: network_device_identity
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.mac_address, at_least: 1}
+      - {column: structured_identifiers.sim_subscriber_id, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends bare_machine_token, which pools the network LOCATORS (IP, CIDR,
+      host:port) but no device or subscriber IDENTITY. A MAC address and an
+      ICCID are fixed-width hex and digit runs with no morphemes at all, so
+      exact occurrence is the only handle either route can get. IMSI is
+      deliberately absent upstream (format-identical to IMEI, owned by
+      serial_number) — do not re-add it here.
+    source: v3-orphaned-banks
+    looks_like: >
+      A hardware or subscriber identity in up to nine words: a colon- or
+      dash-separated six-group MAC address, or a SIM card number, bare or with
+      a few framing words. Fixed-width character runs, no readable words
+      inside them.
+
+  - name: corporate_registry_code
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.lei, at_least: 1}
+      - {column: structured_identifiers.market_code, at_least: 1}
+      - {column: structured_identifiers.industry_code, at_least: 1}
+      - {column: structured_identifiers.business_registration, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends registry_structured_identifier, which pools the INSTRUMENT and
+      account codes (IBAN, BIC, securities id, tax id) but no code naming the
+      legal entity or its market. Three of the four banks are keyword-gated, so
+      membership brings its own domain vocabulary with it — which is also the
+      falsification channel: the keyword, not the code, may be doing the work.
+      SEDOL is deliberately excluded upstream as indistinguishable from noise.
+    source: v3-orphaned-banks
+    looks_like: >
+      A company- or market-level registry code in up to nine words: a
+      twenty-character legal entity identifier, an exchange or routing code, a
+      NAICS/SIC industry code, or an EIN/DUNS/company registration number,
+      usually next to the word that names which register it comes from.
+
+  - name: statutory_instrument_citation
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.neutral_citation, at_least: 1}
+      - {column: structured_identifiers.celex, at_least: 1}
+      - {column: structured_identifiers.eu_regulatory_citation, at_least: 1}
+      - {column: structured_identifiers.patent_number, at_least: 1}
+      - {column: structured_identifiers.national_id, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends legal_citation_canonical, which pools only the US-shaped case
+      reporter, docket and statute banks — every European and
+      industrial-property citation system shipped without a home. These forms
+      are reproduced character-for-character by convention in the documents
+      that answer them. national_id joins on domain, not on function, and is
+      the AMBIGUOUS member: its SSN/NINO shapes are the one branch a bare digit
+      group can reach by accident.
+    source: v3-orphaned-banks
+    looks_like: >
+      A European or industrial-property citation in up to nine words: an ECLI
+      or bracket-year neutral citation, a CELEX number, a Regulation (EU)
+      number or GDPR-style article reference, a patent number with its kind
+      code, or a national insurance/social security number.
+
+  - name: clinical_chemical_code
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.clinical_coding, at_least: 1}
+      - {column: structured_identifiers.drug_id, at_least: 1}
+      - {column: structured_identifiers.hgvs_variant, at_least: 1}
+      - {column: structured_identifiers.chemical_id, at_least: 1}
+      - {column: structured_identifiers.clinical_trial_id, at_least: 1}
+      - {column: structured_identifiers.healthcare_provider_id, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends bio_clinical_identifier, which reaches 2 of the 8 built medical
+      banks (medical_code, genomic_accession) — the billing, pharmacy, variant,
+      compound, trial and provider systems all shipped orphaned. Four of the
+      six are keyword-gated, so the cell carries clinical vocabulary alongside
+      the code, and that vocabulary is the stated counter-mechanism: a drug or
+      compound name has real distributional mass even when its code does not.
+      SMILES is deliberately excluded upstream (a grammar, not a token).
+    source: v3-orphaned-banks
+    looks_like: >
+      A biomedical code in up to nine words: a CPT/SNOMED/LOINC/DRG procedure
+      or diagnosis code, an NDC or ATC drug code, an HGVS variant such as
+      c.76A>T, an InChIKey or PubChem/ChEMBL compound id, an NCT trial id, a
+      PMID or ORCID, or an NPI/DEA provider number — usually introduced by the
+      word for the coding system it belongs to.
+
+  - name: logistics_materials_code
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.tracking_number, at_least: 1}
+      - {column: structured_identifiers.vin_container, at_least: 1}
+      - {column: structured_identifiers.customs_classification, at_least: 1}
+      - {column: structured_identifiers.material_grade, at_least: 1}
+      - {column: structured_identifiers.nsn, at_least: 1}
+      - {column: structured_identifiers.geo_coordinate, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends logistics_catalog_token (barcode / SKU / serial / booking
+      reference) with the shipment, vehicle, tariff, alloy and stock-number
+      systems, and picks up geo_coordinate — the branch geo_coordinate_postal's
+      prose promises and its any_of never had, which is why a coordinate pair
+      matches no v2 cell today. material_grade is the readable member (6061-T6,
+      Ti-6Al-4V are spoken aloud in the trade) and is the falsification
+      channel. FedEx/DHL digit-run tracking and bare IMSI are deliberately
+      excluded upstream.
+    source: v3-orphaned-banks
+    looks_like: >
+      A shipment, vehicle, tariff or materials code in up to nine words: a UPS
+      1Z tracking code, a 17-character VIN or a container number, a
+      keyword-introduced HS/HTS tariff code, an alloy or temper grade, a NATO
+      stock number, or a decimal latitude/longitude pair.
+
+  - name: media_catalog_code
+    predicate:
+      - {column: length.length_words, below: 10}
+    any_of:
+      - {column: structured_identifiers.iso_code, at_least: 1}
+      - {column: structured_identifiers.music_work_code, at_least: 1}
+      - {column: structured_identifiers.media_db_id, at_least: 1}
+    predicts: [sparse]
+    rationale: >
+      Extends bibliographic_catalog_identifier (DOI / ISSN / library class /
+      astronomical designation) with the audiovisual and locale registries.
+      MEASURED: the iso_code branch is claim-blocked — stock_ticker_like sits
+      earlier in the bank tuple at the same ambiguity tier and takes the region
+      subtag of every BCP-47 form (en-US, pt-BR, zh-Hans-CN all resolve to
+      stock_ticker_like), so the column is structurally empty. The branch is
+      declared anyway, because the archetype is real and the limit is extractor
+      expressiveness; the generator is not sent at it.
+    source: v3-orphaned-banks
+    looks_like: >
+      A media registry code in up to nine words: an ISRC or ISWC music work
+      code, or an IMDb-style tt/nm identifier, bare or lightly framed.
+
+  # -------------------------------------------------------------------------
+  # Corruption DEGREE ladder — how much damage, not which kind. The existing
+  # typo_bearing_query / artifact_corrupted_query cells are kind-based and stay
+  # untouched; these three rungs partition the same rows by span count, which
+  # is why they band on the derived total rather than on any corruption.*
+  # column (AxisBand reads one column and cannot sum four).
+  # -------------------------------------------------------------------------
+  - name: damage_free_query
+    predicate:
+      - {column: derived.corruption_spans, below: 1}
+    predicts: [dense]
+    rationale: >
+      The ladder's reference rung: no typo, no mojibake, no paste residue, no
+      truncation. Every token is intact, which is the only condition under
+      which an embedding sees the vocabulary it was trained on. Claims the
+      large majority of natural rows by construction — it is the control the
+      other two rungs are read against, not a scarce stratum.
+    source: v3-corruption-ladder
+    looks_like: a clean, undamaged query with no broken or garbled tokens
+
+  - name: lightly_damaged_query
+    predicate:
+      - {column: derived.corruption_spans, at_least: 1}
+      - {column: derived.corruption_spans, below: 2}
+    predicts: [dense]
+    rationale: >
+      Exactly one damaged span anywhere in the query. One broken token removes
+      one exact-match anchor while every other token still lands, so the prior
+      is that the surviving context carries the query. Degree, not kind: a
+      single typo and a single mojibake sequence are the same rung here.
+    source: v3-corruption-ladder
+    looks_like: an otherwise clean query with exactly one broken or garbled token
+
+  - name: heavily_damaged_query
+    predicate:
+      - {column: derived.corruption_spans, at_least: 2}
+    predicts: [hybrid]
+    rationale: >
+      Two or more damaged spans. Past one artifact the damage stops being an
+      accident of a single token and starts degrading the query's whole
+      surface, so neither route keeps a clean handle and the hedge is the
+      prior. Naturally very thin — a generation target for the robustness axis.
+    source: v3-corruption-ladder
+    looks_like: >
+      A query carrying several broken tokens at once — garbled characters,
+      pasted markup residue, and a cut-off ending together.
