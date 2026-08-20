@@ -342,6 +342,13 @@ class LabelledPool:
             self._frame = self.attach_strata(self.classify(self.labels()))
         return self._frame
 
+    def refresh(self) -> LabelledPool:
+        """Drop the cached frame so the next read sees labels that landed
+        after it was built — a mid-run recompose on a stale cache is a no-op
+        that silently reports nothing changed."""
+        self._frame = None
+        return self
+
     def reserve(self) -> pd.DataFrame:
         return self.eval_reserve(self.frame())
 

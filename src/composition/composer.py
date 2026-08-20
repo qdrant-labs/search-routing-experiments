@@ -93,7 +93,7 @@ class V3Composition:
     def build(self, *, force: bool = False) -> pd.DataFrame:
         if self.dataset_path.exists() and not force:
             return pd.read_parquet(self.dataset_path)
-        pool = self._pool.frame()
+        pool = self._pool.refresh().frame() if force else self._pool.frame()
         reserve = self._pool.reserve()
         selected = self._utility.select(self._pool.selectable())
 

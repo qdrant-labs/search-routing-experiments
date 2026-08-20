@@ -24,12 +24,29 @@ import time
 from enum import StrEnum
 
 from litellm import completion
+from litellm.exceptions import (
+    APIConnectionError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
+)
 from pydantic import BaseModel, ConfigDict
 
 from augmentation.config import EngineSettings
 from query_taxonomy.features import FeatureExtractor
 from taxonomy_generators.tools import build_tools
 from taxonomy_generators.verify import TargetCheck, Targets, VerifyReport, verify
+
+TRANSIENT_PROVIDER_ERRORS = (
+    APIConnectionError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
+)
+"""Provider blips (529 overload, timeouts, rate limits) — failed attempts
+for the fault machinery, never crashes; a real config error still raises."""
 
 _SUBMIT_TOOL = {
     "type": "function",
@@ -59,6 +76,9 @@ class ErrorCase(StrEnum):
     """`submit_text` was called with blank text."""
     ROUNDS_EXHAUSTED = "rounds_exhausted"
     """`max_rounds` ran out without ever calling `submit_text`."""
+    PROVIDER_FAULT = "provider_fault"
+    """The provider refused the call transiently (overload, timeout, rate
+    limit) — the attempt failed without ever producing text."""
     INCOMPATIBLE_PARENT = "incompatible_parent"
     """The caller determined, before spending a call, that no rewrite can
     satisfy the request — e.g. the tokens a mint step must insert already
@@ -213,10 +233,13 @@ class Augmenter:
     def ask(self, instruction: str, prompt: str) -> tuple[str | None, Spend]:
         """One completion, no targets and no submit protocol — for a caller
         whose answer is a verdict rather than a query text."""
-        return self._single_shot([
-            {"role": "system", "content": instruction},
-            {"role": "user", "content": prompt},
-        ])
+        try:
+            return self._single_shot([
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": prompt},
+            ])
+        except TRANSIENT_PROVIDER_ERRORS:
+            return None, Spend()
 
     def run(
         self,
@@ -241,11 +264,21 @@ class Augmenter:
         report = None
         spend = Spend()
         for attempt in range(1, self.max_attempts + 1):
-            if tool_loop:
-                text, error, trace, round_spend = self._tool_rounds(messages)
-            else:
-                text, round_spend = self._single_shot(messages)
-                error, trace = None, ()
+            try:
+                if tool_loop:
+                    text, error, trace, round_spend = self._tool_rounds(messages)
+                else:
+                    text, round_spend = self._single_shot(messages)
+                    error, trace = None, ()
+            except TRANSIENT_PROVIDER_ERRORS:
+                # a provider blip is a FAILED ATTEMPT, never a crash: every
+                # caller already has fault-streak machinery for those, and a
+                # crank must survive an overloaded API mid-floor
+                return AugmentationOutcome(
+                    text=None, accepted=False, attempts=attempt,
+                    error=ErrorCase.PROVIDER_FAULT,
+                    **spend.as_dict(),
+                )
             spend.add(round_spend)
             if error is not None:
                 return AugmentationOutcome(
