@@ -23,6 +23,7 @@ from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
 from composition.cellfill import CellFill
 from composition.composer import V3Composition
+from composition.floors import read_catalog
 from dataset_registry import DATASETS
 
 
@@ -37,7 +38,7 @@ def _loop(v3: bool) -> AugmentationLoop:
         catalog_path = AugmentationPaths().catalog
         selection = pd.read_parquet(fill.selection_path).astype({"query_id": str})
         sheet_path = fill.order_sheet_path
-    catalog = pd.read_parquet(catalog_path).astype({"query_id": str})
+    catalog = read_catalog(catalog_path)
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
     return AugmentationLoop(selection, sheet_path=sheet_path, parents=parents)
 

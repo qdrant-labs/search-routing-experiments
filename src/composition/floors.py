@@ -72,6 +72,15 @@ DERIVED_TOTALS = {
 }
 
 
+def read_catalog(path) -> pd.DataFrame:
+    """The catalog with string query ids, retyped ONE column at a time: a
+    frame-wide `astype({"query_id": str})` rebuilds all ~118 columns as
+    separate blocks, and every later `assign` pays for that fragmentation."""
+    return pd.read_parquet(path).assign(
+        query_id=lambda frame: frame["query_id"].astype(str)
+    )
+
+
 def with_derived(catalog: pd.DataFrame) -> pd.DataFrame:
     """The catalog plus the columns no bank emits — derived on every read so
     a total can never disagree with the parts it sums."""

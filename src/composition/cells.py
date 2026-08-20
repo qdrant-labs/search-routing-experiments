@@ -199,11 +199,3 @@ CELL_TO_BANKS: dict[str, frozenset[str]] = {
 }
 """Each cell's required span banks — the unit a cell name resolves to when an
 operator looks up supply, which is indexed per bank and knows no cell names."""
-
-GENERATION_CELLS: dict[str, frozenset[str]] = {
-    op: frozenset(cell.name for cell in CELLS if cell.operator == op)
-    for op in dict.fromkeys(cell.operator for cell in CELLS if cell.operator)
-}
-"""Which cells each augmentation operator mints, derived from the cells'
-own `operator` field — the operators read this instead of hardcoding names,
-so a rename in cells.yaml moves the routing with it."""

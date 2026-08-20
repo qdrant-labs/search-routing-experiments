@@ -43,6 +43,11 @@ from query_taxonomy.features import FeatureExtractor
 from taxonomy_generators.verify import Targets
 
 
+class NeedsSelection(ValueError):
+    """A cell its own unspent parents already satisfy: the shortfall is the
+    selection layer's, and no generated row can serve it."""
+
+
 @dataclass
 class FaultStreak:
     """One `run()` call's fault-streak bookkeeping (d59): every attempted
@@ -123,6 +128,11 @@ class AugmentationLoop:
         self.docs = docs or ConstructedDocs(self.config.paths)
         self._sheet_path = Path(sheet_path or self.config.paths.order_sheet)
 
+    @property
+    def sheet_path(self) -> Path:
+        """Which sheet this loop serves, and so which composition owns it."""
+        return self._sheet_path
+
     def order_sheet(self) -> pd.DataFrame:
         sheet = pd.read_parquet(self._sheet_path)
         hungry = sheet[sheet["missing"] > 0]
@@ -154,7 +164,7 @@ class AugmentationLoop:
             )
             raise ValueError(f"{floor!r} has no parents left: {unserved}.")
         if result.needs_selection:
-            raise ValueError(
+            raise NeedsSelection(
                 f"{floor!r} needs SELECTION, not augmentation: "
                 f"{len(result.parents):,} unspent queries already satisfy it. "
                 "Its shortfall comes from the fill's own constraints, so "

@@ -129,16 +129,20 @@ def test_v2_origin_rows_are_measurement_never_supply(tmp_path):
     from composition.pool_v3 import LabelledPool
 
     (tmp_path / "v3").mkdir()
+    (tmp_path / "v3" / "augmented").mkdir()
     pd.DataFrame({
         "dataset": ["a"], "query_id": ["old"], "checkable": [True],
     }).to_parquet(tmp_path / "v3" / "labels_rederived.parquet", index=False)
     pd.DataFrame({
         "dataset": ["a"], "query_id": ["new"], "checkable": [True],
     }).to_parquet(tmp_path / "v3" / "labels.parquet", index=False)
-    labels = LabelledPool(data_dir=tmp_path).labels()
-    assert labels.set_index("query_id")["native"].to_dict() == {
-        "old": False, "new": True,
-    }
+    pd.DataFrame({
+        "dataset": ["a"], "query_id": ["aug"], "checkable": [True],
+    }).to_parquet(tmp_path / "v3" / "augmented" / "labels.parquet", index=False)
+    labels = LabelledPool(data_dir=tmp_path).labels().set_index("query_id")
+    assert labels["native"].to_dict() == {"old": False, "new": True, "aug": True}
+    # the augmentation rung's rows are scored against a supplemented corpus
+    assert labels.at["aug", "scored_against"] == "supplemented"
 
     pool = pd.DataFrame({
         "dataset": ["a"] * 6,

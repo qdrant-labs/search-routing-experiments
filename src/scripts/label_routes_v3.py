@@ -11,6 +11,7 @@ actual index+label pass embeds corpora and needs `docker compose up -d`;
 
     poetry run python src/scripts/label_routes_v3.py --plan
     poetry run python src/scripts/label_routes_v3.py --only bright-leetcode
+    poetry run python src/scripts/label_routes_v3.py --admitted
     poetry run python src/scripts/label_routes_v3.py
 """
 
@@ -50,8 +51,10 @@ from scripts.label_routes import (
     _corpus_rows,
     _source_name,
 )
+from scripts.label_routes_synthetic import SYNTHETIC_OPERATOR
 
 V3_DIR = DATA_DIR / "v3"
+AUGMENTED_DIR = V3_DIR / "augmented"
 PER_DATASET = DATA_DIR / "v3" / "per_dataset.parquet"
 V2_LABELS = DATA_DIR / "route_labels" / "labels.parquet"
 DEFAULT_YIELD_FLOOR = 0.05  # keep the "need" size finite when yield is tiny
@@ -160,12 +163,52 @@ def class_supply_selection(spec: dict[str, int | None]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-class V3LabelSweep:
-    """Index + label the v3 selection into data/v3, reusing shared collections."""
+def admitted_selection() -> pd.DataFrame:
+    """The generated rows `composer.admit` credited, minus everything a label
+    file already covers; the synthesize rung is excluded because its answer
+    docs live only in the isolated collection label_routes_synthetic indexes."""
+    columns = ["dataset", "query_id", "query", "home_lane"]
+    path = V3_DIR / "admitted.parquet"
+    if not path.exists():
+        print(f"no {path} — run the composer's admit door first")
+        return pd.DataFrame(columns=columns)
+    admitted = pd.read_parquet(path)
+    if admitted.empty:
+        return pd.DataFrame(columns=columns)
+    admitted = admitted.astype({"query_id": str})
+    done = [pd.read_parquet(V2_LABELS, columns=["query_id"])]
+    for labels in (
+        V3_DIR / "labels.parquet",
+        V3_DIR / "synthetic" / "labels.parquet",
+        AUGMENTED_DIR / "labels.parquet",
+    ):
+        if labels.exists():
+            done.append(pd.read_parquet(labels, columns=["query_id"]))
+    # a generated query_id is globally unique, so the lane is not part of the key
+    seen = set(pd.concat(done, ignore_index=True)["query_id"].astype(str))
+    fresh = admitted[
+        ~admitted["query_id"].isin(seen)
+        & (admitted["operator"] != SYNTHETIC_OPERATOR)
+    ].drop_duplicates("query_id")
+    lane = fresh["home_lane"].astype(str)
+    return fresh.assign(dataset=lane, home_lane=lane)[columns]
 
-    def __init__(self, client: QdrantClient, selection: pd.DataFrame) -> None:
+
+class V3LabelSweep:
+    """Index + label the v3 selection into data/v3, reusing shared collections.
+    `augmented` moves the output to data/v3/augmented and labels the admitted
+    generated rows: supplemented qrels, and gated rows measured anyway."""
+
+    def __init__(
+        self,
+        client: QdrantClient,
+        selection: pd.DataFrame,
+        *,
+        augmented: bool = False,
+    ) -> None:
         self._client = client
         self._selection = selection
+        self._augmented = augmented
         self._dense = EmbeddingConfig(
             name="dense_base", model_id=DENSE_MODEL, kind="dense",
             size=DENSE_SIZE, distance=Distance.COSINE, parallel=4,
@@ -218,15 +261,17 @@ class V3LabelSweep:
             collection = self._index(key, source.corpus())
             min_rel = LANES[key].min_relevance if key in LANES else 1
             labels = RouteLabels(
-                self._selection, out_dir=V3_DIR,
+                self._selection,
+                out_dir=AUGMENTED_DIR if self._augmented else V3_DIR,
                 objective=RouterObjective(min_relevance=min_rel),
+                scored_against="supplemented" if self._augmented else "natural",
             )
             args = (self._client, collection, self._dense, self._sparse)
             try:
                 out = labels.label(
                     source,
                     DenseOnlyStrategy(*args), PureRRFStrategy(*args), SparseOnlyStrategy(*args),
-                    dataset=key, force=force,
+                    dataset=key, force=force, include_gated=self._augmented,
                 )
             except ValueError as error:
                 failed.append(key)
@@ -262,9 +307,16 @@ def main() -> None:
         help="with --order: bound this batch, distributed across lanes "
         "proportionally to the order",
     )
+    parser.add_argument(
+        "--admitted", action="store_true",
+        help="label the generated rows the composer admitted "
+        "(data/v3/admitted.parquet) into data/v3/augmented",
+    )
     args = parser.parse_args()
 
-    if args.order:
+    if args.admitted:
+        selection = admitted_selection()
+    elif args.order:
         selection = order_selection(cap=args.cap)
     elif args.supply:
         spec = {
@@ -286,7 +338,7 @@ def main() -> None:
         url=os.getenv("QDRANT_URL", "http://localhost:6333"),
         api_key=os.getenv("QDRANT_API_KEY"), timeout=60,
     )
-    sweep = V3LabelSweep(client, selection)
+    sweep = V3LabelSweep(client, selection, augmented=args.admitted)
     keys = tuple(args.only) if args.only else None
     if args.plan:
         print(sweep.plan(keys).to_string(index=False))
@@ -294,7 +346,8 @@ def main() -> None:
     failed = sweep.run(keys, force=args.force)
     if failed:
         print(f"skipped (no judged queries): {failed}")
-    print(f"v3 labels -> {V3_DIR / 'labels.parquet'}")
+    out_dir = AUGMENTED_DIR if args.admitted else V3_DIR
+    print(f"v3 labels -> {out_dir / 'labels.parquet'}")
 
 
 if __name__ == "__main__":

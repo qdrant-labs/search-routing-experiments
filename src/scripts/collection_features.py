@@ -9,6 +9,7 @@ reads the answer out.
 
     poetry run python src/scripts/collection_features.py          # build + side test
     poetry run python src/scripts/collection_features.py --force  # recount corpora
+    poetry run python src/scripts/collection_features.py --per-query --v3
 """
 
 from __future__ import annotations
@@ -42,6 +43,14 @@ from query_taxonomy.corpus_relative import (
 from query_taxonomy.metrics.general import STOPWORDS
 
 SEED: Final[int] = 0
+
+# the v3-NATIVE label files; labels_rederived.parquet is the re-scored v2 set,
+# which query_corpus_stats.parquet already covers under its own keys
+V3_LABELS: Final[tuple[Path, ...]] = (
+    LABELS_PATH.parent.parent / "v3" / "labels.parquet",
+    LABELS_PATH.parent.parent / "v3" / "synthetic" / "labels.parquet",
+    LABELS_PATH.parent.parent / "v3" / "augmented" / "labels.parquet",
+)
 
 STAT_COLS: Final[tuple[str, ...]] = (
     "avg_idf",
@@ -301,23 +310,53 @@ class QueryCorpusStats:
     def __init__(
         self,
         store: CollectionIndexStore | None = None,
-        labels_path: Path = LABELS_PATH,
+        labels_path: Path | tuple[Path, ...] = LABELS_PATH,
         out_path: Path | None = None,
     ) -> None:
         self._store = store or CollectionIndexStore()
-        self._labels_path = labels_path
+        self._labels_paths = (
+            (labels_path,) if isinstance(labels_path, Path) else tuple(labels_path)
+        )
         self._out_path = out_path or (
-            labels_path.parent / "query_corpus_stats.parquet"
+            LABELS_PATH.parent / "query_corpus_stats.parquet"
+        )
+
+    @property
+    def out_path(self) -> Path:
+        return self._out_path
+
+    def _labels(self) -> pd.DataFrame:
+        """The label rows to measure, from every label file that exists."""
+        frames = [
+            pd.read_parquet(path, columns=["dataset", "query_id", "query"])
+            for path in self._labels_paths
+            if path.exists()
+        ]
+        if not frames:
+            raise FileNotFoundError(f"no label file on disk: {self._labels_paths}")
+        return (
+            pd.concat(frames, ignore_index=True)
+            .astype({"query_id": str})
+            .drop_duplicates(["dataset", "query_id"])
         )
 
     def build(self, *, force: bool = False) -> pd.DataFrame:
-        if self._out_path.exists() and not force:
-            return pd.read_parquet(self._out_path)
-        labels = pd.read_parquet(
-            self._labels_path, columns=["dataset", "query_id", "query"]
-        ).astype({"query_id": str})
+        """Measure the label rows this artifact does not carry yet and append;
+        `force` re-measures the ones it does."""
+        frame = (
+            pd.read_parquet(self._out_path)
+            if self._out_path.exists()
+            else pd.DataFrame(columns=["dataset", "query_id"])
+        )
+        labels = self._labels()
+        if not force and not frame.empty:
+            known = pd.MultiIndex.from_frame(
+                frame[["dataset", "query_id"]].astype({"query_id": str})
+            )
+            labels = labels[
+                ~pd.MultiIndex.from_frame(labels[["dataset", "query_id"]]).isin(known)
+            ]
         dirs = self._store.indexable()
-        rows: list[dict[str, object]] = []
         for key, group in tqdm(labels.groupby("dataset", sort=True), unit="lane"):
             lane = dirs.get(str(key))
             if lane is None or not self._store.path(lane).exists():
@@ -334,6 +373,7 @@ class QueryCorpusStats:
                 pair_document_frequencies=self._pair_counts(lane, pairs, vocab),
             )
             banks = [cls(index) for cls in CORPUS_RELATIVE_BANKS]
+            rows: list[dict[str, object]] = []
             for qid, toks in tokens.items():
                 stats = {
                     stat.name: stat.value
@@ -341,9 +381,13 @@ class QueryCorpusStats:
                     for stat in bank.compute(toks)
                 }
                 rows.append({"dataset": key, "query_id": qid, **stats})
-        frame = pd.DataFrame(rows)
-        self._out_path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_parquet(self._out_path, index=False)
+            # written per lane, like RouteLabels' chunks: the corpus pass is the
+            # expensive leg, so a crash costs one lane instead of the whole run
+            frame = pd.concat(
+                [frame, pd.DataFrame(rows)], ignore_index=True
+            ).drop_duplicates(["dataset", "query_id"], keep="last")
+            self._out_path.parent.mkdir(parents=True, exist_ok=True)
+            frame.to_parquet(self._out_path, index=False)
         return frame
 
     @staticmethod
@@ -410,6 +454,12 @@ def main() -> None:
         help="build per-query corpus stats (incl. PMI) keyed (dataset, "
         "query_id) for the v3 unit, instead of the per-lane side test",
     )
+    parser.add_argument(
+        "--v3",
+        action="store_true",
+        help="with --per-query: measure the v3-native label rows, appending "
+        "to the same artifact (v2's rows are already in it)",
+    )
     args = parser.parse_args()
 
     store = CollectionIndexStore()
@@ -417,10 +467,11 @@ def main() -> None:
     store.build_all(force=args.force)
 
     if args.per_query:
-        frame = QueryCorpusStats(store).build(force=args.force)
+        stats = QueryCorpusStats(store, V3_LABELS if args.v3 else LABELS_PATH)
+        frame = stats.build(force=args.force)
         print(f"per-query corpus stats: {len(frame):,} rows, "
               f"cols {[c for c in frame.columns if c not in ('dataset', 'query_id')]}")
-        print(f"-> {QueryCorpusStats(store)._out_path}")
+        print(f"-> {stats.out_path}")
         return
 
     probe = LaneCorpusStats(store, decisive_only=not args.all_rows)

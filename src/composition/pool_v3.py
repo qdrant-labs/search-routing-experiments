@@ -27,6 +27,17 @@ CLASSES = ("dense", "sparse", "hybrid")
 CORPUS_AXES = ("corpus_idf", "corpus_oov", "corpus_pmi")
 """Corpus-relative diversity, one MARGINAL axis each — never crossed with each
 other, with cell, or with lane."""
+UNKNOWN = "unknown"
+"""The join did not cover the row: a COVERAGE miss, never a band, so it is
+counted and reported but never floored."""
+STRATA = {
+    "corruption_degree": ("clean", "light", "heavy"),
+    "corpus_idf": ("low_idf", "mid_idf", "high_idf"),
+    "corpus_oov": ("in_vocab", "has_oov"),
+    "corpus_pmi": ("co_occurring", "never_co_occurs", "unmeasured"),
+}
+"""Every band the writers below emit, declared beside them so a band no row
+lands in is still a stratum the floors can fail."""
 CEILING = 0.999
 """Reporting bar only: splits each tie kind into at-ceiling (everyone found a
 judged doc at rank 1) vs all-routes-missed. Classification is depth-based."""
@@ -89,8 +100,9 @@ class LabelledPool:
     def labels(self) -> pd.DataFrame:
         """The re-derived pool (v2's labels rescored from the oracle caches at
         each lane's current min_relevance) PLUS the additive v3 labels PLUS the
-        synthetic-rung labels, aligned on the base's columns. New (dataset,
-        query_id) pairs are disjoint, so the dedup only guards a re-label."""
+        synthetic and augmented rungs', aligned on the base's columns. New
+        (dataset, query_id) pairs are disjoint, so the dedup only guards a
+        re-label."""
         rederived = self._data / "v3" / "labels_rederived.parquet"
         base_path = (
             rederived if rederived.exists()
@@ -107,6 +119,7 @@ class LabelledPool:
         for path, scored_against in (
             (self._data / "v3" / "labels.parquet", "natural"),
             (self._data / "v3" / "synthetic" / "labels.parquet", "supplemented"),
+            (self._data / "v3" / "augmented" / "labels.parquet", "supplemented"),
         ):
             if not path.exists():
                 continue
@@ -245,21 +258,22 @@ class LabelledPool:
         pool_idx = list(zip(pool["dataset"], pool["query_id"]))
         total = np.array([spans.get(k, np.nan) for k in pool_idx], dtype=float)
         degree = pd.cut(total, [-np.inf, 0.5, 1.5, np.inf],
-                        labels=["clean", "light", "heavy"]).astype(object)
+                        labels=STRATA["corruption_degree"]).astype(object)
         pool = pool.assign(
             cells=[frozenset(cell_lookup.get(k, set())) for k in pool_idx],
             corruption_spans=total,
-            corruption_degree=pd.Series(degree).fillna("unknown").to_numpy(),
+            corruption_degree=pd.Series(degree).fillna(UNKNOWN).to_numpy(),
         )
         return self._attach_corpus_strata(pool)
 
     def _attach_corpus_strata(self, pool: pd.DataFrame) -> pd.DataFrame:
-        """The three marginal corpus axes from query_corpus_stats.parquet:
-        IDF quartile band (edges measured off the file, never hand numbers),
-        OOV presence, PMI sentinel. Rows the file does not carry -> 'unknown'."""
+        """The three marginal corpus axes from query_corpus_stats.parquet — IDF
+        quartile band (edges measured off the file, never hand numbers), OOV
+        presence, PMI sentinel — with uncovered rows UNKNOWN and a join that
+        reaches no supply row fatal."""
         qcs_path = self._data / "route_labels" / "query_corpus_stats.parquet"
         if not qcs_path.exists():
-            return pool.assign(**dict.fromkeys(CORPUS_AXES, "unknown"))
+            return pool.assign(**dict.fromkeys(CORPUS_AXES, UNKNOWN))
         qcs = (
             pd.read_parquet(qcs_path)
             .astype({"query_id": str})
@@ -268,6 +282,16 @@ class LabelledPool:
         )
         key = pd.MultiIndex.from_arrays([pool["dataset"], pool["query_id"]])
         absent = ~key.isin(qcs.index)
+        # a join that reaches no SUPPLY row is a broken join, not knowledge:
+        # every v3 corpus stratum would be dark while its floor read as met
+        supply = native_mask(pool).to_numpy()
+        if supply.any() and absent[supply].all():
+            raise ValueError(
+                f"{qcs_path} covers 0 of the {int(supply.sum()):,} v3-native "
+                f"pool rows ({int((~absent).sum()):,} of {len(pool):,} rows "
+                "covered overall) — rebuild it over the v3 label files "
+                "(collection_features.py --per-query --v3) before composing."
+            )
         rows = qcs.reindex(key)
         p25, p75 = qcs["avg_idf"].quantile([0.25, 0.75])
         idf, oov, pmi = (
@@ -275,19 +299,19 @@ class LabelledPool:
         )
         return pool.assign(
             corpus_idf=np.where(
-                absent | np.isnan(idf), "unknown",
+                absent | np.isnan(idf), UNKNOWN,
                 np.where(idf < p25, "low_idf",
                          np.where(idf >= p75, "high_idf", "mid_idf")),
             ),
             corpus_oov=np.where(
-                absent | np.isnan(oov), "unknown",
+                absent | np.isnan(oov), UNKNOWN,
                 np.where(oov > 0, "has_oov", "in_vocab"),
             ),
             # -1.0 exactly is PMIBank's "never co-occurs" sentinel — measured.
             # NaN is the pair never being measurable at all; binning the two
             # together would call 698 unmeasured rows a structural miss.
             corpus_pmi=np.where(
-                absent, "unknown",
+                absent, UNKNOWN,
                 np.where(np.isnan(pmi), "unmeasured",
                          np.where(pmi == -1.0, "never_co_occurs", "co_occurring")),
             ),

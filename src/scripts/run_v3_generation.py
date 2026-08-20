@@ -31,6 +31,9 @@ from composition.floors import read_catalog
 from dataset_registry import DATASETS
 
 _T0 = time.time()
+AUDIT_PASSED = (
+    AugmentationConfig().paths.augmentation_dir / "declaration_audit_passed.txt"
+)
 
 
 def stage(n: int | str, title: str) -> None:
@@ -100,7 +103,9 @@ def compose(composer: V3Composition) -> None:
 def sheet_readout(composer: V3Composition) -> None:
     stage(2, "ORDER SHEET — what generation still owes (no spend)")
     hungry = _sheet_state(composer)
-    print(f"{len(hungry)} hungry lines, {hungry['missing'].sum():,.0f} rows owed:")
+    print(f"{len(hungry)} hungry lines, {hungry['missing'].sum():,.0f} rows owed "
+          f"by GENERATION (the class shortfall toward the target is "
+          f"LABELLING's — stage 2b):")
     print(hungry.to_string(index=False))
 
 
@@ -172,15 +177,39 @@ def coherence(judge: CoherenceJudge) -> None:
     print(f"verdicts          : {judge.path}")
 
 
+def audit_passed() -> set[str] | None:
+    """The human's declaration-audit verdict: one cleared query_id per line in
+    `declaration_audit_passed.txt`, absent file = nobody has answered yet."""
+    if not AUDIT_PASSED.exists():
+        return None
+    return {
+        line.strip() for line in AUDIT_PASSED.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    }
+
+
 def admit(composer: V3Composition, judge: CoherenceJudge | None) -> None:
     stage(6, "ADMIT — credit generated rows against the sheet (no spend). "
-             "GATED rows (d42h) are SKIPPED until their audit passes: "
-             "declaration_audit always waits on the human; coherence rows "
-             "enter here iff stage 5b's judge passed them (--llm-coherence)")
+             "GATED rows (d42h) are SKIPPED until their gate is answered: "
+             "coherence rows enter iff stage 5b's judge passed them "
+             "(--llm-coherence), declaration_audit rows iff the HUMAN listed "
+             "their query_id in declaration_audit_passed.txt")
     pool = GeneratedPool().load()
     print(f"generated pool    : {len(pool):,} rows, gates: "
           f"{pool['credit_gate'].fillna('none').value_counts().to_dict()}")
-    composer.admit(pool, coherence_passed=judge.passed() if judge else None)
+    cleared = audit_passed()
+    if cleared is None:
+        print(f"declaration audit : NO verdict file — every audit-gated row "
+              f"waits on the human. Write cleared query_ids, one per line, to "
+              f"{AUDIT_PASSED}")
+    else:
+        print(f"declaration audit : {len(cleared):,} query_ids cleared by hand "
+              f"({AUDIT_PASSED})")
+    composer.admit(
+        pool,
+        coherence_passed=judge.passed() if judge else None,
+        audit_passed=cleared,
+    )
 
 
 def selection_readout(composer: V3Composition) -> None:

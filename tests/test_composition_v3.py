@@ -4,9 +4,16 @@ stratum axes."""
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from composition.objectives import UtilityObjective
-from composition.pool_v3 import CLASSES, LabelledPool, assign_classes
+from composition.pool_v3 import (
+    CLASSES,
+    STRATA,
+    UNKNOWN,
+    LabelledPool,
+    assign_classes,
+)
 from composition.recipe import Recipe
 
 R = Recipe()
@@ -84,6 +91,22 @@ def test_pmi_sentinel_nan_and_absent_stay_separate(tmp_path):
     assert list(out["corpus_idf"]) == [
         "low_idf", "mid_idf", "mid_idf", "high_idf", "high_idf", "unknown",
     ]
+    # this fixture exercises every band each axis declares, so equality (not
+    # subset) is what keeps the vocabulary the floors read from drifting
+    for axis, bands in STRATA.items():
+        if axis in out.columns:
+            assert set(out[axis]) == {*bands, UNKNOWN}
+
+
+def test_corpus_join_that_reaches_no_supply_row_raises(tmp_path):
+    qcs = pd.DataFrame({
+        "dataset": ["d"], "query_id": ["1"], "avg_idf": [0.5],
+        "oov_share": [0.0], "min_pmi": [0.0],
+    })
+    # a partial miss is legitimately unknown (the test above); a total miss is
+    # a broken join that used to write 'unknown' over every v3 row in silence
+    with pytest.raises(ValueError, match="covers 0 of"):
+        _corpus_strata(tmp_path, qcs, ["98", "99"])
 
 
 def test_idf_edges_are_measured_not_hardcoded(tmp_path):
@@ -287,3 +310,105 @@ def test_eval_reserve_is_certified_only_stratified_and_disjoint():
 
 def test_waste_default_is_five_percent():
     assert Recipe().waste_cap == 0.05
+
+
+# --------------------------------------------------------------- admit door ---
+def _gate_pool(gates):
+    """One generated pool row per credit_gate value, all on one hungry floor."""
+    return pd.DataFrame({
+        "query_id": [f"g{i}" for i in range(len(gates))],
+        "floor": ["cellA"] * len(gates),
+        "home_lane": ["a"] * len(gates),
+        "credit_gate": list(gates),
+    })
+
+
+def _hungry_sheet(**missing_per_floor):
+    floors = list(missing_per_floor)
+    return pd.DataFrame({
+        "slice": ["cell"] * len(floors),
+        "floor": floors,
+        "amount": [float(v) for v in missing_per_floor.values()],
+        "credit": [0.0] * len(floors),
+        "missing": [float(v) for v in missing_per_floor.values()],
+        "reason": ["exhausted"] * len(floors),
+    })
+
+
+def test_each_gate_clears_only_from_its_own_list():
+    from composition.composer import V3Composition
+
+    pool = _gate_pool(["none", "coherence_gate", "declaration_audit"])
+    sheet = _hungry_sheet(cellA=10)
+    empty = pd.DataFrame({"query_id": []})
+    waiting = V3Composition._admissible(pool, empty, sheet)
+    assert list(waiting["query_id"]) == ["g0"]  # both gates wait by default
+    audited = V3Composition._admissible(pool, empty, sheet, None, {"g2"})
+    assert list(audited["query_id"]) == ["g0", "g2"]
+    # a coherence verdict may never clear the human's audit, or the reverse
+    crossed = V3Composition._admissible(pool, empty, sheet, {"g2"}, {"g1"})
+    assert list(crossed["query_id"]) == ["g0"]
+    both = V3Composition._admissible(pool, empty, sheet, {"g1"}, {"g2"})
+    assert list(both["query_id"]) == ["g0", "g1", "g2"]
+
+
+class _Claims:
+    """Cell double: claims the query_ids it was built with."""
+
+    def __init__(self, *query_ids):
+        self._ids = set(query_ids)
+
+    def select(self, frame):
+        return frame["query_id"].isin(self._ids)
+
+
+def test_extra_credit_bills_every_line_a_row_serves():
+    from composition.composer import V3Composition
+
+    # both rows were minted for A; q1 also satisfies B (2 owed) and C (1 owed)
+    mini = pd.DataFrame({"query_id": ["q0", "q1"]}, index=[0, 1])
+    rows = pd.DataFrame(
+        {"query_id": ["q0", "q1"], "credited_floor": ["A", "A"]}, index=[0, 1]
+    )
+    cells = {
+        "A": _Claims("q0", "q1"), "B": _Claims("q1"), "C": _Claims("q0", "q1"),
+    }
+    extra = V3Composition._extra_credit(
+        _hungry_sheet(A=2, B=2, C=1), rows, {"A": 2}, cells, mini
+    )
+    # A is already fully credited by the per-line pass; C is capped at its need
+    assert extra == {"B": 1, "C": 1}
+
+
+def test_natural_share_is_cumulative_and_counts_no_row_twice():
+    from composition.composer import V3Composition
+
+    selection = pd.DataFrame({
+        "query_id": [f"n{i}" for i in range(9)] + ["g0"],
+        "provenance": ["natural"] * 9 + ["augmented"],
+    })
+    # g0 already sits in the selection AND on the admission record: 9/10, not
+    # 9/11, or the guard would double-charge the row it already counted
+    V3Composition._assert_natural_share(
+        selection, pd.DataFrame({"query_id": ["g0"]}), 0.9
+    )
+    fired = False
+    try:  # one more generated row -> 9/11 = 0.818, under the 0.85 minimum
+        V3Composition._assert_natural_share(
+            selection, pd.DataFrame({"query_id": ["g0", "g1"]}), 0.85
+        )
+    except AssertionError:
+        fired = True
+    assert fired
+
+
+def test_admission_record_appends_and_keeps_the_newest_verdict(tmp_path):
+    from composition.composer import V3Composition
+
+    path = tmp_path / "admitted.parquet"
+    first = pd.DataFrame({"query_id": ["a", "b"], "credited_floor": ["X", "X"]})
+    V3Composition._admission_record(path, first).to_parquet(path, index=False)
+    second = pd.DataFrame({"query_id": ["b", "c"], "credited_floor": ["Y", "Y"]})
+    merged = V3Composition._admission_record(path, second)
+    assert list(merged["query_id"]) == ["a", "b", "c"]
+    assert merged.set_index("query_id").at["b", "credited_floor"] == "Y"

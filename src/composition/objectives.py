@@ -14,37 +14,49 @@ from pathlib import Path
 
 from augmentation.config import AugmentationConfig
 from composition.cellfill import CELL_SLICE, EXHAUSTED
-from composition.pool_v3 import CLASSES, CORPUS_AXES, REUSED, native_mask
+from composition.pool_v3 import (
+    CLASSES,
+    CORPUS_AXES,
+    REUSED,
+    STRATA,
+    UNKNOWN,
+    native_mask,
+)
 from composition.recipe import Recipe
 
-GENERATION_ONLY = "generation_only"
 CORRUPTION_SLICE = "corruption"
-UNCOVERED_SLICE = "uncovered"
-NO_CELL_HOSTS = "no_cell_hosts"
 SHEET_COLUMNS = ["slice", "floor", "amount", "credit", "missing", "reason"]
 CLASS_ALLOCATION = "class_allocation"
 ORDER_COLUMNS = ["dataset", "query_id", "reason"]
 
 
 class DiversityFloors:
-    """Layer 1: what MUST be covered, one floor per marginal axis. Deficits
-    come out tagged by servability — cells and corruption degrees go on the
-    generation sheet, lane gaps are labelling demand, corpus bands have no
-    minter and stay report-only."""
+    """Layer 1: what MUST be covered, one floor per marginal axis. Cell and
+    corruption deficits go on the generation sheet, corpus bands have no minter
+    and stay report-only, the class shortfall belongs to the labelling rung,
+    and the lane floor is `per_dataset`'s alone."""
 
     def __init__(self, recipe: Recipe, cells: tuple) -> None:
         self._recipe = recipe
         self._cells = cells
 
     def marginals(self, selected: pd.DataFrame) -> pd.DataFrame:
+        """Every stratum the axes DECLARE — a band no selected row landed in
+        reports 0 rows and fails, while `dark` carries the axis's uncovered
+        rows, which are a coverage fact and never a floor."""
         rows = [
-            {"axis": "cell", "stratum": cell.name,
+            {"axis": "cell", "stratum": cell.name, "dark": 0,
              "rows": int(selected["cells"].map(lambda s, n=cell.name: n in s).sum())}
             for cell in self._cells
         ]
-        for axis in ("corruption_degree", "dataset", *CORPUS_AXES):
-            for stratum, n in selected[axis].value_counts().items():
-                rows.append({"axis": axis, "stratum": str(stratum), "rows": int(n)})
+        for axis, bands in STRATA.items():
+            counts = selected[axis].value_counts()
+            dark = int(counts.get(UNKNOWN, 0))
+            for stratum, n in counts.reindex(list(bands), fill_value=0).items():
+                rows.append({
+                    "axis": axis, "stratum": str(stratum), "rows": int(n),
+                    "dark": dark,
+                })
         out = pd.DataFrame(rows)
         out["floor"] = self._recipe.stratum_floor
         out["met"] = out["rows"] >= self._recipe.stratum_floor
@@ -68,74 +80,32 @@ class DiversityFloors:
     def order_sheet(
         self, selected: pd.DataFrame, pool: pd.DataFrame
     ) -> pd.DataFrame:
-        """The generation debt ledger in CellFill's exact sheet schema: each
-        class debt waterfilled equally over the cells predicting it (a-priori
-        targets, never weighted by supply), clamped at k_cap x natural share
-        x target_total, floors as minimums, debt no cell can host as an
-        explicit uncovered line; credit starts at 0 (admit() fills it, and a
-        rebuild re-nets supply because labelled generated rows join the pool)."""
+        """The generation debt ledger in CellFill's exact sheet schema: every
+        floor shortfall generation alone can close — a cell's, net of both the
+        selection and the unspent supply that already satisfies it, plus the
+        corruption line — with credit at 0 for admit() to fill, while the class
+        shortfall goes to the labelling rung (SelectionOrder) instead."""
         recipe = self._recipe
-        caps, alloc = {}, {}
-        for cell in self._cells:
-            natural = int(pool["cells"].map(lambda s, n=cell.name: n in s).sum())
-            p_natural = natural / len(pool) if len(pool) else 0.0
-            caps[cell.name] = (
-                recipe.k_cap * p_natural * recipe.target_total
-                if recipe.k_cap is not None else float("inf")
-            )
-            alloc[cell.name] = 0.0
-        uncovered = []
-        for row in self.class_debt(pool).itertuples(index=False):
-            hosts = [
-                c.name for c in self._cells if row.route_class in c.predicts_class
-            ]
-            placed = self._waterfill(
-                float(row.debt), {n: caps[n] - alloc[n] for n in hosts}
-            )
-            for name, extra in placed.items():
-                alloc[name] += extra
-            left = row.debt - sum(placed.values())
-            if left >= 1.0:
-                uncovered.append({
-                    "slice": UNCOVERED_SLICE,
-                    "floor": f"uncovered:{row.route_class}",
-                    "amount": float(round(left)), "credit": 0.0,
-                    "missing": float(round(left)), "reason": NO_CELL_HOSTS,
-                })
+        spare = pool[~pool["is_waste"] & native_mask(pool)].drop(
+            index=selected.index, errors="ignore"
+        )
         lines = []
         for cell in self._cells:
             in_selection = int(
                 selected["cells"].map(lambda s, n=cell.name: n in s).sum()
             )
-            owed = max(round(alloc[cell.name]), recipe.stratum_floor - in_selection)
+            unspent = int(spare["cells"].map(lambda s, n=cell.name: n in s).sum())
+            owed = recipe.stratum_floor - in_selection - unspent
             if owed <= 0:
                 continue
             lines.append({
                 "slice": CELL_SLICE, "floor": cell.name,
                 "amount": float(owed), "credit": 0.0, "missing": float(owed),
-                "reason": GENERATION_ONLY if caps[cell.name] < recipe.stratum_floor
-                else EXHAUSTED,
+                "reason": EXHAUSTED,
             })
-        lines.extend(uncovered)
         lines.append(self._corruption_line(pool))
         sheet = pd.DataFrame(lines, columns=SHEET_COLUMNS)
         return sheet[sheet["missing"] > 0].reset_index(drop=True)
-
-    @staticmethod
-    def _waterfill(debt: float, room: dict[str, float]) -> dict[str, float]:
-        """Equal shares with spill: every open host gets the same cut until
-        its room runs out, so thin cells stay full generation targets."""
-        placed = dict.fromkeys(room, 0.0)
-        while debt >= 1.0:
-            open_ = [n for n, r in room.items() if r - placed[n] >= 1.0]
-            if not open_:
-                break
-            share = debt / len(open_)
-            for name in open_:
-                take = min(share, room[name] - placed[name])
-                placed[name] += take
-                debt -= take
-        return placed
 
     def _corruption_line(self, pool: pd.DataFrame) -> dict:
         """Damaged-query debt at the census's own pooled any-span rate of the

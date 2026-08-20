@@ -1,221 +1,249 @@
-# v3 composition — representation × diversity × utility (layered)
+# v3 composition: representation × diversity × utility (layered)
 
-*The v3 target framework. Companion to `~/.claude/plans/breezy-sleeping-star.md`
-(this doc is the DESIGN; the plan is the execution tracker). Read
-`docs/cells_adversarial_review.md` and `docs/v3_generation_brief.md` first.*
+*The v3 target framework, and where each layer lives in code. Companion to
+`~/.claude/plans/breezy-sleeping-star.md` (this doc is the DESIGN, the plan is
+the execution tracker).*
 
-Date: 2026-08-19. Status: **v2 — rewritten after two Fable adversarial reviews
-(machinery/feasibility + objective-coherence).** The v1 draft proposed a
-three-factor product target; both reviews independently rejected it (see
-"Why the product-form was dropped"). This version LAYERS the three objectives
-instead of multiplying them.
+Date: 2026-08-21. Status: **v3, rewritten after implementation.** The v2 draft
+described a machinery-gap table that has since been built, and anchored its
+central instruction on `src/scripts/select_v3_prototype.py`, a file deleted in
+155178f when the prototype graduated into `src/composition/objectives.py`. Three
+independent adversarial reviews each spent effort rediscovering that. Every
+pointer below was checked against the tree on the date above.
 
 ---
 
 ## Purpose
 
-The query taxonomy is complete. The composition MACHINERY has been overhauled
-(cells, operators, augmentation loop, per-lane caps, Qdrant-in-loop). But the
-TARGETS driving it are still v2's: `recipe.py`'s flat `n_per_route=200` per cell,
-which over-represents identifier archetypes ~14× (the cells-review "mass
-inversion": 27 of 44 cells require an identifier/code/math/blob token, together
-4.36% of the real pool). v3 must optimize three EXPLICIT objectives —
-representation × diversity × utility — expressed so they don't collide.
+Optimize three explicit objectives, expressed so they cannot collide.
+Representation and diversity are the same cell axis with opposite signs, and a
+floor is a constraint rather than a multiplicand, so the three are LAYERED and
+never multiplied. That verdict came from two adversarial reviews reaching it
+from opposite directions (machinery and objective-coherence).
 
-## The reframe, corrected: machinery + targets, but not everything v3 needs exists
+- **Diversity = hard floors.** Constraints on WHAT must be covered.
+- **Utility = the sole scalar objective.** What the draw maximizes.
+- **Representation = bounds at composition, weighting at eval.** Never a
+  selection-time mass prior.
 
-"Re-weight the 44 v2 cell quotas" IS targets-only — the loop reads any parquet
-order sheet (`loop.py:124,126`). But every v3-SPECIFIC addition (corruption
-strata, corpus-stat cells, v3 cells, per-lane rates, waste budget) is **missing
-machinery, not just a stale target** (see "Machinery gaps" below). The honest
-frame: *re-weighting the existing cells is cheap; the new axes need code.*
+## Where the layers live
 
-## Prerequisites (block ALL target estimation)
-
-1. **Commit the working tree + regenerate labels.** `src/augmentation/*` is
-   modified-uncommitted and `corruption.py`/`constructed.py` are UNTRACKED;
-   `labels.parquet` is Aug-12, predating the inject depth-fix. So every number a
-   target would be estimated from (decisive-yield, feasibility, waste shares,
-   per-stratum supply) measures behavior the tree no longer has. Commit, relabel,
-   THEN estimate. Nothing downstream is trustworthy until this is done.
-2. **Run the cheap probes first** (see Utility) — they decide whether a
-   query-side utility term should exist at all, before we derive any target.
-
----
-
-## The three objectives are LAYERS, not factors
-
-They act at different points in the pipeline; composing them into one product is
-what the reviews rejected. The layers:
-
-- **Diversity = hard floors** (constraints on WHAT must be covered).
-- **Utility = the sole scalar objective** (the score selection/generation
-  maximizes).
-- **Representation = realism + inversion bounds at composition, traffic
-  weighting at EVAL** (a bound at build time, a weight at measure time — never a
-  selection-time mass prior).
-
-### Layer 1 — Diversity = hard floors
-
-Cover every retrieval-mechanics archetype; cells are the diversity instrument.
-Expressed as **per-axis marginal floors** (per cell, per corpus-stat band, per
-corruption degree, per lane), NOT crossed boxes — the selector satisfies the
-marginals jointly. This is the plan's already-locked "additive strata, not a
-grid" decision; the v1 target table violated it.
-
-Machinery to build (these are NOT stale targets):
-- **`CELLS_ALL` threading.** v3 cells are unreachable: `loop.py:41` +
-  `operators.py:39` import `CELLS_BY_NAME`/`CELL_TO_BANKS` built from `cells.yaml`
-  only; a merged registry touches loop, cellfill, operators (shared v2 files) —
-  real plumbing or a v3-namespaced loop, not a one-liner.
-- **`predicts` normalization** — `cells_v3.yaml` writes class names, labels use
-  route names; `ArchetypeCell.predicts` unvalidated.
-- **Membership gate** — 2 hand-written queries per cell the predicate MUST admit
-  (catches the 5 inverted cells; the best verification available).
-- **qcs→catalog join** — `catalog_v3.parquet` carries no PMI/IDF columns, so
-  authoring corpus-stat cells now crashes `attach_strata` (`AxisBand.mask` →
-  KeyError); join `query_corpus_stats.parquet` in first.
-- Fidelity errata (26 orphaned banks, 7 `looks_like` route leaks) do NOT gate
-  generation and the erratum/override layer they need has no mechanism in
-  `cells.py` — defer.
-
-### Layer 2 — Utility = the sole scalar objective
-
-A row has utility if it discriminates routes with a trustworthy label. Key the
-objective on the axes that carry the signal — **lane×route coverage + qrels-depth
-/ decisive supply** (the à-branch: corpus and label-depth levers INSIDE the
-objective) — NOT on the cell/stratum axis (cell explains ~0.5% of outcome; lane
-4.9%, dataset 12–21%). The v1 draft put lane and qrels-depth in the CONSTRAINT
-row and keyed utility on the 0.5% axis; that is backwards.
-
-- **Fix the coverage bug first** (cells-review #4, still live at
-  `select_v3_prototype.py:335-343`): key coverage on `(cell, class)` and make
-  `_gain` lexicographic `(-new_lane_route, -new_cells)` so lane×route is
-  exhausted before cells break ties. Today it sums 1:1, weighting the 0.15% axis
-  equal to the 4.9% one.
-- **Multi-leg is a ROLE framework, not a score — yet.** leg-1 (retrieval,
-  `RouterObjective`, exists) is the shipped-stack ground truth *by definition*.
-  leg-2 (stronger indexer) disagreement marks a label STACK-SPECIFIC (not wrong).
-  leg-3 (LLM-judge) disagreement means qrels are shallow/wrong. These are three
-  DIFFERENT disagreement types. `leg_confidence` may NOT enter any selection
-  score until three things are written down: (a) referent — confidence in what,
-  per leg; (b) direction — does the selector prefer agreement (clean) or
-  disagreement (informative)?; (c) a disagreement→number rule across legs with
-  different output types. Until then: leg-1 only.
-- **Probes gate the whole layer.** The leg-3 spike (~$5–20) and the skeleton
-  minimal-pair test decide whether a query-side utility term deserves to exist,
-  OR whether utility is purely lane/qrels selection. Run BEFORE deriving targets.
-- **Objective variants** (`WastedRecallObjective`, in
-  `route_objective_variants.ipynb`) → first-class `objective.py` subclasses.
-
-### Layer 3 — Representation = bounds at composition, weighting at eval
-
-Two mechanisms, neither a selection-time mass prior:
-- **Row realism** — every row is something a user could send (real-parent
-  machinery + census-rate dirt from `corruption_census.parquet`).
-- **Inversion BOUND** — no archetype over-represented ≥K× under any plausible
-  source weighting. This kills the 14× without a fictitious prior. (The "traffic
-  prior" is NOT traffic — the 440K pool's mix is our own acquisition caps: orcas
-  100K, gooaq/webfaq/clerc 50K each. Tracking it is proxy-circular.)
-- **Traffic weighting at EVAL**, not selection — the SPEC d49c/d50f precedent
-  ("balance applied at EVAL as a weighting, not a selection target"). If a true
-  prior is ever wanted, anchor it EXTERNALLY (Qdrant page-search production
-  traffic), never to the pool's own caps.
-
-**The named conflict the v1 draft hid:** a prevalence prior would send the bulk
-of mass into the single-answer lanes (msmarco/gooaq/webfaq/scirgen/clerc = 70.7%
-of the pool) whose labels utility classifies as waste — matching a prior and the
-waste cap are near-jointly-infeasible without qrels deepening. Eval-weighting +
-inversion-bounds dissolves this: representation stops competing with utility for
-selection slots.
-
----
-
-## Language — placed per objective, not a fourth objective
-
-- **Code-switch operator** → a **diversity floor** (manufacturable, v3-now): a
-  `CorruptOperator` sibling, deterministic apply, LANGID-verified.
-  `is_code_switched` exists (`features.py:123`), but `lingua` is NOT in
-  `poetry.lock` (verified: 0 occurrences — the langid tests SKIP until
-  `poetry lock`), so the dep must be locked first. Feasible — but also inherits
-  the corruption admit-path gap (below).
-- **Multilingual share** → NOT a representation target until an external language
-  anchor exists (else it's a hand number — violates computed-not-assumed). A
-  supply wish for now.
-- **Cross-lingual (translate query + corpus)** → creates a **new LANE**, so it
-  belongs on the supply/utility track (lanes carry outcome), NOT under diversity.
-  Heaviest; parallel to new-datasets.
-
----
-
-## Machinery gaps (NOT "stale targets" — these need code)
-
-| Gap | Evidence | Blocks |
+| Layer | Class | File |
 |---|---|---|
-| Corruption-floor admit path | `cellfill.py:215-217` skips non-cell floors; no writer emits corruption floors; `loop.run` raises off-sheet (`loop.py:464-469`) | dirty-query + code-switch targets |
-| Per-lane corruption draw control | `CorruptOperator.eligible` lane-shuffles, no per-lane quota | census-rate enforcement |
-| Waste cap is a comment | `waste_cap` used once (`select_v3_prototype.py:60`); no capped waste draw in `greedy_select` | waste budget |
-| `CELLS_ALL` threading | shared v2 imports (loop/cellfill/operators) | v3 + corpus-stat + language cells |
-| Corpus-band double-structure | `_attach_corpus_band` bands `avg_idf` `[0.2,0.4]` (degenerate 2.7% low), NOT the empirical `min_pmi<=-1.0`/`max_idf>=0.87` — two structures, one axis (CLAUDE.md design bug) | reconcile before authoring cells |
-| qcs→catalog join | `catalog_v3` has no PMI/IDF cols → KeyError | corpus-stat cells |
-| Selector coverage key | `select_v3_prototype.py:335-343` per-cell, 1:1 gain | utility keying |
+| Diversity floors | `DiversityFloors` | `src/composition/objectives.py` |
+| Labelling demand | `SelectionOrder` | `src/composition/objectives.py` |
+| Utility | `UtilityObjective` | `src/composition/objectives.py` |
+| Representation | `InversionBound` | `src/composition/objectives.py` |
+| Pool, classes, strata | `LabelledPool` | `src/composition/pool_v3.py` |
+| Artifact owner | `V3Composition` | `src/composition/composer.py` |
 
-## Corrected readiness tags (fixing v1's over-optimism)
-
-- Dirty-query rates: ~~machinery-ready~~ → **target-pending + machinery gap**.
-- Global split + waste budget: split ready; **waste budget = unbuilt**.
-- Decisive-yield/lane×route coverage: exists but implements the WRONG key
-  (coverage bug) → **machinery-partial**.
-- Enriched-unit corpus band: **stale** (`avg_idf` hand-edges, not empirical).
-- `utility_multiplier`: **removed** (its inputs — legs 2-3, fresh labels — don't
-  exist; the layering makes it unnecessary).
+`CellFill` (`src/composition/cellfill.py`) is the FROZEN v2 owner. It shares the
+sheet schema and the augmentation loop with v3 and owns none of the v3
+artifacts. `Recipe.n_per_route` is v2's flat quota and has exactly one consumer,
+`CellFill`. v3 sizes off `target_total` and per-axis marginals.
 
 ---
 
-## Sequence
+## Layer 1: Diversity = hard floors
 
-0. **Prereq:** commit working tree + regenerate labels (post-inject-fix).
-1. **Probes:** leg-3 spike + skeleton minimal-pair — go/no-go on a query-side
-   utility term.
-2. **Machinery gaps:** corruption admit path, waste cap, `CELLS_ALL` threading,
-   qcs→catalog join, coverage-key fix, corpus-band reconcile.
-3. **Diversity floors + cells revalidation:** membership gate, `predicts`
-   normalization, corpus-stat + code-switch cells.
-4. **Utility objective:** leg framework WITH defined `leg_confidence` (referent /
-   direction / mechanism); variants out of the notebook; as the selection driver.
-5. **Representation:** inversion bound (pick K) at composition + traffic
-   weighting at eval.
-6. **Per-axis marginal targets** → re-target the augmentation loop's order sheet.
-7. **Language/cross-lingual** as supply lands (parallel track).
+Per-axis MARGINAL floors, satisfied jointly. Not crossed boxes. One row credits
+every stratum it touches, at selection and in the audit alike.
 
-## Verification (rewritten to remove circularity)
+Four axes, four owners:
 
-- **Utility — gap-closure with a LANE-MATCHED control.** `router.py`
-  headroom-captured exists, but objective-selection changes the lane mix, so an
-  unmatched gain may be pure lane composition ("utility = avoid dead lanes").
-  Match lane marginals, ablate the objective. NOT "decisive-yield up" (circular —
-  the selector optimizes it). `leg_confidence` informativeness needs a
-  PRE-REGISTERED disagreement map (e.g. "leg-3 disagreement concentrates in the
-  5 single-answer lanes") or it's unfalsifiable.
-- **Diversity — membership gate** (2 queries/cell admitted) + every per-axis
-  marginal floor met.
-- **Representation — census-rate match + inversion bound** (no archetype ≥K×
-  under any plausible source weighting); traffic-weighted eval is production-honest.
+- **Cells.** `DiversityFloors.marginals` enumerates from the cell registry, so a
+  cell holding two rows reports two rows and fails.
+- **Corruption degree.** Bands declared as `STRATA` in `pool_v3.py`, beside the
+  code that writes them.
+- **Corpus bands** (`corpus_idf`, `corpus_oov`, `corpus_pmi`). Report-only:
+  no operator mints a corpus statistic.
+- **Lanes.** `V3Composition._per_dataset` alone. This is labelling demand, not a
+  sheet floor.
 
-## Open decisions (genuinely unresolved — do not pre-answer)
+Three rules the implementation enforces, each of which was violated at some
+point and produced a green report over no measurement:
 
-1. **K** for the inversion bound.
-2. Whether utility warrants a query-side term at all — the **probes** decide.
-3. External traffic anchor (page-search) availability, if a prior is ever wanted.
-4. Skeleton (frame=cell, filler=corpus-stat) vs additive per-axis marginals — the
-   skeleton probe decides; until then the stratum unit stays per-axis marginal.
+1. **Strata are declared, never observed.** `marginals` reindexes over the
+   declared band tuple with `fill_value=0`. A band no row landed in reports 0
+   and fails. Counting only the values that occurred is how three axes reported
+   every floor met while measuring nothing.
+2. **`unknown` is coverage, not a band.** It is a `dark` count per axis and is
+   never floored. A pile of unmeasured rows must not pass as a covered stratum.
+3. **A join that reaches no supply row raises.** `_attach_corpus_strata` fails
+   loudly when `query_corpus_stats.parquet` covers zero v3-native rows. The
+   graceful `unknown` fallback stays for partial misses, which are legitimately
+   unknown. Note the guard is on NATIVE coverage, not on all rows: with 46K
+   covered v2 rows in the pool, an all-rows check never fires while every
+   selected row is still dark.
 
-## Why the product-form was dropped (provenance)
+**One floor, one bar.** Lane floor credit, `class_debt` supply, and
+`SelectionOrder.yields` all count tier-0 non-waste native rows: routes differ at
+any margin, plus genuine hybrid ties, excluding only fake ties and all-zero.
+Three bars for one concept is the two-structures design bug in CLAUDE.md. A gap
+measured at one bar and divided by a yield measured at another over-orders
+labels.
 
-Two independent adversarial reviews (2026-08-19) converged: the machinery lens
-proved `target = mass × diversity_floor × utility_multiplier` is unaddressable in
-code (single-string floors, no compound-key order sheet, no corpus-band minter)
-and reinstates the cut grid; the objective lens proved it's unidentifiable
-(representation_mass and diversity are the same cell axis with opposite signs; a
-floor is a constraint not a multiplicand; utility keyed to the 0.5% axis). Same
-verdict from opposite directions → layer, don't multiply.
+## Layer 2: Utility = the sole scalar objective
+
+`UtilityObjective.select`. There is no single scalar expression: the objective is
+a lexicographic order that falls out of control flow, in this sequence.
+
+1. **Maximize artifact size under the lane cap.** `feasible_total` binary
+   searches the largest total whose per-class targets fit lane-capped supply, so
+   the binding class never silently under-fills while the others fill to
+   uncapped targets.
+2. **Per class, greedy coverage.** `gain = (ds not in lanes_drawn, len(diversity
+   - covered))`, a tuple compared lexicographically, recomputed per pick. Lane
+   strictly dominates: cells and the other strata only break ties. Coverage is
+   keyed per (stratum, class), since each class draw carries its own `covered`
+   set.
+3. **Seeded lane-capped fill** once nothing uncovered remains.
+4. **Dictated waste draw** at `waste_cap` of the tier-0 total, lane-capped,
+   typed `route_class="waste"` and never certified.
+
+Keyed on the axes that carry outcome. Lane explains ~4.9% and dataset 12-21%,
+against ~0.5% for cell, so keying utility on the cell axis would be backwards.
+
+**leg-1 labels only.** No `leg_confidence` term may enter any selection score
+until three things are written down: (a) the referent, meaning confidence in
+what, per leg; (b) the direction, meaning whether the selector prefers agreement
+or disagreement; (c) a disagreement-to-number rule across legs with different
+output types. leg-2 (stronger indexer) disagreement marks a label
+stack-specific. leg-3 (LLM judge) disagreement means the qrels are shallow or
+wrong. Those are different disagreement types and do not compose into one score
+by default. The `--llm-coherence` path is a binary ADMISSION gate, not a score.
+
+## Layer 3: Representation = bounds at composition, weighting at eval
+
+Three mechanisms, none of them a selection-time mass prior.
+
+- **Row realism.** Real-parent machinery plus census-rate dirt from
+  `corruption_census.parquet`. `InversionBound.realism` checks the artifact's
+  damaged share against the census's own pooled rate.
+- **Inversion bound.** `InversionBound.report` computes each cell's selected
+  share against the minimum share any candidate weighting implies, and flags
+  which over-representation the stratum floor itself mandates. Report-only until
+  K is frozen.
+- **Traffic weighting at EVAL, not selection.** If a true prior is ever wanted,
+  anchor it EXTERNALLY (Qdrant page-search production traffic). The 440K pool's
+  mix is our own acquisition caps (orcas 100K, gooaq/webfaq/clerc 50K each);
+  tracking it as a prior is proxy-circular.
+
+Every pool-share quantity in the draw is a CAP, never a target. That is what
+dissolves the conflict a prevalence prior would create: the single-answer lanes
+are 70.7% of the pool and utility classifies their labels as waste, so matching
+a prior and capping waste are near-jointly-infeasible without qrels deepening.
+
+---
+
+## The generation ring
+
+Five edges. The list is what generation owes, and it closes only if every edge
+exists.
+
+```
+order sheet -> generate -> admit -> label -> pool -> recompose
+```
+
+- **Sheet** is written by `DiversityFloors.order_sheet`: cell floor shortfalls
+  net of both the selection and the unspent supply that already satisfies them,
+  plus the corruption line. Nothing else.
+- **Admit** (`V3Composition.admit`) re-measures generated text against the
+  cell's own predicate over a mini catalog. A row minted FOR a floor still has
+  to measurably serve it. It credits every hungry line a row serves, not only
+  the line it was minted for, matching how selection credits every stratum.
+- **Label** is `label_routes_v3.py --admitted`, writing
+  `v3/augmented/labels.parquet`. Answer keys come from
+  `augmentation/qrels.parquet`, inherited from each row's parent, through
+  `RouteLabels.label(..., generation="cell_based", include_gated=True)`.
+  Synthesize-operator rows are excluded here: they answer only against
+  constructed docs in an isolated collection, and scoring them against the paid
+  collection is contamination.
+- **Pool** reads four label files. Re-scored v2 rows are `native=False` and
+  measure yields and priors, never supply.
+
+**Two owners, two numbers.** Generation owes the sheet. Labelling owes the class
+shortfall its own order cannot buy (`SelectionOrder`'s `residual_debt`).
+Conflating them is how a ~11.5K program once read as a 197,756-row one: the
+class debt was being waterfilled onto cells by `cell.predicts`, which is the
+prior under test and may never allocate. `cells.py` states that contract, and
+allocating by it manufactures the correlation the cell exists to measure.
+
+**Credit gates.** Two gates, two keys, both human-owned in different senses.
+`coherence_gate` clears from `CoherenceJudge.passed()`. `declaration_audit`
+clears from a hand-written newline file of query_ids. `None` for either keeps
+its rows waiting. A gate with no key is a floor that can never be paid.
+
+## Operational order
+
+Any change to labels or corpus statistics has to walk the whole chain, because
+each step is an input to the next.
+
+```bash
+# 1. corpus statistics for the v3-native rows (appends, resumable, no --force)
+poetry run python src/scripts/collection_features.py --per-query --v3
+# 2. label the admitted generated rows
+poetry run python src/scripts/label_routes_v3.py --admitted
+# 3. refresh the catalog so new rows get cells and a corruption degree
+poetry run python src/scripts/build_v3_catalog.py --force
+# 4. recompose
+poetry run python src/scripts/compose_v3.py --force
+```
+
+Skipping step 1 raises at `LabelledPool.frame()`. Skipping step 3 lands the new
+rows in the pool with zero cells and `corruption_degree == "unknown"`.
+
+## Verification
+
+- **Utility: gap closure against a LANE-MATCHED control.** `run_ablation.py`
+  matches arm B on lane and route class and measures a paired objective on the
+  eval reserve frozen BEFORE selection, with a lane-cluster bootstrap. NOT
+  "decisive-yield up", which is circular because the selector optimizes it. Know
+  the claim's scope: matching on route class means the ablation tests the
+  within-(lane, class) coverage and tie-break choice, and never ablates the
+  split, the lane cap, or the certified-first tiering. The reserve is
+  certified-only at the same margin the selector uses, so utility is proven on
+  rows leg-1 is already confident about.
+- **Diversity: the membership gate** (`tests/test_cell_membership.py`, two
+  positives and two negatives per cell, positives authored from `looks_like`
+  alone, strict-xfail quarantine naming the inverted cells) plus every declared
+  marginal met.
+- **Representation: census-rate match and the inversion bound.** No archetype
+  over-represented ≥K× under any plausible source weighting.
+
+## Genuinely open
+
+1. **K for the inversion bound.** The report prints a candidate. Nothing fails a
+   build on breach yet, so Layer 3's bound does not bind.
+2. **Floors as selector constraints.** `stratum_floor` still does not enter
+   `select`. The greedy pass covers each stratum once and the rest is a
+   lane-capped random fill, so floors are satisfied by accounting plus a
+   generation order, not by the draw. Netting unspent supply out of the sheet
+   makes `NeedsSelection` unreachable from a sheet the composer wrote, which
+   closes the deadlock without making floors constraints. Two limits remain:
+   `loop.demand`'s population is the CATALOG, so a cell whose only unspent
+   members are unlabelled still raises (that is genuine labelling demand), and
+   `unspent` counts eval-reserve rows and their cluster-mates, which the
+   selector can never take.
+3. **Whether utility warrants a query-side term at all.** The leg-3 spike and
+   the skeleton minimal-pair probe decide it.
+4. **External traffic anchor** (page-search) availability, if a prior is ever
+   wanted.
+5. **Skeleton (frame=cell, filler=corpus-stat) vs additive per-axis marginals.**
+   The skeleton probe decides. Until then the stratum unit stays per-axis
+   marginal.
+6. **`WastedRecallObjective` as a selection driver.** Promoted out of the
+   notebook to `hybrid_search_rrf_dataset/objective.py` with a test, and
+   unreachable: nothing constructs it, and swapping it means relabelling the
+   pool, for which no path exists.
+
+## Language
+
+- **Code-switch operator** is a diversity floor, manufacturable as a
+  `CorruptOperator` sibling with deterministic apply and LANGID verification.
+  `is_code_switched` exists in `features.py`; `lingua` is not in `poetry.lock`,
+  so the dep must be locked first.
+- **Multilingual share** is not a representation target until an external
+  language anchor exists. A hand number here violates computed-not-assumed.
+- **Cross-lingual** (translate query and corpus) creates a new LANE, so it
+  belongs on the supply and utility track, parallel to new datasets.

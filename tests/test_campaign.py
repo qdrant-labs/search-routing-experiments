@@ -11,8 +11,10 @@ from augmentation.campaign import (
     FAULT_STREAK,
     MAX_CHANCES,
     PRODUCE,
+    SKIP_NEEDS_SELECTION,
     SKIP_NO_OPERATOR,
     AugmentationCampaign,
+    RowBudget,
 )
 from augmentation.config import AugmentationConfig, AugmentationPaths
 from augmentation.core import CreditGate
@@ -22,6 +24,7 @@ from augmentation.operators import DecorateOperator, InjectOperator, StatRewrite
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
 from query_taxonomy.features import FeatureExtractor
+from scripts.run_v3_generation import synthetic_rung
 from taxonomy_generators.verify import VerifyReport, verify
 
 IDENT = "structured_identifiers."
@@ -215,6 +218,37 @@ def test_a_cell_short_of_parents_routes_the_remainder_to_synthesis(tmp_path):
     assert row["action"] == PRODUCE
 
 
+def test_a_cell_its_own_parents_satisfy_is_selection_not_synthesis(tmp_path):
+    """`damage_free_query`'s unspent parents already measure into it, so the
+    line must never be priced as generation: paying to mint a clean query buys
+    supply the pool is already holding, and the plan once read all 2,436 of
+    them as owed to the synthetic rung."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    paths.catalog.parent.mkdir(parents=True, exist_ok=True)
+    config = AugmentationConfig(paths=paths)
+    parent = {
+        "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
+        "query": "how do antibiotics work", "floors": [],
+        "derived.corruption_spans": 0.0,
+    }
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("damage_free_query").to_parquet(sheet_path, index=False)
+    loop = RecordingLoop(
+        pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"]),
+        config=config, operators=(StatRewrite(config),),
+        sheet_path=sheet_path, pool=GeneratedPool(paths),
+        qrels=AugmentationQrels(paths), parents=OneParent(parent),
+    )
+
+    plan = AugmentationCampaign(loop).plan()
+    synthetic_rung(loop, plan, None, RowBudget())
+
+    row = plan.iloc[0]
+    assert row["action"] == SKIP_NEEDS_SELECTION
+    assert row["synthetic_rows"] == 0 and row["target_rows"] == 0
+    assert loop.synthesized == [], "a selection shortfall costs no completion"
+
+
 class RecordingLoop(AugmentationLoop):
     """Records what the campaign asks the synthetic rung for, without paying
     for it."""
@@ -228,9 +262,10 @@ class RecordingLoop(AugmentationLoop):
         return pd.DataFrame([{"query_id": f"syn-{floor}-{i}"} for i in range(n)])
 
 
-def test_run_hands_the_unreachable_remainder_to_the_synthetic_rung(tmp_path):
+def test_stage_5_mints_the_remainder_the_campaign_leaves_alone(tmp_path):
     """The gate is a fork, not a stop sign: what rung 1 cannot reach must
-    actually reach the rung that can, with a lane to borrow distractors from."""
+    actually reach the rung that can, with a lane to borrow distractors from —
+    and exactly once, from the driver's stage 5, never also from `run()`."""
     paths = AugmentationPaths(data_dir=tmp_path)
     paths.catalog.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([{
@@ -254,18 +289,23 @@ def test_run_hands_the_unreachable_remainder_to_the_synthetic_rung(tmp_path):
         qrels=AugmentationQrels(paths), parents=OneParent(parent),
     )
 
-    summary = AugmentationCampaign(loop, pilot_n=5).run()
+    # the driver's own sequence: price it (stage 3), produce from parents
+    # (stage 4), then mint the remainder (stage 5)
+    campaign = AugmentationCampaign(loop, pilot_n=5)
+    plan = campaign.plan()
+    campaign.run()
+    assert loop.synthesized == [], "the campaign never mints from nothing"
+
+    synthetic_rung(loop, plan, None, RowBudget())
 
     assert loop.synthesized == [("version_pinned_technical", 4, "beir-nfcorpus")], (
-        "the remainder must reach synthesize(), with the cell's own lane"
+        "the remainder must reach synthesize() once, with the cell's own lane"
     )
-    row = summary[summary["floor"] == "version_pinned_technical"].iloc[0]
-    assert row["synthesized"] == 4, "synthetic rows must show in the summary"
 
 
 def test_a_cell_with_no_parents_is_not_given_an_arbitrary_lane(tmp_path):
     """No parents means no lane to borrow distractors from. Picking one would
-    be inventing policy, so the campaign reports and leaves it."""
+    be inventing policy, so stage 5 reports and leaves it."""
     paths = AugmentationPaths(data_dir=tmp_path)
     config = AugmentationConfig(paths=paths)
     sheet_path = tmp_path / "sheet.parquet"
@@ -278,7 +318,9 @@ def test_a_cell_with_no_parents_is_not_given_an_arbitrary_lane(tmp_path):
         qrels=AugmentationQrels(paths),
     )
 
-    AugmentationCampaign(loop, pilot_n=5).run()
+    synthetic_rung(
+        loop, AugmentationCampaign(loop, pilot_n=5).plan(), None, RowBudget()
+    )
 
     assert loop.synthesized == []
 
@@ -311,6 +353,58 @@ def test_plan_reports_no_operator_for_an_unregistered_bare_floor(tmp_path):
     row = plan.iloc[0]
     assert row["action"] == SKIP_NO_OPERATOR
     assert row["operator"] is None
+
+
+def test_the_row_budget_ends_the_round_before_the_next_floor(tmp_path):
+    """`--limit n`: the round produces n rows and stops. Not "n per floor" and
+    not "finish the floor you started" — the second floor must never cost a
+    single call."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    config = AugmentationConfig(paths=paths)
+    sheet_path = tmp_path / "sheet.parquet"
+    pd.concat([
+        _sheet("marker:greeting"),                          # missing 5, served first
+        _sheet("marker:politeness").assign(missing=4.0),
+    ], ignore_index=True).to_parquet(sheet_path, index=False)
+    engine = FaultsThenSucceeds(
+        n_fail=0, text="hello there, what is the capital of France",
+    )
+    loop = AugmentationLoop(
+        _many(15), config=config, engine=engine,
+        operators=(ModelDecorate(config),),
+        sheet_path=sheet_path, pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
+    )
+    budget = RowBudget(2)
+
+    summary = AugmentationCampaign(loop).run(budget)
+
+    assert int(summary["accepted"].sum()) == 2, "the budget is the whole round"
+    assert engine.calls == 2, "the second floor must not be attempted at all"
+    assert budget.exhausted()
+
+
+def test_stage_5_mints_only_what_the_budget_has_left(tmp_path):
+    """One budget across both spending stages: stage 5 asks for the remainder,
+    never for its own full share."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    config = AugmentationConfig(paths=paths)
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("marker:greeting").to_parquet(sheet_path, index=False)
+    loop = RecordingLoop(
+        _many(15), config=config, engine=AlwaysFaultsEngine(),
+        operators=(ModelDecorate(config),),
+        sheet_path=sheet_path, pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
+    )
+    plan = pd.DataFrame([{
+        "floor": "version_pinned_technical", "missing": 10.0, "action": PRODUCE,
+        "synthetic_rows": 8, "source_dataset": "beir-nfcorpus",
+    }])
+    budget = RowBudget(3)
+    budget.add(1)   # as if stage 4 had banked one row
+
+    synthetic_rung(loop, plan, None, budget)
+
+    assert loop.synthesized == [("version_pinned_technical", 2, "beir-nfcorpus")]
 
 
 def test_a_floor_that_always_faults_costs_at_most_the_k_ceiling(tmp_path):

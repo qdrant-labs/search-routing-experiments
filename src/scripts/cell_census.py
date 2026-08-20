@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from composition.cells import CELLS, CELLS_BY_NAME
-from composition.floors import with_derived
+from composition.floors import read_catalog, with_derived
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -44,7 +44,7 @@ def _classified(pool: pd.DataFrame) -> pd.DataFrame:
 def census() -> tuple[pd.DataFrame, pd.Series]:
     """One row per cell, plus the per-row count of cells claiming it."""
     pool = _classified(pd.read_parquet(POOL).astype({"query_id": str}))
-    catalog = with_derived(pd.read_parquet(CATALOG).astype({"query_id": str}))
+    catalog = with_derived(read_catalog(CATALOG))
     joined = catalog.merge(
         pool[["dataset", "query_id", "cls", "answered"]],
         on=["dataset", "query_id"], how="inner",

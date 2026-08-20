@@ -19,6 +19,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
+from composition.floors import read_catalog
 from composition.mini_catalog import feature_columns
 from query_taxonomy.banks import BANKS
 from query_taxonomy.core import Engine
@@ -83,7 +84,7 @@ def build_v3_catalog(*, force: bool = False) -> pd.DataFrame:
     if OUT.exists() and not force:
         return pd.read_parquet(OUT)
     labels = _pool_labels()
-    v2 = pd.read_parquet(V2_CATALOG).astype({"query_id": str})
+    v2 = read_catalog(V2_CATALOG)
 
     # reuse v2 feature columns for the labelled rows (left join keeps every row)
     base = labels[["dataset", "query_id"]].merge(

@@ -12,10 +12,10 @@ import numpy as np
 import pandas as pd
 
 from augmentation.core import CreditGate
+from composition.cellfill import NATURAL
 from composition.mini_catalog import mini_catalog
 from composition.objectives import (
     CORRUPTION_SLICE,
-    UNCOVERED_SLICE,
     DiversityFloors,
     InversionBound,
     SelectionOrder,
@@ -151,14 +151,18 @@ class V3Composition:
         *,
         extractor: FeatureExtractor | None = None,
         coherence_passed: set[str] | None = None,
+        audit_passed: set[str] | None = None,
     ) -> pd.DataFrame:
         """Credit generated rows against the hungry sheet lines: cell demands
         re-verified by the cell's own predicate over a mini catalog,
-        corruption demands by the derived span total — a row minted FOR a
-        floor still has to measurably serve it."""
+        corruption demands by the derived span total — a row minted FOR a floor
+        still has to measurably serve it, and pays every other hungry line it
+        measurably serves too."""
         sheet = pd.read_parquet(self.order_sheet_path)
         selection = pd.read_parquet(self.dataset_path)
-        fresh = self._admissible(pool, selection, sheet, coherence_passed)
+        fresh = self._admissible(
+            pool, selection, sheet, coherence_passed, audit_passed
+        )
         if fresh.empty:
             print("v3 admit: nothing admissible in the pool")
             return fresh
@@ -170,17 +174,14 @@ class V3Composition:
                 {band.column for cell in cells.values() for band in cell.bands}
             ),
         ))
+        hungry = sheet[sheet["missing"] > 0]
         admitted, gained = [], {}
         rng = np.random.default_rng(self._recipe.seed)
-        for line in sheet[sheet["missing"] > 0].itertuples(index=False):
+        for line in hungry.itertuples(index=False):
             members = fresh[fresh["floor"] == line.floor]
-            if line.slice == CORRUPTION_SLICE:
-                served = mini.loc[members.index, CORRUPTION_SPANS] >= 1
-            elif line.floor in cells:
-                served = cells[line.floor].select(mini.loc[members.index])
-            else:
+            if members.empty:
                 continue
-            members = members[served.to_numpy(dtype=bool)]
+            members = members[self._serves(line, cells, mini, members.index)]
             if members.empty:
                 continue
             take = members.sample(
@@ -192,19 +193,72 @@ class V3Composition:
         if not admitted:
             print("v3 admit: no generated row measurably serves a hungry line")
             return fresh.iloc[:0]
-        rows = pd.concat(admitted, ignore_index=True)
-        self._assert_natural_share(selection, rows)
-        credited = sheet["floor"].map(gained).fillna(0.0)
+        rows = pd.concat(admitted)
+        extra = self._extra_credit(hungry, rows, gained, cells, mini)
+        record = self._admission_record(self.admitted_path, rows)
+        self._assert_natural_share(
+            selection, record, self._recipe.min_natural_share
+        )
+        credited = sheet["floor"].map(
+            {floor: gained.get(floor, 0) + extra.get(floor, 0)
+             for floor in set(gained) | set(extra)}
+        ).fillna(0.0)
         sheet["credit"] = sheet["credit"] + credited
         sheet["missing"] = (sheet["missing"] - credited).clip(lower=0.0)
         sheet.to_parquet(self.order_sheet_path, index=False)
-        rows.to_parquet(self.admitted_path, index=False)
+        record.to_parquet(self.admitted_path, index=False)
         print(
-            f"v3 admit: {len(rows):,} rows into {len(gained)} lines | "
-            f"hungry {int((sheet['missing'] > 0).sum())} remain -> label them, "
+            f"v3 admit: {len(rows):,} rows into {len(gained)} lines, plus "
+            f"{sum(extra.values()):,} credits on {len(extra)} lines they also "
+            f"serve | {len(record):,} rows on record | hungry "
+            f"{int((sheet['missing'] > 0).sum())} remain -> label them, "
             f"then rebuild"
         )
         return rows
+
+    @staticmethod
+    def _serves(line, cells: dict, mini: pd.DataFrame, index) -> np.ndarray:
+        """Which of these mini-catalog rows measurably serve the line — the
+        cell's own predicate, the derived span total for corruption, and
+        nothing for a line no rung can verify."""
+        if line.slice == CORRUPTION_SLICE:
+            return (mini.loc[index, CORRUPTION_SPANS] >= 1).to_numpy(dtype=bool)
+        if line.floor in cells:
+            return cells[line.floor].select(mini.loc[index]).to_numpy(dtype=bool)
+        return np.zeros(len(index), dtype=bool)
+
+    @classmethod
+    def _extra_credit(
+        cls,
+        hungry: pd.DataFrame,
+        rows: pd.DataFrame,
+        gained: dict[str, int],
+        cells: dict,
+        mini: pd.DataFrame,
+    ) -> dict[str, int]:
+        """What the admitted rows serve BEYOND the line they were minted for,
+        capped at what that line still needs — selection credits every stratum
+        a row touches, so generation may not be billed for less."""
+        extra: dict[str, int] = {}
+        for line in hungry.itertuples(index=False):
+            room = int(line.missing) - gained.get(line.floor, 0)
+            others = rows.index[rows["credited_floor"] != line.floor]
+            if room <= 0 or others.empty:
+                continue
+            serving = int(cls._serves(line, cells, mini, others).sum())
+            if serving:
+                extra[line.floor] = min(room, serving)
+        return extra
+
+    @staticmethod
+    def _admission_record(path, rows: pd.DataFrame) -> pd.DataFrame:
+        """Every batch ever admitted, newest verdict per query_id — the label
+        sweep reads this file, so a round appends to it instead of replacing
+        it."""
+        old = pd.read_parquet(path) if path.exists() else rows.iloc[:0]
+        return pd.concat([old, rows], ignore_index=True).drop_duplicates(
+            "query_id", keep="last"
+        )
 
     @staticmethod
     def _admissible(
@@ -212,21 +266,27 @@ class V3Composition:
         selection: pd.DataFrame,
         sheet: pd.DataFrame,
         coherence_passed: set[str] | None = None,
+        audit_passed: set[str] | None = None,
     ) -> pd.DataFrame:
-        """The pool rows this admission may credit: `coherence_passed` is
-        `CoherenceJudge.passed()`, and None (the default) keeps every gated row
-        waiting on its human audit."""
+        """The pool rows this admission may credit: one cleared-id set per gate
+        — `CoherenceJudge.passed()` for the coherence gate, the human's list for
+        the declaration audit — and None keeps that gate's rows waiting."""
         rows = pool
         if "credit_gate" in rows.columns:
             gate = rows["credit_gate"].fillna(str(CreditGate.NONE))
-            cleared = gate.eq(CreditGate.COHERENCE_GATE) & rows["query_id"].isin(
-                coherence_passed or set()
-            )
+            cleared_by_gate = {
+                str(CreditGate.COHERENCE_GATE): coherence_passed or set(),
+                str(CreditGate.DECLARATION_AUDIT): audit_passed or set(),
+            }
+            cleared = pd.Series(False, index=rows.index)
+            for value, ids in cleared_by_gate.items():
+                cleared |= gate.eq(value) & rows["query_id"].isin(ids)
             gated = gate.ne(str(CreditGate.NONE)) & ~cleared
             if gated.any() or cleared.any():
                 print(
-                    f"v3 admit: skipping {int(gated.sum())} gated rows (d42h), "
-                    f"{int(cleared.sum())} cleared by the coherence judge"
+                    f"v3 admit: {int(cleared.sum())} gated rows cleared, "
+                    f"{int(gated.sum())} still waiting on their verdict "
+                    f"{gate[gated].value_counts().to_dict()}"
                 )
             rows = rows[~gated]
         hungry = set(sheet.loc[sheet["missing"] > 0, "floor"])
@@ -237,33 +297,37 @@ class V3Composition:
             dataset=lambda frame: frame["home_lane"],
         ).reset_index(drop=True)
 
+    @staticmethod
     def _assert_natural_share(
-        self, selection: pd.DataFrame, rows: pd.DataFrame
+        selection: pd.DataFrame, admitted: pd.DataFrame, minimum: float
     ) -> None:
-        natural = (
-            len(selection)
-            / max(len(selection) + len(rows), 1)
+        """Cumulative and by provenance: every generated row ever admitted
+        counts against the share, whether or not this batch minted it."""
+        natural = int((selection["provenance"] == NATURAL).sum())
+        generated = set(admitted["query_id"]) | set(
+            selection.loc[selection["provenance"] != NATURAL, "query_id"]
         )
-        assert natural >= self._recipe.min_natural_share - 1e-9, (
-            f"natural share {natural:.3f} fell below the recipe minimum "
-            f"{self._recipe.min_natural_share}"
+        share = natural / max(natural + len(generated), 1)
+        assert share >= minimum - 1e-9, (
+            f"natural share {share:.3f} fell below the recipe minimum {minimum}"
         )
 
     # ---------------------------------------------------------------- reports ---
     def _per_dataset(self, pool: pd.DataFrame) -> pd.DataFrame:
         """Per-lane labelling demands: floor credit, gap, and what a FRESH
-        label is worth there (decisive-at-margin over BLIND rows only — reused
-        rows entered for already having won and estimate nothing)."""
+        label is worth there (the floor-crediting rate over BLIND rows only,
+        since reused rows entered for already having won and estimate
+        nothing)."""
         recipe = self._recipe
         g = pool.groupby("dataset")
         out = pd.DataFrame({
             "labelled": g.size(),
             # the lane floor is a v3-dataset constraint, so only NATIVE rows
-            # credit it; `labelled`/blind stats stay all-era (measurement)
+            # credit it, at the same tier-0 non-waste bar class_debt and the
+            # labelling order count supply on; `labelled`/blind stats stay
+            # all-era (measurement)
             "floor_credit": g.apply(
-                lambda d: int(
-                    ((d["is_decisive"] | d["is_hybrid"]) & native_mask(d)).sum()
-                ),
+                lambda d: int((~d["is_waste"] & native_mask(d)).sum()),
                 include_groups=False,
             ),
             "median_depth": g["depth"].median(),
@@ -272,15 +336,20 @@ class V3Composition:
         out["floor_met"] = out["floor_credit"] >= recipe.stratum_floor
         out["floor_gap"] = (recipe.stratum_floor - out["floor_credit"]).clip(lower=0)
         out["single_answer"] = out["median_depth"] <= 1
-        blind = pool[pool["stage"] != REUSED].groupby("dataset")
+        blind_rows = pool[pool["stage"] != REUSED]
+        blind = blind_rows.groupby("dataset")
         out["blind_labelled"] = blind.size().reindex(out.index).fillna(0).astype(int)
-        out["blind_decisive"] = (
-            blind["is_decisive"].sum().reindex(out.index).fillna(0).astype(int)
+        # the rate answers "what does one fresh label credit?", so it counts the
+        # rows `floor_credit` counts: a gap measured at one bar and divided by a
+        # yield measured at another over-orders labels
+        out["blind_creditable"] = (
+            blind_rows[~blind_rows["is_waste"]].groupby("dataset").size()
+            .reindex(out.index).fillna(0).astype(int)
         )
         out["yield_rate"] = (
-            out["blind_decisive"] / out["blind_labelled"].clip(lower=1)
+            out["blind_creditable"] / out["blind_labelled"].clip(lower=1)
         ).round(3)
-        pooled = out["blind_decisive"].sum() / max(int(out["blind_labelled"].sum()), 1)
+        pooled = out["blind_creditable"].sum() / max(int(out["blind_labelled"].sum()), 1)
         out["fresh_left"] = self._fresh_left(out)
 
         def _action(r) -> str:
@@ -370,22 +439,26 @@ class V3Composition:
             f"{recipe.target_split}, stratum floor {recipe.stratum_floor}, "
             f"class_margin {recipe.class_margin}, k_cap {recipe.k_cap}.",
             "",
-            f"## Generation debt to {recipe.target_total:,}",
+            f"## Class shortfall to {recipe.target_total:,}",
             debt.to_markdown(index=False),
             "",
-            f"The order sheet owes **{int(sheet['missing'].sum()):,}** generated "
-            f"rows across {len(sheet)} lines "
-            f"({int((sheet['slice'] == 'cell').sum())} cell, "
-            f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption, "
-            f"{int((sheet['slice'] == UNCOVERED_SLICE).sum())} uncovered).",
+            f"**Generation owes** the order sheet "
+            f"**{int(sheet['missing'].sum()):,}** rows across {len(sheet)} "
+            f"lines ({int((sheet['slice'] == 'cell').sum())} cell, "
+            f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption) — "
+            f"cell floors and census-rate damage, nothing else.",
+            "",
+            f"**Labelling owes** the class shortfall above that its own order "
+            f"cannot buy: {order_summary.attrs.get('residual_debt', {})} rows "
+            f"toward {recipe.target_total:,}. Two owners, two numbers — adding "
+            f"them prices the cell-floor sheet as if it were the whole target.",
             "",
             "## Labelling order (the rung BEFORE generation)",
             f"{int(order_summary['labels_ordered'].sum()):,} labels ordered "
             f"across {len(order_summary)} lanes "
             f"({int(order_summary['queries_named'].sum()):,} queries named, "
-            f"answer-coverage gated); estimated residual debt after labelling: "
-            f"{order_summary.attrs.get('residual_debt', {})} — generation's "
-            f"true share.",
+            f"answer-coverage gated); what this order cannot buy is the next "
+            f"labelling round's residual above, never generation's.",
             order_summary.round(4).to_markdown(),
             "",
             "## Layers",
