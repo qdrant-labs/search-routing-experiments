@@ -16,12 +16,18 @@ the new per-run instrument.
 
 Before the re-run (ordering is load-bearing — the relabel changes labels):
 
-- [ ] Raise beir-nfcorpus `min_relevance` in lanes.py (§1b audit: 95.3%
-      grade-1 qrels) + relabel:
-      `poetry run python src/scripts/label_routes.py --only beir-nfcorpus --force`
-- [ ] Fix `GoldenRoutingBuilder` round-trip contradiction (~147 rows) —
-      also blocks Option A regardless.
-- [ ] Rebuild or delete the stale `beir-nfcorpus_oracle` cache.
+- [x] RESOLVED (verified 2026-08-20): `lanes.py` has `beir-nfcorpus` at
+      `min_relevance=2` (`6b8bf4b`).
+- [x] RESOLVED (verified 2026-08-20): `GoldenRoutingBuilder` round-trip
+      contradiction — checked all 138,426 route-scores across every
+      `*_oracle` cache under current code (re-score `route_rankings` via
+      `RouterObjective`, compare to stored `route_scores`): **0 mismatches**.
+      Fixed by `5d05ec1` (2026-08-19, predates this TODO's next re-read),
+      which scores the persisted `ordered()` list instead of the raw
+      ranking dict. Unblocks Option A regardless of the LLM-judge spend
+      decision.
+- [x] RESOLVED (verified 2026-08-20): `beir-nfcorpus_oracle` cache is 12
+      rows, matching the current selection (not the stale 323).
 - [ ] Implement the two new arms (d64c): `zipf_channel` (wordfreq dep;
       query-local rarity scalars as input block) and `feature_branch`
       (taxonomy features as third privileged-branch TARGETS — the
@@ -175,12 +181,11 @@ decision); full rationale in SPEC d60.
 - [ ] **Option A (next)**: LLM-judge the differing tails of tied rows,
       PPI-rectifier spine (docs/research/route-label-sourcing.md) —
       ~14.4K queries × ~15–20 unjudged tail docs, sampled not exhaustive.
-      Blocked by the two hygiene items below.
-- [ ] Fix `GoldenRoutingBuilder` parquet round-trip (~147 rows where
-      route_rankings contradict route_scores) — option A judges from those
-      rankings, so the bug must die first.
-- [ ] Rebuild or delete the stale `beir-nfcorpus_oracle` cache (323 rows
-      vs 12 selected).
+      Both hygiene blockers below are RESOLVED — this is now blocked only
+      on the spend decision (~$140–700), not on code.
+- [x] RESOLVED (verified 2026-08-20, see the ceiling-levers section above):
+      0/138,426 round-trip mismatches under current code.
+- [x] RESOLVED (verified 2026-08-20): `beir-nfcorpus_oracle` is 12 rows.
 - [ ] **Option C (conditional)**: harden webfaq/gooaq/msmarco corpora with
       adversarial distractors — only if A finds the ties real.
 - [ ] **Option D (last)**: augment tied parents into harder children —
