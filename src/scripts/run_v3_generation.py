@@ -422,7 +422,9 @@ def main() -> None:
     judge = CoherenceJudge(
         loop.engine, config=loop.config, docs=loop.docs, parents=loop.parents
     ) if args.llm_coherence else None
-    campaign = AugmentationCampaign(loop, judge=judge)
+    campaign = AugmentationCampaign(
+        loop, judge=judge, audit_cleared=audit_passed()
+    )
     # one budget, both spending stages: what stage 4 produces is what stage 5
     # no longer may
     budget = RowBudget(args.limit)

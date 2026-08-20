@@ -484,3 +484,26 @@ def test_a_floor_that_recovers_after_one_lost_chance_still_gets_fully_served(tmp
     row = summary.iloc[0]
     assert row["action"] == PRODUCE
     assert row["accepted"] == 5   # the floor's full `missing`
+
+
+def test_audit_file_opens_a_declaration_floor_at_the_bar(tmp_path):
+    """A fully-cleared pilot unclamps its floor; a mostly-held one stays
+    clamped; no verdict file keeps every declaration floor held."""
+    paths = AugmentationPaths(data_dir=tmp_path)
+    config = AugmentationConfig(paths=paths)
+    selection = pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"])
+    sheet_path = tmp_path / "sheet.parquet"
+    _sheet("corruption:light").to_parquet(sheet_path, index=False)
+    loop = AugmentationLoop(
+        selection, config=config, sheet_path=sheet_path,
+        pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
+    )
+    pool = pd.DataFrame({
+        "query_id": [f"c{i}" for i in range(4)] + [f"s{i}" for i in range(4)],
+        "floor": ["corruption:light"] * 4 + ["spec_bullet_paste"] * 4,
+        "credit_gate": [str(CreditGate.DECLARATION_AUDIT)] * 8,
+    })
+    cleared = {"c0", "c1", "c2", "c3", "s0"}  # 100% vs 25% of the pilot
+    opened = AugmentationCampaign(loop, audit_cleared=cleared)._audit_opened(pool)
+    assert opened == {"corruption:light"}
+    assert AugmentationCampaign(loop)._audit_opened(pool) == set()

@@ -106,6 +106,7 @@ class AugmentationCampaign:
         *,
         pilot_n: int | None = None,
         judge: CoherenceJudge | None = None,
+        audit_cleared: set[str] | None = None,
     ) -> None:
         self.loop = loop
         self.pilot_n = loop.config.pilot_n if pilot_n is None else pilot_n
@@ -114,6 +115,26 @@ class AugmentationCampaign:
         self.judge = judge
         """Given one, coherence gates open on ITS verdicts; without one the
         gates wait on the human audit, which is the default."""
+        self.audit_cleared = audit_cleared
+        """The human's declaration-audit verdict (cleared query_ids): a
+        declaration floor whose staged pilot passes at the same bar the
+        judge's floors open at is unclamped; None keeps every one held."""
+
+    def _audit_opened(self, pool: pd.DataFrame) -> set[str]:
+        """Declaration floors whose whole staged pilot the human cleared at
+        the bar coherence floors open at — an audited pilot is a paid-for
+        verdict, not feature-stock."""
+        if not self.audit_cleared or pool.empty:
+            return set()
+        gated = pool[
+            pool["credit_gate"].fillna("none")
+            == str(CreditGate.DECLARATION_AUDIT)
+        ]
+        if gated.empty:
+            return set()
+        passed = gated["query_id"].astype(str).isin(self.audit_cleared)
+        rate = passed.groupby(gated["floor"]).mean()
+        return set(rate[rate >= self.loop.config.coherence_pass_rate].index)
 
     def plan(self) -> pd.DataFrame:
         """The spend, before any call: one row per hungry floor with the
@@ -129,6 +150,7 @@ class AugmentationCampaign:
             if self.judge is not None
             else set()
         )
+        opened |= self._audit_opened(pool)
         rows: list[dict[str, object]] = []
         for line in self.loop.order_sheet().itertuples(index=False):
             try:
