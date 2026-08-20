@@ -172,15 +172,19 @@ def main() -> None:
     assert len(eval_frame) == len(reserve), "eval_reserve keys missing from pool"
     assert eval_frame["certified"].all(), "eval_reserve must be certified-only"
 
-    reserve_keys = set(_key(reserve))
-    candidate = pool[pool["certified"] & ~_key(pool).isin(reserve_keys)]
+    key_to_cluster = dict(zip(_key(pool), _cluster_ids(pool)))
+    reserve_clusters = {key_to_cluster[k] for k in _key(reserve) if k in key_to_cluster}
+    # excludes reserve's own cluster-mates too, certified or not — mirrors
+    # select_v3_prototype.reserve_exclusion_keys, restated by KEY here because
+    # this reserve is read back from disk with its own fresh index, not pool's
+    exclude_keys = {k for k, c in key_to_cluster.items() if c in reserve_clusters}
+    candidate = pool[pool["certified"] & ~_key(pool).isin(exclude_keys)]
 
     arm_a_keys = selected.loc[selected["certified"], ["dataset", "query_id"]]
     arm_a = candidate.merge(arm_a_keys, on=["dataset", "query_id"], how="inner")
     assert len(arm_a) == len(arm_a_keys), "arm A keys missing from candidate pool"
     contingency = arm_a.groupby(["dataset", "route_class"]).size()
 
-    key_to_cluster = dict(zip(_key(pool), _cluster_ids(pool)))
     arm_a_clusters = set(_key(arm_a).map(key_to_cluster))
     arm_b, exhaustion = _match_random(
         candidate, contingency, arm_a_clusters, key_to_cluster, args.seed_b
