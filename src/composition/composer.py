@@ -18,6 +18,7 @@ from composition.objectives import (
     CORRUPTION_SLICE,
     DiversityFloors,
     InversionBound,
+    LaneOrder,
     SelectionOrder,
     UtilityObjective,
 )
@@ -70,6 +71,10 @@ class V3Composition:
         return self._out / "selection_summary.parquet"
 
     @property
+    def lane_order_path(self) -> Path:
+        return self._out / "lane_order.parquet"
+
+    @property
     def eval_reserve_path(self) -> Path:
         return self._out / "eval_reserve.parquet"
 
@@ -102,6 +107,7 @@ class V3Composition:
         per_ds = self._per_dataset(pool)
         debt = self._floors.class_debt(pool)
         order, order_summary = self._selection_order(pool, per_ds, debt, sheet)
+        lane_order = self._lane_order(pool, order_summary)
         inversion = self._bound.report(selected, pool)
         realism = self._bound.realism(selected)
 
@@ -111,6 +117,7 @@ class V3Composition:
         sheet.to_parquet(self.order_sheet_path, index=False)
         order.to_parquet(self.selection_order_path, index=False)
         order_summary.to_parquet(self.selection_summary_path)
+        lane_order.to_parquet(self.lane_order_path)
         reserve[["dataset", "query_id", "route_class"]].to_parquet(
             self.eval_reserve_path, index=False
         )
@@ -122,7 +129,7 @@ class V3Composition:
         )
         self.report_path.write_text(
             self._report(pool, selected, reserve, marginals, sheet, per_ds,
-                         inversion, realism, debt, order_summary)
+                         inversion, realism, debt, order_summary, lane_order)
         )
         return selected
 
@@ -143,6 +150,44 @@ class V3Composition:
             self._pool.v3_catalog_path.parent.parent,
         )
         return order.build(pool, per_ds, debt, sheet, catalog)
+
+    def _lane_order(
+        self, pool: pd.DataFrame, order_summary: pd.DataFrame
+    ) -> pd.DataFrame:
+        """The class-residual carrier's quotas: capacity = a lane's corpus
+        docs minus the grounding docs the lane rung already keyed; corpora
+        over 1M docs wait for row-group sampling."""
+        from pyarrow.parquet import ParquetFile
+
+        from augmentation.config import AugmentationConfig
+        from augmentation.supply import lane_dirs
+
+        residual = order_summary.attrs.get("residual_debt")
+        if residual is None:
+            footer = order_summary.loc["(residual after labelling)"]
+            residual = {
+                name: float(footer[f"expected_{name}"])
+                for name in ("dense", "sparse", "hybrid")
+            }
+        yields = SelectionOrder.yields(pool)
+        paths = AugmentationConfig().paths
+        used = (
+            pd.read_parquet(paths.qrels, columns=["query_id"])["query_id"]
+            .astype(str)
+            if paths.qrels.exists() else pd.Series(dtype=str)
+        )
+        dirs = lane_dirs()
+        capacity: dict[str, int] = {}
+        for lane in yields.index:
+            corpus = paths.lane_corpus(dirs.get(str(lane), str(lane)))
+            if not corpus.exists():
+                continue
+            total = ParquetFile(corpus).metadata.num_rows
+            if total > 1_000_000:
+                continue
+            spent = int(used.str.startswith(f"lane-{lane}-").sum()) if len(used) else 0
+            capacity[str(lane)] = max(0, total - spent)
+        return LaneOrder(self._recipe).build(residual, yields, pool, capacity)
 
     # ------------------------------------------------------------------ admit ---
     def admit(
@@ -423,7 +468,7 @@ class V3Composition:
         }
 
     def _report(self, pool, selected, reserve, marginals, sheet, per_ds,
-                inversion, realism, debt, order_summary) -> str:
+                inversion, realism, debt, order_summary, lane_order) -> str:
         recipe = self._recipe
         unmet_m = marginals[~marginals["met"]]
         unmet_l = per_ds[~per_ds["floor_met"]]
@@ -448,18 +493,27 @@ class V3Composition:
             f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption) — "
             f"cell floors and census-rate damage, nothing else.",
             "",
-            f"**Labelling owes** the class shortfall above that its own order "
-            f"cannot buy: {order_summary.attrs.get('residual_debt', {})} rows "
-            f"toward {recipe.target_total:,}. Two owners, two numbers — adding "
-            f"them prices the cell-floor sheet as if it were the whole target.",
+            f"**The lane rung owes** the class shortfall labelling cannot buy: "
+            f"{order_summary.attrs.get('residual_debt', {})} rows toward "
+            f"{recipe.target_total:,}, minted INTO lanes by their measured "
+            f"yields (lane_order.parquet). Three owners, three numbers — "
+            f"summing any two misprices all of them.",
             "",
             "## Labelling order (the rung BEFORE generation)",
             f"{int(order_summary['labels_ordered'].sum()):,} labels ordered "
             f"across {len(order_summary)} lanes "
             f"({int(order_summary['queries_named'].sum()):,} queries named, "
-            f"answer-coverage gated); what this order cannot buy is the next "
-            f"labelling round's residual above, never generation's.",
+            f"answer-coverage gated); what this order cannot buy falls to the "
+            f"lane rung below.",
             order_summary.round(4).to_markdown(),
+            "",
+            "## Lane rung (the class-residual carrier)",
+            f"{int(lane_order['rows_to_mint'].dropna().sum()):,} doc-grounded "
+            f"rows to mint across {max(len(lane_order) - 1, 0)} lanes; the "
+            f"ceiling footer is what measured yields + lane caps + grounding "
+            f"supply make reachable — the gap beyond it is the acquisition "
+            f"conversation, not a generation dial.",
+            lane_order.round(4).to_markdown(),
             "",
             "## Layers",
             f"- Utility: certified tier {selected.attrs['total_certified']:,} "

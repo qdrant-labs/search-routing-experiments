@@ -194,6 +194,35 @@ def admitted_selection() -> pd.DataFrame:
     return fresh.assign(dataset=lane, home_lane=lane)[columns]
 
 
+def lane_minted_selection(passed: set[str]) -> pd.DataFrame:
+    """Coherence-passed lane-rung rows not yet labelled, straight from the
+    generated pool — a lane-minted row's query text is its own, and its lane
+    is its home."""
+    from augmentation.lane_synthetic import LANE_OPERATOR
+    from augmentation.pool import GeneratedPool
+
+    columns = ["dataset", "query_id", "query", "home_lane"]
+    pool = GeneratedPool().load()
+    if pool.empty:
+        return pd.DataFrame(columns=columns)
+    pool = pool.astype({"query_id": str})
+    rows = pool[
+        (pool["operator"] == LANE_OPERATOR) & pool["query_id"].isin(passed)
+    ]
+    done = [pd.read_parquet(V2_LABELS, columns=["query_id"])]
+    for labels in (
+        V3_DIR / "labels.parquet",
+        V3_DIR / "synthetic" / "labels.parquet",
+        AUGMENTED_DIR / "labels.parquet",
+    ):
+        if labels.exists():
+            done.append(pd.read_parquet(labels, columns=["query_id"]))
+    seen = set(pd.concat(done, ignore_index=True)["query_id"].astype(str))
+    fresh = rows[~rows["query_id"].isin(seen)].drop_duplicates("query_id")
+    lane = fresh["home_lane"].astype(str)
+    return fresh.assign(dataset=lane, home_lane=lane)[columns]
+
+
 class V3LabelSweep:
     """Index + label the v3 selection into data/v3, reusing shared collections.
     `augmented` moves the output to data/v3/augmented and labels the admitted

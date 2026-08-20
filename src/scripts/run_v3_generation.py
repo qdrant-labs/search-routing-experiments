@@ -301,6 +301,63 @@ def catalog_refresh() -> None:
           f"-> {OUT}")
 
 
+def lane_rung(
+    loop: AugmentationLoop, composer: V3Composition,
+    cap: int | None, budget: RowBudget,
+) -> None:
+    stage("5c", "LANE RUNG — mint doc-grounded queries INTO high-yield lanes "
+                "(LLM SPEND, ~2 calls/row incl. the judge): the class-residual "
+                "carrier; labels are earned by retrieval in stage 7b")
+    order = pd.read_parquet(composer.lane_order_path)
+    todo = order[order["rows_to_mint"].fillna(0) > 0]
+    if todo.empty:
+        print("no lane quotas this round — the residual is zero or uncarriable")
+        return
+    for lane, line in todo.iterrows():
+        if budget.exhausted():
+            print(f"row budget spent — stopping before [{lane}]")
+            return
+        want = int(line["rows_to_mint"]) if cap is None else min(
+            cap, int(line["rows_to_mint"])
+        )
+        n = budget.take(want)
+        print(f"\n[{lane}] minting {n} doc-grounded rows "
+              f"(expected {int(line['expected_dense'])}/"
+              f"{int(line['expected_sparse'])}/{int(line['expected_hybrid'])} "
+              f"d/s/h at measured yields)")
+        produced = loop.synthesize_lane(str(lane), n)
+        budget.add(len(produced))
+        print(f"[{lane}] minted {len(produced)}/{n}")
+
+
+def label_lane_minted(judge: CoherenceJudge | None) -> None:
+    stage("7b", "LABEL LANE-MINTED — coherence-passed lane rows against the "
+                "REAL lane collections (qdrant retrieval, no LLM); their "
+                "labels are how the residual actually shrinks")
+    if judge is None:
+        print("no judge this round (--llm-coherence off) — lane rows wait "
+              "gated; rerun with the judge to label them")
+        return
+    from qdrant_client import QdrantClient
+
+    from scripts.label_routes_v3 import V3LabelSweep, lane_minted_selection
+
+    selection = lane_minted_selection(judge.passed())
+    if selection.empty:
+        print("no coherence-passed lane-minted rows awaiting labels")
+        return
+    print(f"to label          : {len(selection):,} rows across "
+          f"{selection['dataset'].nunique()} lane(s)")
+    client = QdrantClient(
+        url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        api_key=os.getenv("QDRANT_API_KEY"), timeout=60,
+    )
+    sweep = V3LabelSweep(client, selection, augmented=True)
+    failed = sweep.run()
+    if failed:
+        print(f"skipped lanes     : {failed}")
+
+
 def rebuild(composer: V3Composition, before: dict[str, int]) -> None:
     stage(9, "REBUILD — fold the new labels into the pool and re-select "
              "(no spend). This recompute is authoritative; stage 6's credits "
@@ -344,6 +401,12 @@ def main() -> None:
                              "generation by design)")
     parser.add_argument("--skip-labelling", action="store_true",
                         help="skip stages 2c-2d (the labelling rung)")
+    parser.add_argument("--lane-cap", type=int, default=None,
+                        help="max lane-rung rows per lane this round "
+                             "(default: the lane order's own quotas; "
+                             "pilot with e.g. 30)")
+    parser.add_argument("--skip-lanes", action="store_true",
+                        help="skip stages 5c/7b (the lane rung)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -371,10 +434,14 @@ def main() -> None:
         parent_generation(campaign, budget)
     if not args.skip_synthetic:
         synthetic_rung(loop, plan, args.synthetic_cap, budget)
+    if not args.skip_lanes:
+        lane_rung(loop, composer, args.lane_cap, budget)
     if judge is not None:
         coherence(judge)
     admit(composer, judge)
     label_synthetic()
+    if not args.skip_lanes:
+        label_lane_minted(judge)
     catalog_refresh()
     rebuild(composer, before)
     print(f"\nDONE in {time.time() - _T0:,.0f}s")

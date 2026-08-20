@@ -415,6 +415,126 @@ class AugmentationLoop:
         print(f"  {spend.summary(len(minted))}")
         return produced
 
+    def synthesize_lane(
+        self,
+        lane: str,
+        n: int,
+        *,
+        source_dir: Path | None = None,
+        exemplar_count: int = 3,
+        max_consecutive_faults: int | None = FAULT_STREAK,
+    ) -> pd.DataFrame:
+        """Mint up to `n` doc-grounded queries INTO `lane` — the class-residual
+        carrier: each accepted query is keyed to the REAL corpus document it
+        was written from, at the lane's grade bar, and earns its route label
+        later by retrieval against the live collection.
+
+        Reruns never re-pay (banked ids advance the id space) and a grounding
+        document never grounds a second query (its minted key marks it spent).
+        Mega-corpora are skipped: the doc sample reads the doc_id column.
+        """
+        from augmentation.lane_synthetic import LaneSyntheticOperator, normalized
+        from augmentation.parents import _corpus_text
+        from augmentation.supply import lane_dirs
+        from hybrid_search_rrf_dataset.lanes import LANES
+        from pyarrow.parquet import ParquetFile
+
+        operator = LaneSyntheticOperator(self.config)
+        relevance = LANES[lane].min_relevance if lane in LANES else 1
+        source = source_dir if source_dir is not None else (
+            self.config.paths.data_dir / lane_dirs().get(lane, lane)
+        )
+        corpus_path = source / "corpus.parquet"
+        if not corpus_path.exists():
+            print(f"[{lane}] no corpus at {corpus_path} — skipped")
+            return pd.DataFrame()
+        total_docs = ParquetFile(corpus_path).metadata.num_rows
+        if total_docs > 1_000_000:
+            # ponytail: the sample below reads the whole doc_id column;
+            # row-group sampling if a mega-lane ever earns a quota
+            print(f"[{lane}] corpus has {total_docs:,} docs — skipped")
+            return pd.DataFrame()
+
+        prefix = f"lane-{lane}-"
+        keys = self.qrels.load()
+        mine = keys[keys["query_id"].astype(str).str.startswith(prefix)]
+        used_docs = set(mine["doc_id"].astype(str))
+        suffixes = [
+            q[len(prefix):] for q in mine["query_id"].astype(str).unique()
+        ]
+        index = max((int(s) for s in suffixes if s.isdigit()), default=-1) + 1
+
+        doc_ids = pd.read_parquet(corpus_path, columns=["doc_id"])[
+            "doc_id"
+        ].astype(str)
+        fresh_docs = doc_ids[~doc_ids.isin(used_docs)].sample(
+            frac=1.0, random_state=self.config.seed
+        )
+        lane_queries = self._lane_query_texts(source)
+        taken = {normalized(q) for q in lane_queries}
+        pool_rows = self.pool.load()
+        if not pool_rows.empty:
+            taken |= {normalized(q) for q in pool_rows["query"].astype(str)}
+        exemplars = tuple(
+            pd.Series(lane_queries).sample(
+                n=min(exemplar_count, len(lane_queries)),
+                random_state=self.config.seed,
+            )
+        ) if lane_queries else ()
+
+        spend = Spend()
+        faults = FaultStreak(max_consecutive_faults)
+        minted: list[AugmentedCandidate] = []
+        bar = tqdm(total=n, desc=f"lane:{lane}", unit="row")
+        for doc_id in fresh_docs:
+            if len(minted) >= n or faults.tripped():
+                break
+            doc_text = _corpus_text(corpus_path, str(doc_id))[:1200]
+            if not doc_text:
+                continue
+            query_id = f"{prefix}{index}"
+            index += 1
+            outcome = self.engine.run(
+                operator.instruction(lane, doc_text, exemplars), "", Targets()
+            )
+            spend.add(outcome)
+            reason = operator.rejects(
+                outcome.text or "", doc_text, taken
+            ) if outcome.accepted else (outcome.error or "not accepted")
+            faults.record(query_id, accepted=reason is None)
+            if reason is not None:
+                bar.write(f"- {query_id}: dropped — {reason}")
+                continue
+            taken.add(normalized(outcome.text))
+            parent = pd.Series({"query_id": query_id, "dataset": lane})
+            candidate = operator.candidate(
+                parent, f"lane:{lane}", outcome
+            ).model_copy(update={
+                "query_id": query_id,
+                "generated_from": "",
+                "grounding_doc_id": str(doc_id),
+            })
+            minted.append(candidate)
+            self.pool.append([candidate])
+            self.qrels.mint_constructed(query_id, [str(doc_id)], relevance)
+            bar.update(1)
+            bar.write(f"+ {query_id}: {outcome.text!r}")
+        bar.close()
+        produced = pd.DataFrame([c.model_dump() for c in minted])
+        print(f"  {spend.summary(len(minted))}")
+        return produced
+
+    @staticmethod
+    def _lane_query_texts(source: Path) -> list[str]:
+        """The lane's real query texts — dup-guard keys and style exemplars."""
+        qpath = source / "queries.parquet"
+        if not qpath.exists():
+            return []
+        queries = pd.read_parquet(qpath)
+        if "query" not in queries.columns:
+            queries = queries.rename(columns={"text": "query"})
+        return queries["query"].astype(str).tolist()
+
     def hungry(self) -> pd.DataFrame:
         """The readout: every hungry floor, who serves it, and whether its
         credit gate is open — the loop's own coverage table."""

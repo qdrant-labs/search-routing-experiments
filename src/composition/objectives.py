@@ -323,6 +323,86 @@ class SelectionOrder:
         return order, summary
 
 
+class LaneOrder:
+    """The class-residual carrier: rows to MINT into each lane, sized by its
+    measured class yield under the remaining lane-share cap and its unspent
+    grounding documents — recomputed every build and never credited, because
+    labelled minted rows re-net the residual through the pool."""
+
+    FOOTER = "(reachable ceiling)"
+
+    def __init__(self, recipe: Recipe) -> None:
+        self._recipe = recipe
+
+    def build(
+        self,
+        residual: dict[str, float],
+        yields: pd.DataFrame,
+        pool: pd.DataFrame,
+        capacity: dict[str, int],
+    ) -> pd.DataFrame:
+        """Greedy on the biggest residual class, lanes ranked by that class's
+        yield, each take bounded by grounding capacity and the lane's
+        remaining class share; incidental buys credited under the same caps."""
+        remaining = {name: float(residual.get(name, 0)) for name in CLASSES}
+        targets = {
+            name: self._recipe.target_total * share
+            for name, share in zip(CLASSES, self._recipe.target_split)
+        }
+        live = pool[~pool["is_waste"] & native_mask(pool)]
+        supplied = {
+            name: live[live["route_class_any"] == name].groupby("dataset").size()
+            for name in CLASSES
+        }
+        lanes = yields[yields.index.isin(capacity)]
+        cap = {
+            (lane, name): max(
+                0.0,
+                self._recipe.target_lane_share * targets[name]
+                - float(supplied[name].get(lane, 0)),
+            )
+            for lane in lanes.index for name in CLASSES
+        }
+        room = {lane: float(capacity.get(lane, 0)) for lane in lanes.index}
+        ordered: dict[str, float] = {}
+        for name in sorted(CLASSES, key=lambda k: -remaining[k]):
+            ranked = lanes[lanes[f"yield_{name}"] > 0].sort_values(
+                f"yield_{name}", ascending=False
+            )
+            for lane in ranked.index:
+                if remaining[name] < 1.0:
+                    break
+                rate = float(ranked.at[lane, f"yield_{name}"])
+                open_room = room[lane] - ordered.get(lane, 0.0)
+                take = min(
+                    open_room, cap[(lane, name)] / rate, remaining[name] / rate
+                )
+                if take < 1.0:
+                    continue
+                ordered[lane] = ordered.get(lane, 0.0) + take
+                for k in CLASSES:
+                    buy = min(
+                        take * float(lanes.at[lane, f"yield_{k}"]),
+                        cap[(lane, k)],
+                    )
+                    remaining[k] -= buy
+                    cap[(lane, k)] -= buy
+        out = lanes.loc[sorted(ordered, key=lambda k: -ordered[k])].copy()
+        out["rows_to_mint"] = [round(ordered[lane]) for lane in out.index]
+        for name in CLASSES:
+            out[f"expected_{name}"] = (
+                out["rows_to_mint"] * out[f"yield_{name}"]
+            ).round().astype(int)
+        out["grounding_docs"] = [
+            int(capacity.get(lane, 0)) for lane in out.index
+        ]
+        out.loc[self.FOOTER] = {
+            f"expected_{name}": int(out[f"expected_{name}"].sum())
+            for name in CLASSES
+        }
+        return out
+
+
 class UtilityObjective:
     """Layer 2, the sole scalar: lane x route coverage with qrels-depth-vetted
     classes; cells and the other diversity strata only break ties. leg-1
