@@ -11,12 +11,14 @@ import numpy as np
 import pandas as pd
 
 from augmentation.config import AugmentationConfig
-from composition.cellfill import CELL_SLICE, EXHAUSTED, MassCap
+from composition.cellfill import CELL_SLICE, EXHAUSTED
 from composition.pool_v3 import CLASSES, CORPUS_AXES
 from composition.recipe import Recipe
 
 GENERATION_ONLY = "generation_only"
 CORRUPTION_SLICE = "corruption"
+UNCOVERED_SLICE = "uncovered"
+NO_CELL_HOSTS = "no_cell_hosts"
 SHEET_COLUMNS = ["slice", "floor", "amount", "credit", "missing", "reason"]
 
 
@@ -44,49 +46,107 @@ class DiversityFloors:
         out["met"] = out["rows"] >= self._recipe.stratum_floor
         return out
 
+    def class_debt(self, pool: pd.DataFrame) -> pd.DataFrame:
+        """Each class's share of target_total minus the pool's own tier-0
+        supply — the rows only generation can add."""
+        live = pool[~pool["is_waste"]]
+        rows = []
+        for name, share in zip(CLASSES, self._recipe.target_split):
+            target = round(self._recipe.target_total * share)
+            supply = int((live["route_class_any"] == name).sum())
+            rows.append({
+                "route_class": name, "target": target, "supply": supply,
+                "debt": max(0, target - supply),
+                "x_under": round(target / supply, 1) if supply else float("inf"),
+            })
+        return pd.DataFrame(rows)
+
     def order_sheet(
-        self, selected: pd.DataFrame, pool: pd.DataFrame, certified_total: int
+        self, selected: pd.DataFrame, pool: pd.DataFrame
     ) -> pd.DataFrame:
-        """The generation demands, in CellFill's exact sheet schema so the
-        augmentation loop runs unchanged: per-cell floors clamped by the
-        K_cap allocation (a breached cap means generation-only — declared,
-        never silently over-drawn), plus the census-rate corruption line."""
-        recipe = self._recipe.model_copy(
-            update={"certified_total": certified_total}
-        )
-        lines = []
+        """The generation debt ledger in CellFill's exact sheet schema: each
+        class debt waterfilled equally over the cells predicting it (a-priori
+        targets, never weighted by supply), clamped at k_cap x natural share
+        x target_total, floors as minimums, debt no cell can host as an
+        explicit uncovered line; credit starts at 0 (admit() fills it, and a
+        rebuild re-nets supply because labelled generated rows join the pool)."""
+        recipe = self._recipe
+        caps, alloc = {}, {}
         for cell in self._cells:
             natural = int(pool["cells"].map(lambda s, n=cell.name: n in s).sum())
-            mass = MassCap(natural, len(pool), recipe)
-            credit = int(
+            p_natural = natural / len(pool) if len(pool) else 0.0
+            caps[cell.name] = (
+                recipe.k_cap * p_natural * recipe.target_total
+                if recipe.k_cap is not None else float("inf")
+            )
+            alloc[cell.name] = 0.0
+        uncovered = []
+        for row in self.class_debt(pool).itertuples(index=False):
+            hosts = [
+                c.name for c in self._cells if row.route_class in c.predicts_class
+            ]
+            placed = self._waterfill(
+                float(row.debt), {n: caps[n] - alloc[n] for n in hosts}
+            )
+            for name, extra in placed.items():
+                alloc[name] += extra
+            left = row.debt - sum(placed.values())
+            if left >= 1.0:
+                uncovered.append({
+                    "slice": UNCOVERED_SLICE,
+                    "floor": f"uncovered:{row.route_class}",
+                    "amount": float(round(left)), "credit": 0.0,
+                    "missing": float(round(left)), "reason": NO_CELL_HOSTS,
+                })
+        lines = []
+        for cell in self._cells:
+            in_selection = int(
                 selected["cells"].map(lambda s, n=cell.name: n in s).sum()
             )
-            target = self._recipe.stratum_floor
+            owed = max(round(alloc[cell.name]), recipe.stratum_floor - in_selection)
+            if owed <= 0:
+                continue
             lines.append({
                 "slice": CELL_SLICE, "floor": cell.name,
-                "amount": float(target), "credit": float(credit),
-                "missing": float(max(0, target - credit)),
-                "reason": GENERATION_ONLY if mass.generation_only else EXHAUSTED,
+                "amount": float(owed), "credit": 0.0, "missing": float(owed),
+                "reason": GENERATION_ONLY if caps[cell.name] < recipe.stratum_floor
+                else EXHAUSTED,
             })
-        lines.append(self._corruption_line(selected))
+        lines.extend(uncovered)
+        lines.append(self._corruption_line(pool))
         sheet = pd.DataFrame(lines, columns=SHEET_COLUMNS)
         return sheet[sheet["missing"] > 0].reset_index(drop=True)
 
-    def _corruption_line(self, selected: pd.DataFrame) -> dict:
-        """Damaged-query demand at the census's own pooled any-span rate —
-        the deficit ships as the LIGHT degree, the minimal damage that
-        reaches 'damaged' status; no hand light/heavy split is invented."""
+    @staticmethod
+    def _waterfill(debt: float, room: dict[str, float]) -> dict[str, float]:
+        """Equal shares with spill: every open host gets the same cut until
+        its room runs out, so thin cells stay full generation targets."""
+        placed = dict.fromkeys(room, 0.0)
+        while debt >= 1.0:
+            open_ = [n for n, r in room.items() if r - placed[n] >= 1.0]
+            if not open_:
+                break
+            share = debt / len(open_)
+            for name in open_:
+                take = min(share, room[name] - placed[name])
+                placed[name] += take
+                debt -= take
+        return placed
+
+    def _corruption_line(self, pool: pd.DataFrame) -> dict:
+        """Damaged-query debt at the census's own pooled any-span rate of the
+        full target_total, shipped as LIGHT — the minimal damage that counts."""
         census = pd.read_parquet(AugmentationConfig().paths.corruption_census)
         rate = float(
             (census["n_sampled"] * census["any_span"]).sum()
             / census["n_sampled"].sum()
         )
-        target = round(rate * len(selected))
-        damaged = int(selected["corruption_degree"].isin(["light", "heavy"]).sum())
+        target = round(rate * self._recipe.target_total)
+        damaged = int(pool["corruption_degree"].isin(["light", "heavy"]).sum())
+        owed = float(max(0, target - damaged))
         return {
             "slice": CORRUPTION_SLICE, "floor": "corruption:light",
-            "amount": float(target), "credit": float(damaged),
-            "missing": float(max(0, target - damaged)), "reason": EXHAUSTED,
+            "amount": owed, "credit": 0.0, "missing": owed, "reason": EXHAUSTED,
         }
 
 

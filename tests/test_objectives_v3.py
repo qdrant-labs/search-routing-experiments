@@ -1,5 +1,6 @@
-"""The diversity-floor order sheet, the inversion bound's arithmetic, and the
-sheet's round-trip through the augmentation loop's own readers."""
+"""The diversity-floor order sheet at target_total scale, the inversion
+bound's arithmetic, and the sheet's round-trip through the augmentation
+loop's own readers."""
 
 from types import SimpleNamespace
 
@@ -12,8 +13,10 @@ from composition.objectives import DiversityFloors, InversionBound
 from composition.recipe import Recipe
 
 
-def _cell(name):
-    return SimpleNamespace(name=name, bands=())
+def _cell(name, predicts=()):
+    return SimpleNamespace(
+        name=name, bands=(), predicts_class=frozenset(predicts)
+    )
 
 
 def _frame(rows):
@@ -24,26 +27,66 @@ def _frame(rows):
 
 POOL = _frame(
     [{"dataset": "a", "query_id": str(i), "cells": {"X"},
-      "corruption_degree": "clean"} for i in range(80)]
+      "corruption_degree": "clean", "route_class_any": "dense",
+      "is_waste": False} for i in range(80)]
     + [{"dataset": "b", "query_id": f"b{i}", "cells": set(),
-        "corruption_degree": "clean"} for i in range(20)]
+        "corruption_degree": "clean", "route_class_any": "sparse",
+        "is_waste": False} for i in range(20)]
 )
 
+RECIPE = Recipe.v3(stratum_floor=25, target_total=1_000)
 
-def test_order_sheet_carries_cell_and_corruption_lines():
-    selected = POOL.head(40)
-    floors = DiversityFloors(Recipe.v3(stratum_floor=25), (_cell("X"), _cell("Y")))
-    sheet = floors.order_sheet(selected, POOL, certified_total=100)
+
+def test_class_debt_nets_the_pools_own_tier0_supply():
+    floors = DiversityFloors(RECIPE, ())
+    debt = floors.class_debt(
+        pd.concat([POOL, POOL.head(5).assign(is_waste=True)])
+    ).set_index("route_class")
+    # targets 450/450/100; waste rows never count as supply
+    assert debt.at["dense", "debt"] == 450 - 80
+    assert debt.at["sparse", "debt"] == 450 - 20
+    assert debt.at["hybrid", "debt"] == 100
+    assert debt.at["hybrid", "x_under"] == float("inf")
+
+
+def test_order_sheet_carries_the_class_debt_not_the_floor():
+    cells = (_cell("X", predicts=("dense",)), _cell("Y", predicts=("sparse",)))
+    floors = DiversityFloors(RECIPE, cells)
+    sheet = floors.order_sheet(POOL.head(40), POOL)
     lines = sheet.set_index("floor")
-    # Y has zero natural supply -> K_cap admits 0 -> declared generation_only
-    assert lines.at["Y", "reason"] == "generation_only"
+    # X hosts all of dense's debt (cap 5 * 0.8 * 1000 = 4000 doesn't bind);
+    # the sheet is a debt ledger: credit 0 at build, missing == amount
+    assert lines.at["X", "amount"] == 450 - 80
+    assert lines.at["X", "credit"] == 0.0
+    assert lines.at["X", "missing"] == 450 - 80
+    # Y has zero natural supply -> zero K_cap capacity -> the floor is its
+    # minimum and the line is declared generation_only
     assert lines.at["Y", "missing"] == 25.0
-    # X is fully covered by the selected slice (40 rows hold it) -> no line
-    assert "X" not in lines.index
-    # the corruption target is the census's own pooled rate, never a hand rate
+    assert lines.at["Y", "reason"] == "generation_only"
+    # sparse's debt (430) fits no host; hybrid (100) has no host cell at all
+    assert lines.at["uncovered:sparse", "missing"] == 430.0
+    assert lines.at["uncovered:hybrid", "missing"] == 100.0
+    assert lines.at["uncovered:hybrid", "reason"] == "no_cell_hosts"
+
+
+def test_corruption_line_scales_to_target_total():
+    floors = DiversityFloors(RECIPE, ())
+    sheet = floors.order_sheet(POOL.head(40), POOL).set_index("floor")
     census = pd.read_parquet(AugmentationConfig().paths.corruption_census)
     rate = (census["n_sampled"] * census["any_span"]).sum() / census["n_sampled"].sum()
-    assert lines.at["corruption:light", "amount"] == round(rate * len(selected))
+    # the target is rate x target_total net of the pool's damaged rows (0),
+    # never rate x the selection
+    assert sheet.at["corruption:light", "missing"] == round(rate * 1_000)
+
+
+def test_waterfill_splits_equally_and_spills_from_full_hosts():
+    fill = DiversityFloors._waterfill
+    even = fill(430.0, {"s1": 500.0, "s2": 2000.0})
+    assert even["s1"] == pytest.approx(215.0)
+    assert even["s2"] == pytest.approx(215.0)
+    clamped = fill(430.0, {"s1": 50.0, "s2": 200.0})
+    assert clamped["s1"] == pytest.approx(50.0)
+    assert clamped["s2"] == pytest.approx(200.0)  # leftover 180 stays unplaced
 
 
 def test_inversion_bound_ratio_and_floor_forced_arithmetic():
@@ -61,13 +104,16 @@ def test_inversion_bound_ratio_and_floor_forced_arithmetic():
 
 
 def test_sheet_roundtrips_through_the_loop(tmp_path):
-    floors = DiversityFloors(Recipe.v3(stratum_floor=25), (_cell("Y"),))
-    sheet = floors.order_sheet(POOL.head(40), POOL, certified_total=100)
+    floors = DiversityFloors(RECIPE, (_cell("Y", predicts=("sparse",)),))
+    sheet = floors.order_sheet(POOL.head(40), POOL)
     path = tmp_path / "order_sheet.parquet"
     sheet.to_parquet(path, index=False)
     loop = AugmentationLoop(POOL.head(3), sheet_path=path)
     hungry = loop.order_sheet()
-    assert set(hungry["floor"]) == {"Y", "corruption:light"}
+    assert set(hungry["floor"]) == {
+        "Y", "corruption:light", "uncovered:dense", "uncovered:sparse",
+        "uncovered:hybrid",
+    }
     readout = loop.hungry()
     # corruption:light must be SERVABLE by a registered operator today — the
     # "no writer emits corruption floors" gap closing — while staying behind
@@ -75,3 +121,6 @@ def test_sheet_roundtrips_through_the_loop(tmp_path):
     corr = readout[readout["floor"] == "corruption:light"].iloc[0]
     assert corr["operator"] == "corrupt"
     assert corr["gate"] == "declaration_audit" and not corr["runnable"]
+    # an uncovered accounting line is visible but nothing serves it
+    unc = readout[readout["floor"] == "uncovered:dense"].iloc[0]
+    assert pd.isna(unc["operator"]) and not unc["runnable"]

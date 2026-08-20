@@ -14,6 +14,7 @@ import pandas as pd
 from composition.mini_catalog import mini_catalog
 from composition.objectives import (
     CORRUPTION_SLICE,
+    UNCOVERED_SLICE,
     DiversityFloors,
     InversionBound,
     UtilityObjective,
@@ -83,9 +84,7 @@ class V3Composition:
         selected = self._utility.select(self._pool.selectable())
 
         marginals = self._floors.marginals(selected)
-        sheet = self._floors.order_sheet(
-            selected, pool, selected.attrs["total_certified"]
-        )
+        sheet = self._floors.order_sheet(selected, pool)
         per_ds = self._per_dataset(pool)
         inversion = self._bound.report(selected, pool)
         realism = self._bound.realism(selected)
@@ -300,6 +299,7 @@ class V3Composition:
     def _report(self, pool, selected, reserve, marginals, sheet, per_ds,
                 inversion, realism) -> str:
         recipe = self._recipe
+        debt = self._floors.class_debt(pool)
         unmet_m = marginals[~marginals["met"]]
         unmet_l = per_ds[~per_ds["floor_met"]]
         breach = inversion[~inversion["floor_forced"]]
@@ -308,8 +308,18 @@ class V3Composition:
             "# v3 composition",
             "",
             f"Pool: {len(pool):,} labelled rows, {pool['dataset'].nunique()} lanes. "
-            f"Split {recipe.target_split}, stratum floor {recipe.stratum_floor}, "
+            f"Target {recipe.target_total:,} rows at split {recipe.target_split}, "
+            f"stratum floor {recipe.stratum_floor}, "
             f"class_margin {recipe.class_margin}, k_cap {recipe.k_cap}.",
+            "",
+            f"## Generation debt to {recipe.target_total:,}",
+            debt.to_markdown(index=False),
+            "",
+            f"The order sheet owes **{int(sheet['missing'].sum()):,}** generated "
+            f"rows across {len(sheet)} lines "
+            f"({int((sheet['slice'] == 'cell').sum())} cell, "
+            f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption, "
+            f"{int((sheet['slice'] == UNCOVERED_SLICE).sum())} uncovered).",
             "",
             "## Layers",
             f"- Utility: certified tier {selected.attrs['total_certified']:,} "
@@ -318,10 +328,7 @@ class V3Composition:
             f"{selected.attrs['waste_budget']} dictated. Selected {len(selected):,} rows; "
             f"reserve {len(reserve):,} frozen before selection.",
             f"- Diversity: {int((~marginals['met']).sum())}/{len(marginals)} marginal "
-            f"strata under the floor of {recipe.stratum_floor}; the order sheet "
-            f"carries {len(sheet)} deficit lines "
-            f"({int((sheet['slice'] == 'cell').sum())} cell, "
-            f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption). "
+            f"strata under the floor of {recipe.stratum_floor}. "
             f"Lane gaps: {len(unmet_l)}/{len(per_ds)} lanes under floor "
             f"(labelling demand, per_dataset.parquet).",
             f"- Representation: max non-floor-forced inversion ratio "
