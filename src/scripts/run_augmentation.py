@@ -21,18 +21,23 @@ from augmentation.config import AugmentationPaths
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
 from composition.cellfill import CellFill
+from composition.composer import V3Composition
 from dataset_registry import DATASETS
 
 
-def _loop() -> AugmentationLoop:
-    fill = CellFill()
+def _loop(v3: bool) -> AugmentationLoop:
     paths = AugmentationPaths()
     catalog = pd.read_parquet(paths.catalog).astype({"query_id": str})
-    selection = pd.read_parquet(fill.selection_path).astype({"query_id": str})
+    if v3:
+        composer = V3Composition()
+        selection = pd.read_parquet(composer.dataset_path).astype({"query_id": str})
+        sheet_path = composer.order_sheet_path
+    else:
+        fill = CellFill()
+        selection = pd.read_parquet(fill.selection_path).astype({"query_id": str})
+        sheet_path = fill.order_sheet_path
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
-    return AugmentationLoop(
-        selection, sheet_path=fill.order_sheet_path, parents=parents
-    )
+    return AugmentationLoop(selection, sheet_path=sheet_path, parents=parents)
 
 
 def main() -> None:
@@ -55,6 +60,10 @@ def main() -> None:
         "--pilot-n", type=int, default=None,
         help="override the audit-sample size for gated floors (default: config.pilot_n)",
     )
+    parser.add_argument(
+        "--v3", action="store_true",
+        help="run against V3Composition's selection + order sheet instead of CellFill's",
+    )
     args = parser.parse_args()
 
     if args.n is not None and not args.floor:
@@ -62,7 +71,7 @@ def main() -> None:
     if args.plan and args.floor:
         parser.error("--plan and --floor are mutually exclusive")
 
-    loop = _loop()
+    loop = _loop(args.v3)
 
     if args.floor:
         produced = loop.run(args.floor, n=args.n)

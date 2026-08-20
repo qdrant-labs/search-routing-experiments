@@ -104,7 +104,22 @@ class LabelledPool:
                 extra["scored_against"] = scored_against
             frames.append(extra.reindex(columns=base.columns))
         combined = pd.concat(frames, ignore_index=True)
-        return combined.drop_duplicates(["dataset", "query_id"], keep="first")
+        combined = combined.drop_duplicates(["dataset", "query_id"], keep="first")
+        # checkable is a per-LANE registry fact; additive label frames arrive
+        # without it, so backfill from lane siblings that know — a lane no row
+        # can vouch for stays False, never assumed labelable
+        known = (
+            combined.dropna(subset=["checkable"])
+            .drop_duplicates("dataset")
+            .set_index("dataset")["checkable"]
+        )
+        combined["checkable"] = (
+            combined["checkable"]
+            .fillna(combined["dataset"].map(known))
+            .fillna(False)
+            .astype(bool)
+        )
+        return combined
 
     def _qrels_depth(self, labels: pd.DataFrame) -> np.ndarray:
         """Judged-relevant doc count per row at its own min_relevance — the
