@@ -95,7 +95,7 @@ class MassCap:
     def __init__(self, natural: int, pool: int, recipe: Recipe) -> None:
         self.p_natural = natural / pool if pool else 0.0
         self.flat = recipe.n_per_route
-        self.floor = recipe.cell_floor
+        self.floor = recipe.stratum_floor
         self.cap = round(
             recipe.k_cap * self.p_natural * recipe.certified_total
         ) if recipe.k_cap is not None else self.flat
@@ -613,10 +613,10 @@ class CellFill:
             "so the cap is applied to a partition missing that much mass\n",
             (
                 f"generation-only {len(breached)} cells — capped below the "
-                f"floor {recipe.cell_floor}, so no organic supply: "
+                f"floor {recipe.stratum_floor}, so no organic supply: "
                 f"{', '.join(breached)}\n"
                 if breached else
-                f"every cell's allocation reaches the floor {recipe.cell_floor}\n"
+                f"every cell's allocation reaches the floor {recipe.stratum_floor}\n"
             ),
             "## Per-cell readout\n",
             _block(report),

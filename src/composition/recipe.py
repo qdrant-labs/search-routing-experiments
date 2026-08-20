@@ -22,7 +22,9 @@ class FloorRules(BaseModel):
 
 
 class Recipe(BaseModel):
-    """d48/d49 cell-fill values — one field per SPEC decision."""
+    """d48/d49 cell-fill values plus the v3 composition dials — one field per
+    decision. Bare `Recipe()` keeps every v2 default; `Recipe.v3()` is the v3
+    build's configuration."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -32,11 +34,9 @@ class Recipe(BaseModel):
     n_per_route: int = Field(
         default=200,
         description=(
-            "Rows the cell fill quotas per route in EVERY cell, dense and "
-            "sparse alike — never narrowed by what current labels happen to "
-            "show. A cell's draw size is twice this. THE dial between "
-            "labelling budget and dataset size: 32 cells x n x 2 routes is the "
-            "decisive-row target, and the draw scales with it."
+            "v2 CellFill only — the flat per-route quota every cell drew "
+            "before K_cap; v3 targets are per-axis marginals, never this. "
+            "A cell's draw size is twice this."
         ),
     )
     k_cap: float | None = Field(
@@ -51,27 +51,65 @@ class Recipe(BaseModel):
     certified_total: int = Field(
         default=4_247,
         description=(
-            "The total the cap is a share of: the certified-tier feasible total "
-            "the v3 selector reports at its target split (v3_feasibility/"
-            "report.md, binding class sparse). Measured, not chosen."
+            "The total the cap is a share of. Frozen v2-era constant only: a "
+            "v3 build computes its own feasible total live and reports it; "
+            "this default exists so MassCap stays usable standalone."
         ),
     )
-    cell_floor: int = Field(
+    stratum_floor: int = Field(
         default=25,
         description=(
-            "Rows below which a cell is no longer a usable stratum (the "
-            "selector's per-dataset floor). A cell whose capped allocation "
-            "cannot reach it has no organic path and is reported "
-            "generation-only."
+            "Rows below which ANY diversity stratum (cell, lane, corruption "
+            "degree) is no longer usable — one floor for every marginal axis. "
+            "A cell whose capped allocation cannot reach it has no organic "
+            "path and is reported generation-only."
         ),
     )
     target_lane_share: float = Field(
         default=0.2,
         description=(
-            "The row share of a cell a single lane should stay under. Not the "
-            "enforced cap: that is computed per cell from its own lane counts, "
-            "and this is only what the computed cap is measured against."
+            "The row share a single lane should stay under. Two enforcement "
+            "modes, one dial: v2's per-cell LaneCap relaxes it to the tightest "
+            "achievable share; v3's feasible_total shrinks the class total "
+            "until the cap holds strictly."
         ),
+    )
+    target_split: tuple[float, float, float] = Field(
+        default=(0.45, 0.45, 0.10),
+        description="dense/sparse/hybrid class shares of the selected tiers.",
+    )
+    waste_cap: float = Field(
+        default=0.05,
+        description=(
+            "Dictated waste (fake_tie + all_zero) share of the tier-0 total — "
+            "a policy spend, decided 2026-08-20, never inferred."
+        ),
+    )
+    eval_reserve_frac: float = Field(
+        default=0.2,
+        description=(
+            "Certified rows frozen for ablation BEFORE any selection, "
+            "stratified (lane x route class); excluded with their near-dup "
+            "cluster-mates."
+        ),
+    )
+    genuine_tie_depth: int = Field(
+        default=2,
+        description=(
+            "Judged-doc count below which an all-tied row is a fake tie (a "
+            "qrels artifact), not genuine hybrid supply."
+        ),
+    )
+    class_margin: float = Field(
+        default=0.4,
+        description=(
+            "oracle - runner_up at or above this certifies a decisive route "
+            "class; margin 0 is the tier-0 (routes_differ) bar."
+        ),
+    )
+    target_total: int = Field(
+        default=200_000,
+        description="The extrapolation target the generation debt is sized against.",
     )
     control_share: float = Field(
         default=0.2,
@@ -89,3 +127,9 @@ class Recipe(BaseModel):
             "ceiling — natural_rows*(1-m)/m augmented rows at most."
         ),
     )
+
+    @classmethod
+    def v3(cls, **overrides) -> Recipe:
+        """The v3 composition configuration: K_cap allocation ON; everything
+        else is already the shared default."""
+        return cls(**{"k_cap": 5.0, **overrides})

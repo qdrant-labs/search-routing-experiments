@@ -54,6 +54,13 @@ def test_without_a_cap_every_cell_keeps_the_flat_quota():
     assert not mass.generation_only
 
 
+def test_v3_recipe_turns_on_the_cap_and_nothing_else():
+    v2, v3 = Recipe(), Recipe.v3()
+    assert v2.k_cap is None and v3.k_cap == 5.0
+    assert v3.model_dump(exclude={"k_cap"}) == v2.model_dump(exclude={"k_cap"})
+    assert Recipe.v3(seed=7).seed == 7
+
+
 def test_a_fat_cell_is_still_bounded_by_the_flat_quota():
     mass = MassCap(5_000, 10_000, Recipe(k_cap=5.0, certified_total=4_000))
     assert mass.cap == 10_000
