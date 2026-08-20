@@ -8,6 +8,7 @@ from hybrid_search_rrf_dataset.labels import (
     route_label,
 )
 from hybrid_search_rrf_dataset.fusion import StrategyName
+from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
 from hybrid_search_rrf_dataset.objective import NDCGObjective, RouterObjective
 from hybrid_search_rrf_dataset.retrieval import QuerySupplement
 
@@ -342,3 +343,123 @@ def test_label_with_force_rescores_everything(tmp_path):
     seen.clear()
     labels.label(source, *strategies(), dataset="nfcorpus", force=True)
     assert seen == ["alpha", "alpha", "alpha"]
+
+
+class _BoomStrategy(_StubStrategy):
+    """A route that dies on one query — the network blip 90% into a lane."""
+
+    def __init__(
+        self, name: StrategyName, rankings: dict, seen: list, boom: str
+    ) -> None:
+        super().__init__(name, rankings, seen)
+        self._boom = boom
+
+    def rank(self, query: str) -> dict:
+        if query == self._boom:
+            raise RuntimeError(f"qdrant timed out on {query!r}")
+        return super().rank(query)
+
+
+def _lane(tmp_path, count: int = 6, judged: tuple[str, ...] | None = None):
+    """A stub lane of `count` queries (`judged` narrows which have qrels) plus
+    its call log and a strategy factory whose `boom` makes one query raise."""
+    from augmentation.config import AugmentationPaths
+
+    ids = [f"q{i}" for i in range(1, count + 1)]
+    texts = [f"t{i}" for i in range(1, count + 1)]
+    docs = [f"D{i}" for i in range(1, count + 1)]
+    seen: list[str] = []
+    rankings = {text: {doc: 1.0} for text, doc in zip(texts, docs)}
+    kept = [i for i in range(count) if judged is None or ids[i] in judged]
+    source = _StubSource(
+        queries=pd.DataFrame({"query_id": ids, "text": texts}),
+        qrels=pd.DataFrame({
+            "query_id": [ids[i] for i in kept],
+            "doc_id": [docs[i] for i in kept],
+            "relevance": [1] * len(kept),
+        }),
+    )
+    labels = RouteLabels(
+        pd.DataFrame({"dataset": ["nfcorpus"] * count, "query_id": ids}),
+        out_dir=tmp_path,
+        augmentation_paths=AugmentationPaths(data_dir=tmp_path),
+    )
+
+    def strategies(boom: str | None = None):
+        names = (
+            StrategyName.DENSE_ONLY,
+            StrategyName.PURE_RRF,
+            StrategyName.SPARSE_ONLY,
+        )
+        if boom is None:
+            return tuple(_StubStrategy(n, rankings, seen) for n in names)
+        return tuple(_BoomStrategy(n, rankings, seen, boom) for n in names)
+
+    return labels, source, seen, strategies
+
+
+def test_label_keeps_the_chunks_that_finished_before_a_crash(tmp_path):
+    """The property chunking buys: a crash costs one chunk, not the lane.
+    Six queries, chunks of two, the fifth kills retrieval -> the two finished
+    chunks are on disk, the third is not."""
+    labels, source, _, strategies = _lane(tmp_path)
+
+    with pytest.raises(RuntimeError):
+        labels.label(
+            source, *strategies(boom="t5"), dataset="nfcorpus", chunk_size=2
+        )
+
+    on_disk = labels.load()
+    assert sorted(on_disk["query_id"]) == ["q1", "q2", "q3", "q4"]
+    assert set(on_disk["dataset"]) == {"nfcorpus"}
+    assert on_disk["shape"].notna().all()
+
+
+def test_label_resumes_from_the_chunks_a_crash_left_behind(tmp_path):
+    """Re-running after a partial failure re-ranks only the missing tail —
+    the checkpoint is worth nothing if the retry pays for it again."""
+    labels, source, seen, strategies = _lane(tmp_path)
+    with pytest.raises(RuntimeError):
+        labels.label(
+            source, *strategies(boom="t5"), dataset="nfcorpus", chunk_size=2
+        )
+
+    seen.clear()
+    out = labels.label(source, *strategies(), dataset="nfcorpus", chunk_size=2)
+
+    assert sorted(set(seen)) == ["t5", "t6"], "a finished chunk was re-ranked"
+    assert sorted(out["query_id"]) == ["q5", "q6"]
+    assert sorted(labels.load()["query_id"]) == [f"q{i}" for i in range(1, 7)]
+
+
+def test_label_below_one_chunk_makes_a_single_build_call(tmp_path, monkeypatch):
+    """A small labelling call must not pay for chunking at all."""
+    sizes: list[int] = []
+    build = GoldenRoutingBuilder.build
+
+    def counted(self, dataset, *args, **kwargs):
+        sizes.append(len(dataset.queries()))
+        return build(self, dataset, *args, **kwargs)
+
+    monkeypatch.setattr(GoldenRoutingBuilder, "build", counted)
+    labels, source, _, strategies = _lane(tmp_path, count=3)
+
+    labels.label(source, *strategies(), dataset="nfcorpus")  # default 500
+    assert sizes == [3]
+
+    sizes.clear()
+    labels.label(
+        source, *strategies(), dataset="nfcorpus", force=True, chunk_size=2
+    )
+    assert sizes == [2, 1]
+
+
+def test_label_tolerates_a_chunk_the_qrels_cover_none_of(tmp_path):
+    """Only a call that labels nothing at all is the ValueError callers skip a
+    lane on — an unjudged chunk in the middle of a good run is not."""
+    labels, source, _, strategies = _lane(tmp_path, count=4, judged=("q1", "q4"))
+
+    out = labels.label(source, *strategies(), dataset="nfcorpus", chunk_size=1)
+
+    assert sorted(out["query_id"]) == ["q1", "q4"]
+    assert sorted(labels.load()["query_id"]) == ["q1", "q4"]

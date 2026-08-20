@@ -24,7 +24,10 @@ from hybrid_search_rrf_dataset.fusion import (
     StrategyName,
     derive_route,
 )
-from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
+from hybrid_search_rrf_dataset.golden import (
+    GoldenRoutingBuilder,
+    GoldenRoutingDataset,
+)
 from hybrid_search_rrf_dataset.lanes import LANES
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
@@ -105,6 +108,14 @@ def _augmented_rows(
     return rows[rows["query_id"].astype(str).isin(admitted)]
 
 
+class _Chunk(QuerySubset):
+    """One batch of a labelling run's queries. Overrides `provenance` because
+    `QuerySubset` drops it, which would restamp every augmented row natural."""
+
+    def provenance(self) -> pd.DataFrame:
+        return self._source.provenance()
+
+
 class RouteLabels:
     """Builds and owns `data/route_labels/labels.parquet`."""
 
@@ -156,6 +167,7 @@ class RouteLabels:
         force: bool = False,
         generation: Generation = "cell_based",
         include_gated: bool = False,
+        chunk_size: int = 500,
     ) -> pd.DataFrame:
         """Label this dataset's query_ids not already in the artifact, and
         append. Already-labelled query_ids (natural or augmented) are never
@@ -214,16 +226,61 @@ class RouteLabels:
                 QrelStore(matched.assign(dataset=key)[QrelStore.COLUMNS]),
             ])
 
-        missing = set(eval_dataset.queries()["query_id"].astype(str)) - already
-        if not missing:
+        queued = [
+            query_id
+            for query_id in eval_dataset.queries()["query_id"].astype(str)
+            if query_id not in already
+        ]
+        if not queued:
             return existing.iloc[:0]
-        if already:
-            eval_dataset = QuerySubset(eval_dataset, missing)
 
-        rows = GoldenRoutingBuilder(
+        # one label per (dataset, query_id): a query in several cells appears
+        # once in wanted per cell, so dedup before the merge or it fans out.
+        # Per-cell readouts join labels back to the selection on query_id.
+        carry = (
+            wanted[["query_id", *self.carried]]
+            .astype({"query_id": str})
+            .drop_duplicates("query_id")
+        )
+        builder = GoldenRoutingBuilder(
             dense, hybrid, sparse, objective=self.objective, excluded=exclusions
-        ).build(eval_dataset, qrels=eval_qrels)
+        )
 
+        merged, written = existing, []
+        # the artifact is rewritten per chunk, not per call: retrieval is the
+        # expensive, crash-prone part, so a lane that dies at query 90,000
+        # loses one chunk of work instead of all of it.
+        for start in range(0, len(queued), chunk_size):
+            batch = queued[start : start + chunk_size]
+            labelled = self._labelled(
+                builder.build(_Chunk(eval_dataset, batch), qrels=eval_qrels),
+                key,
+                carry,
+            )
+            if labelled.empty:  # a chunk the qrels cover none of
+                continue
+            # keep every row this call didn't touch — force only replaces the
+            # query_ids it actually rescored, never the rest of the dataset
+            stale = (merged.get("dataset") == key) & (
+                merged["query_id"].astype(str).isin(batch)
+            )
+            merged = pd.concat([merged[~stale], labelled], ignore_index=True)
+            self.labels_path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_parquet(self.labels_path, index=False)
+            written.append(labelled)
+
+        if not written:
+            raise ValueError(
+                f"{key!r}: no rows produced for the {len(queued):,} new "
+                f"query_ids — check that the qrels cover them."
+            )
+        return pd.concat(written, ignore_index=True)
+
+    def _labelled(
+        self, rows: list[GoldenRoutingDataset], key: str, carry: pd.DataFrame
+    ) -> pd.DataFrame:
+        """One chunk's oracle rows as label rows, with the selection's carried
+        columns joined on."""
         labelled = pd.DataFrame(
             [
                 {
@@ -242,35 +299,14 @@ class RouteLabels:
             ]
         )
         if labelled.empty:
-            raise ValueError(
-                f"{key!r}: no rows produced for the {len(missing):,} new "
-                f"query_ids — check that the qrels cover them."
-            )
-        # one label per (dataset, query_id): a query in several cells appears
-        # once in wanted per cell, so dedup before the merge or it fans out.
-        # Per-cell readouts join labels back to the selection on query_id.
-        carry = (
-            wanted[["query_id", *self.carried]]
-            .astype({"query_id": str})
-            .drop_duplicates("query_id")
-        )
+            return labelled
         # a carried selection column can share a name with a label column
         # (cell_selection's planned `route` vs the labelled `route`): keep the
         # label authoritative and suffix the selection's copy.
         clash = {c: f"{c}_selected" for c in self.carried if c in labelled.columns}
-        labelled = labelled.merge(
+        return labelled.merge(
             carry.rename(columns=clash), on="query_id", how="left"
         )
-
-        # keep every row this call didn't touch — force only replaces the
-        # query_ids it actually rescored, never the rest of the dataset
-        stale = (existing.get("dataset") == key) & (
-            existing["query_id"].astype(str).isin(missing)
-        )
-        merged = pd.concat([existing[~stale], labelled], ignore_index=True)
-        self.labels_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(self.labels_path, index=False)
-        return labelled
 
     def rederive(self) -> pd.DataFrame:
         """Recompute `route` and `shape` for every stored row from the score
