@@ -143,6 +143,7 @@ class SyntheticLabelSweep:
             labels = RouteLabels(
                 group, out_dir=OUT_DIR,
                 objective=RouterObjective(min_relevance=min_rel),
+                scored_against="supplemented",
             )
             args = (self._client, collection, self._dense, self._sparse)
             source = SnapshotDataset(_source_name(lane), path=str(DATA_DIR))

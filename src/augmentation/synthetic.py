@@ -137,15 +137,22 @@ class SyntheticOperator(Operator):
         cleaned = dict.fromkeys(" ".join(str(s).split()) for s in surfaces)
         return f" (shapes that count: {', '.join(cleaned)})"
 
-    def document(self, floor: str, query: str) -> str:
-        """The second call: a passage that ANSWERS the generated query. Its
-        own instruction rather than a shared one because only this rung
-        writes documents."""
-        return (
+    def document(self, floor: str, query: str, ordinal: int = 1) -> str:
+        """A passage that ANSWERS the generated query; docs past the first
+        must answer in DIFFERENT wording, because a verbatim twin is a
+        dup-cluster artifact, not qrels depth."""
+        base = (
             "Write a short factual passage (3-6 sentences) that fully answers "
             "the user's search query. Write it as a document that would "
             "legitimately be retrieved for it — no preamble, no restating the "
             "query, no addressing the reader. Reply with the passage only."
+        )
+        if ordinal <= 1:
+            return base
+        return base + (
+            " This is an INDEPENDENT second source: cover the same answer "
+            "with different wording, sentence structure and vocabulary than "
+            "an encyclopedia would — as if written by a different author."
         )
 
     def targets(

@@ -34,10 +34,11 @@ class ConstructedDocs:
         return self._paths.constructed_docs
 
     @staticmethod
-    def doc_id(query_id: str) -> str:
-        """One document per synthetic query, so the id is derivable rather
-        than counted — a rerun that regenerates a row overwrites nothing."""
-        return f"constructed-{query_id}"
+    def doc_id(query_id: str, ordinal: int = 1) -> str:
+        """Derivable rather than counted — a rerun that regenerates a row
+        overwrites nothing; the ordinal exists because one doc is depth 1,
+        which classify() files as a fake tie."""
+        return f"constructed-{query_id}-{ordinal}"
 
     def load(self) -> pd.DataFrame:
         if not self.path.exists():
@@ -49,9 +50,11 @@ class ConstructedDocs:
         regenerates nor re-pays for them."""
         return set(self.load()["for_query"].astype(str))
 
-    def add(self, *, query_id: str, source_dataset: str, text: str) -> str:
+    def add(
+        self, *, query_id: str, source_dataset: str, text: str, ordinal: int = 1
+    ) -> str:
         """Bank one document and return its id."""
-        doc_id = self.doc_id(query_id)
+        doc_id = self.doc_id(query_id, ordinal)
         existing = self.load()
         if doc_id in set(existing["doc_id"]):
             return doc_id

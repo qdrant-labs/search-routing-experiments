@@ -14,6 +14,7 @@ from augmentation.loop import AugmentationLoop
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
 from augmentation.synthetic import SyntheticOperator
+from hybrid_search_rrf_dataset.lanes import LANES
 from taxonomy_generators.verify import verify
 
 CELL = "symbol_pile_no_grammar"
@@ -68,14 +69,18 @@ def test_a_synthetic_row_banks_query_document_and_key(tmp_path):
     assert row["answer_key"] == "minted"
 
     docs = loop.docs.load()
-    assert list(docs["for_query"]) == [row["query_id"]]
-    assert list(docs["source_dataset"]) == ["beir-nfcorpus"]
+    # two docs per query = the genuine-tie depth bar; distinct ids, doc 1 grounds
+    assert list(docs["for_query"]) == [row["query_id"]] * 2
+    assert list(docs["source_dataset"]) == ["beir-nfcorpus"] * 2
+    assert docs["doc_id"].is_unique
     assert row["grounding_doc_id"] == docs.iloc[0]["doc_id"]
 
     keys = loop.qrels.load()
-    assert list(keys["source"]) == ["constructed"]
-    assert list(keys["doc_id"]) == [row["grounding_doc_id"]]
-    assert len(engine.calls) == 2, "one call for the query, one for the document"
+    assert list(keys["source"]) == ["constructed"] * 2
+    assert set(keys["doc_id"]) == set(docs["doc_id"])
+    # minted at the LANE'S grade bar, not a flat 1 the objective filters out
+    assert set(keys["relevance"]) == {LANES["beir-nfcorpus"].min_relevance}
+    assert len(engine.calls) == 3, "one call for the query, one per document"
 
 
 def test_a_query_that_misses_its_bands_never_buys_a_document(tmp_path):
@@ -101,8 +106,9 @@ def test_a_rerun_advances_the_id_space_instead_of_rewriting(tmp_path):
 
     assert len(set(first["query_id"]) | set(second["query_id"])) == 2
     docs = loop.docs.load()
-    assert len(docs) == 2 and docs["doc_id"].is_unique
-    assert loop.qrels.load()["query_id"].is_unique
+    assert len(docs) == 4 and docs["doc_id"].is_unique  # 2 rows x 2 docs each
+    keys = loop.qrels.load()
+    assert keys.groupby("query_id").size().eq(2).all()
 
 
 def test_the_rung_refuses_a_floor_that_is_not_a_cell(tmp_path):

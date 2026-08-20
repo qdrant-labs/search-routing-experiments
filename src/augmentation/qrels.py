@@ -67,27 +67,32 @@ class AugmentationQrels:
         merged.to_parquet(self.path, index=False)
         return len(rows)
 
-    def mint_constructed(self, query_id: str, doc_id: str) -> int:
-        """The synthetic rung's key: the one document written to answer this
-        query. Depth of one is honest here — nobody judged anything else
-        against it — and it does not collapse to a ceiling tie the way a
-        minted Inject key would, because the constructed-docs collection
-        carries borrowed distractors for the routes to disagree over."""
+    def mint_constructed(
+        self, query_id: str, doc_ids: list[str], relevance: int = 1
+    ) -> int:
+        """The synthetic rung's key: every document written to answer this
+        query, at the LANE'S OWN grade bar — minting below `min_relevance`
+        writes a key the objective filters straight back out, and minting one
+        doc writes a depth classify() files as a fake tie. The constructed
+        collection still carries borrowed distractors for the routes to
+        disagree over."""
         existing = self.load()
         if query_id in set(existing["query_id"]):
             return 0
-        row = pd.DataFrame(
+        rows = pd.DataFrame(
             [{
-                "query_id": query_id, "doc_id": doc_id, "relevance": 1,
+                "query_id": query_id, "doc_id": doc_id, "relevance": relevance,
                 "source": "constructed", "inherited_from": None,
-            }],
+            } for doc_id in doc_ids],
             columns=_COLUMNS,
         )
+        if rows.empty:
+            return 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        pd.concat([existing, row], ignore_index=True).to_parquet(
+        pd.concat([existing, rows], ignore_index=True).to_parquet(
             self.path, index=False
         )
-        return 1
+        return len(rows)
 
     def backfill(self, pool: pd.DataFrame) -> pd.DataFrame:
         """Retry the inherit-path lookup for every pool row with no qrels

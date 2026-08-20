@@ -318,23 +318,34 @@ class AugmentationLoop:
         n: int,
         *,
         source_dataset: str,
+        docs_per_query: int = 2,
         max_consecutive_faults: int | None = FAULT_STREAK,
     ) -> pd.DataFrame:
         """The synthetic rung: rows for a cell no parent can reach.
 
-        Two calls per row, query first — a query that misses its bands costs
-        one completion instead of two, and the document is only ever written
-        for a query that already measures into the cell. `source_dataset`
+        Query first — a query that misses its bands costs one completion, and
+        documents are only written for a query that already measures into the
+        cell. `docs_per_query` defaults to 2 = the genuine-tie depth bar:
+        one doc is a depth classify() files as fake-tie waste, more buys
+        nothing at that boundary and costs a completion each. `source_dataset`
         names the lane whose corpus lends the constructed collection its
-        distractors; it is not read from, only recorded.
+        distractors AND whose min_relevance grades the minted key.
         """
         operator = SyntheticOperator(self.config)
         if not operator.serves(floor):
             raise ValueError(f"{floor!r} is not a cell — nothing to synthesize")
+        from hybrid_search_rrf_dataset.lanes import LANES
+
+        relevance = (
+            LANES[source_dataset].min_relevance
+            if source_dataset in LANES else 1
+        )
         spend = Spend()
         faults = FaultStreak(max_consecutive_faults)
         minted: list[AugmentedCandidate] = []
-        already = self.docs.written_for()
+        # completion = the minted KEY, not a banked doc: a row whose documents
+        # came up short has docs but no qrels, and must be retried, not stuck
+        already = set(self.qrels.load()["query_id"].astype(str))
         bar = tqdm(total=n, desc=f"synthesize:{floor}", unit="row")
         index = 0
         while len(minted) < n and not faults.tripped():
@@ -357,26 +368,36 @@ class AugmentationLoop:
             if not outcome.accepted:
                 bar.write(f"- {parent['query_id']}: dropped — {outcome.checks}")
                 continue
-            answer = self.engine.run(
-                operator.document(floor, outcome.text),
-                f"Query: {outcome.text}",
-                Targets(),
-            )
-            spend.add(answer)
-            if not answer.text:
-                bar.write(f"- {parent['query_id']}: query kept, no document")
+            doc_ids: list[str] = []
+            for ordinal in range(1, docs_per_query + 1):
+                answer = self.engine.run(
+                    operator.document(floor, outcome.text, ordinal),
+                    f"Query: {outcome.text}",
+                    Targets(),
+                )
+                spend.add(answer)
+                if not answer.text:
+                    break
+                doc_ids.append(self.docs.add(
+                    query_id=str(parent["query_id"]),
+                    source_dataset=source_dataset,
+                    text=answer.text,
+                    ordinal=ordinal,
+                ))
+            # all docs or none: a partial set writes a depth the row did not
+            # earn, and the banked ids would resurrect it on rerun anyway
+            if len(doc_ids) < docs_per_query:
+                bar.write(
+                    f"- {parent['query_id']}: query kept, documents incomplete "
+                    f"({len(doc_ids)}/{docs_per_query})"
+                )
                 continue
-            doc_id = self.docs.add(
-                query_id=str(parent["query_id"]),
-                source_dataset=source_dataset,
-                text=answer.text,
-            )
             candidate = operator.candidate(parent, floor, outcome).model_copy(
-                update={"grounding_doc_id": doc_id}
+                update={"grounding_doc_id": doc_ids[0]}
             )
             minted.append(candidate)
             self.pool.append([candidate])
-            self.qrels.mint_constructed(candidate.query_id, doc_id)
+            self.qrels.mint_constructed(candidate.query_id, doc_ids, relevance)
             bar.update(1)
             bar.write(f"+ {candidate.query_id}: {outcome.text!r}")
         bar.close()

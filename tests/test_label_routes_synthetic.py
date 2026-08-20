@@ -43,7 +43,7 @@ def test_eval_corpus_appends_constructed_docs_for_the_lane_only(tmp_path, monkey
 
     monkeypatch.setattr(sweep, "SnapshotDataset", _Stub)
     merged = sweep.eval_corpus("lane-a", docs)
-    assert list(merged["doc_id"]) == ["d1", "d2", "constructed-syn-1"]
+    assert list(merged["doc_id"]) == ["d1", "d2", "constructed-syn-1-1"]
     assert list(merged.columns) == list(source.columns)
     assert merged["text"].iloc[-1] == "answer a"
 
@@ -53,7 +53,7 @@ def test_eval_corpus_never_duplicates_a_doc_id(tmp_path, monkeypatch):
     docs = ConstructedDocs(paths)
     docs.add(query_id="syn-1", source_dataset="lane-a", text="constructed twin")
     source = pd.DataFrame({
-        "doc_id": ["constructed-syn-1"], "title": ["real"], "text": ["kept"],
+        "doc_id": ["constructed-syn-1-1"], "title": ["real"], "text": ["kept"],
     })
 
     class _Stub:

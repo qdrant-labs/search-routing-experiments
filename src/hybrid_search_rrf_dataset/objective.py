@@ -165,3 +165,49 @@ class NDCGObjective(Objective):
     ) -> tuple[float, list[str]]:
         top = self.ordered(ranking)
         return self.ndcg(top, self.relevant(gold_qrel)), top
+
+
+class WastedRecallObjective(Objective):
+    """`hit_weight`·HitRate@1 + `ndcg_weight`·NDCG@k² − `waste_weight`·Recall@k·(1−NDCG@k).
+
+    The penalty is proportional to Recall, so it only bites when there was
+    real recall to waste — a route with low Recall AND low NDCG is already
+    scored low by the positive terms and isn't double-punished here.
+    """
+
+    hit_weight: float = Field(default=0.7, ge=0.0)
+    ndcg_weight: float = Field(default=0.3, ge=0.0)
+    waste_weight: float = Field(default=0.3, ge=0.0)
+
+    @property
+    def name(self) -> str:
+        return (
+            f"{self.hit_weight:g}*HR@1+{self.ndcg_weight:g}*NDCG@{self.top_k}^2"
+            f"-{self.waste_weight:g}*wasted_recall"
+        )
+
+    @property
+    def decisive_margin(self) -> float:
+        # unlike RouterObjective, the penalty can pull a rank-1 hit below
+        # ndcg_weight, so no fixed gap certifies a top-1 separation.
+        return float("inf")
+
+    def assess(
+        self, ranking: dict[str, float], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        top = self.ordered(ranking)
+        relevant = self.relevant(gold_qrel)
+        if not relevant:
+            return 0.0, top
+        hit = self.hit_weight if top and top[0] in relevant else 0.0
+        # scored from the persisted `ordered()` list, never the raw dict —
+        # the dict path re-sorts unstably and scrambles score ties (the
+        # parquet round-trip bug the notebook version still carries)
+        ndcg = self.ndcg(top, relevant)
+        recall = len(set(top) & relevant.keys()) / len(relevant)
+        score = (
+            hit
+            + self.ndcg_weight * ndcg**2
+            - self.waste_weight * recall * (1 - ndcg)
+        )
+        return score, top

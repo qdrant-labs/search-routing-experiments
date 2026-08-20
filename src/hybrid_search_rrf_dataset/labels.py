@@ -135,6 +135,7 @@ class RouteLabels:
         objective: Objective | None = None,
         *,
         augmentation_paths: AugmentationPaths | None = None,
+        scored_against: str = "natural",
     ) -> None:
         from augmentation.config import AugmentationPaths  # lazy: see _augmented_rows
 
@@ -142,6 +143,10 @@ class RouteLabels:
         self.objective = objective or RouterObjective()
         self._out_dir = out_dir if out_dir is not None else DEFAULT_OUT_DIR
         self._aug_paths = augmentation_paths or AugmentationPaths()
+        # measurement conditions, not query origin: "supplemented" marks rows
+        # scored against a corpus carrying constructed docs, whatever their
+        # provenance says about the query text itself
+        self.scored_against = scored_against
 
     @property
     def labels_path(self) -> Path:
@@ -294,6 +299,7 @@ class RouteLabels:
                     "metric_name": row.metric_name,
                     "min_relevance": self.objective.min_relevance,
                     "provenance": row.provenance,
+                    "scored_against": self.scored_against,
                 }
                 for row in rows
             ]
