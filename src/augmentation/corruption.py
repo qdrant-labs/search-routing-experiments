@@ -184,15 +184,12 @@ class Truncate(Perturbation):
         if stripped.endswith("..."):
             return text
         claimed = _claimed_identifier_ranges(stripped)
-        # walk back from the true last word past any claimed identifier —
-        # cutting mid-UUID or mid-version-string destroys the answer key.
-        # _WORD matches letters only (no digits), so an identifier's
-        # alphabetic segments can overlap a claimed span without the match
-        # STARTING inside it — a real interval overlap, not a start check.
-        candidates = [
-            m for m in _WORD.finditer(stripped)
-            if not any(start < m.end() and m.start() < end for start, end in claimed)
-        ]
+        # the cut may only land AFTER every claimed identifier ends, not just
+        # outside their spans: cutting BEFORE one drops it wholesale, which
+        # breaks the inherited answer key the same way mangling it would —
+        # the query stops naming the thing the answer document is about.
+        boundary = max((end for _, end in claimed), default=0)
+        candidates = [m for m in _WORD.finditer(stripped) if m.start() >= boundary]
         if not candidates:
             return text
         last = candidates[-1]

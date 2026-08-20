@@ -78,23 +78,20 @@ def test_mojibake_never_touches_a_claimed_identifier(query, identifier):
 
 
 @pytest.mark.parametrize("query, identifier", TRUNCATE_TRAPS)
-def test_truncate_never_cuts_inside_a_claimed_identifier(query, identifier):
+def test_truncate_keeps_a_claimed_identifier_whole_or_leaves_it_alone(
+    query, identifier
+):
     from random import Random
 
-    from augmentation.corruption import _claimed_identifier_ranges
-
-    claimed = _claimed_identifier_ranges(query.rstrip())
     for seed in range(50):
         damaged = Truncate().apply(query, Random(seed))
-        if damaged == query or not damaged.endswith("..."):
-            continue
-        cut = len(damaged) - 3  # Truncate always appends "..." when it fires
-        assert not any(start < cut < end for start, end in claimed), (
-            f"seed {seed}: cut at {cut} lands inside {identifier!r} in {damaged!r}"
+        # dropping the identifier by cutting BEFORE it breaks the inherited
+        # answer key the same way mangling it would — the cut may only ever
+        # land after every claimed identifier, so it stays fully present
+        # whenever truncation fires at all
+        assert damaged == query or identifier in damaged, (
+            f"seed {seed}: {damaged!r} lost or cut {identifier!r}"
         )
-        assert damaged == query or identifier not in query[: len(damaged)] or (
-            identifier in damaged
-        ), f"seed {seed}: {damaged!r} cut inside {identifier!r}"
 
 
 def test_degree_adds_spans_over_the_parent_count(corruptor):
