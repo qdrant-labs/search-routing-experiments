@@ -18,6 +18,7 @@ from composition.objectives import (
     UNCOVERED_SLICE,
     DiversityFloors,
     InversionBound,
+    SelectionOrder,
     UtilityObjective,
 )
 from composition.pool_v3 import CEILING, REUSED, LabelledPool
@@ -61,6 +62,14 @@ class V3Composition:
         return self._out / "order_sheet.parquet"
 
     @property
+    def selection_order_path(self) -> Path:
+        return self._out / "selection_order.parquet"
+
+    @property
+    def selection_summary_path(self) -> Path:
+        return self._out / "selection_summary.parquet"
+
+    @property
     def eval_reserve_path(self) -> Path:
         return self._out / "eval_reserve.parquet"
 
@@ -91,6 +100,8 @@ class V3Composition:
         marginals = self._floors.marginals(selected)
         sheet = self._floors.order_sheet(selected, pool)
         per_ds = self._per_dataset(pool)
+        debt = self._floors.class_debt(pool)
+        order, order_summary = self._selection_order(pool, per_ds, debt, sheet)
         inversion = self._bound.report(selected, pool)
         realism = self._bound.realism(selected)
 
@@ -98,6 +109,8 @@ class V3Composition:
         flat = selected.assign(cells=selected["cells"].map(sorted))
         flat.to_parquet(self.dataset_path, index=False)
         sheet.to_parquet(self.order_sheet_path, index=False)
+        order.to_parquet(self.selection_order_path, index=False)
+        order_summary.to_parquet(self.selection_summary_path)
         reserve[["dataset", "query_id", "route_class"]].to_parquet(
             self.eval_reserve_path, index=False
         )
@@ -109,9 +122,27 @@ class V3Composition:
         )
         self.report_path.write_text(
             self._report(pool, selected, reserve, marginals, sheet, per_ds,
-                         inversion, realism)
+                         inversion, realism, debt, order_summary)
         )
         return selected
+
+    def _selection_order(
+        self, pool: pd.DataFrame, per_ds: pd.DataFrame, debt: pd.DataFrame,
+        sheet: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """The labelling rung's demand — built against the same catalog the
+        strata came from, with cells filtered to the columns it carries."""
+        from composition.floors import read_catalog, with_derived
+
+        catalog = with_derived(read_catalog(self.catalog_path)).astype(
+            {"query_id": str}
+        )
+        order = SelectionOrder(
+            self._recipe,
+            self._pool.active_cells(catalog),
+            self._pool.v3_catalog_path.parent.parent,
+        )
+        return order.build(pool, per_ds, debt, sheet, catalog)
 
     # ------------------------------------------------------------------ admit ---
     def admit(
@@ -319,9 +350,8 @@ class V3Composition:
         }
 
     def _report(self, pool, selected, reserve, marginals, sheet, per_ds,
-                inversion, realism) -> str:
+                inversion, realism, debt, order_summary) -> str:
         recipe = self._recipe
-        debt = self._floors.class_debt(pool)
         unmet_m = marginals[~marginals["met"]]
         unmet_l = per_ds[~per_ds["floor_met"]]
         breach = inversion[~inversion["floor_forced"]]
@@ -342,6 +372,15 @@ class V3Composition:
             f"({int((sheet['slice'] == 'cell').sum())} cell, "
             f"{int((sheet['slice'] == CORRUPTION_SLICE).sum())} corruption, "
             f"{int((sheet['slice'] == UNCOVERED_SLICE).sum())} uncovered).",
+            "",
+            "## Labelling order (the rung BEFORE generation)",
+            f"{int(order_summary['labels_ordered'].sum()):,} labels ordered "
+            f"across {len(order_summary)} lanes "
+            f"({int(order_summary['queries_named'].sum()):,} queries named, "
+            f"answer-coverage gated); estimated residual debt after labelling: "
+            f"{order_summary.attrs.get('residual_debt', {})} — generation's "
+            f"true share.",
+            order_summary.round(4).to_markdown(),
             "",
             "## Layers",
             f"- Utility: certified tier {selected.attrs['total_certified']:,} "

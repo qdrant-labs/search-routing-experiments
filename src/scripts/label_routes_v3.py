@@ -91,6 +91,42 @@ def label_more_selection(oversample: float = 1.0) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def order_selection(cap: int | None = None) -> pd.DataFrame:
+    """The selection the SelectionOrder rung wrote (data/v3/
+    selection_order.parquet): query text joined from the source parquets,
+    already-labelled rows dropped, `cap` distributed across lanes
+    proportionally so a bounded batch keeps the order's lane mix."""
+    order_path = V3_DIR / "selection_order.parquet"
+    order = pd.read_parquet(order_path).astype({"query_id": str})
+    done = [pd.read_parquet(V2_LABELS, columns=["dataset", "query_id"])]
+    v3_labels = V3_DIR / "labels.parquet"
+    if v3_labels.exists():
+        done.append(pd.read_parquet(v3_labels, columns=["dataset", "query_id"]))
+    labelled = pd.concat(done, ignore_index=True).astype({"query_id": str})
+    seen = labelled.groupby("dataset")["query_id"].agg(set).to_dict()
+
+    frames: list[pd.DataFrame] = []
+    for dataset, lines in order.groupby("dataset"):
+        qpath = DATA_DIR / _source_name(str(dataset)) / "queries.parquet"
+        if not qpath.exists():
+            continue
+        queries = pd.read_parquet(qpath).astype({"query_id": str})
+        if "query" not in queries.columns:
+            queries = queries.rename(columns={"text": "query"})
+        fresh = lines[~lines["query_id"].isin(seen.get(str(dataset), set()))]
+        if cap is not None:
+            fresh = fresh.head(max(1, math.ceil(cap * len(lines) / len(order))))
+        take = fresh.merge(queries[["query_id", "query"]], on="query_id")
+        frames.append(
+            take.assign(dataset=str(dataset), home_lane=str(dataset))[
+                ["dataset", "query_id", "query", "home_lane"]
+            ]
+        )
+    if not frames:
+        return pd.DataFrame(columns=["dataset", "query_id", "query", "home_lane"])
+    return pd.concat(frames, ignore_index=True)
+
+
 def class_supply_selection(spec: dict[str, int | None]) -> pd.DataFrame:
     """Fresh queries from named lanes for CLASS supply (the sparse ceiling),
     not floor gaps: lane -> how many to take, None = every fresh query.
@@ -216,9 +252,21 @@ def main() -> None:
         help="class-supply mode: label N fresh queries (default: all) from "
         "each named lane, instead of the floor-gap selection",
     )
+    parser.add_argument(
+        "--order", action="store_true",
+        help="label the SelectionOrder rung's picks (selection_order.parquet) "
+        "instead of the floor-gap selection",
+    )
+    parser.add_argument(
+        "--cap", type=int, default=None,
+        help="with --order: bound this batch, distributed across lanes "
+        "proportionally to the order",
+    )
     args = parser.parse_args()
 
-    if args.supply:
+    if args.order:
+        selection = order_selection(cap=args.cap)
+    elif args.supply:
         spec = {
             (part.split("=", 1)[0]): (
                 int(part.split("=", 1)[1]) if "=" in part else None

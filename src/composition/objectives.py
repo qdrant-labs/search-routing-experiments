@@ -10,9 +10,11 @@ import math
 import numpy as np
 import pandas as pd
 
+from pathlib import Path
+
 from augmentation.config import AugmentationConfig
 from composition.cellfill import CELL_SLICE, EXHAUSTED
-from composition.pool_v3 import CLASSES, CORPUS_AXES
+from composition.pool_v3 import CLASSES, CORPUS_AXES, REUSED
 from composition.recipe import Recipe
 
 GENERATION_ONLY = "generation_only"
@@ -20,6 +22,8 @@ CORRUPTION_SLICE = "corruption"
 UNCOVERED_SLICE = "uncovered"
 NO_CELL_HOSTS = "no_cell_hosts"
 SHEET_COLUMNS = ["slice", "floor", "amount", "credit", "missing", "reason"]
+CLASS_ALLOCATION = "class_allocation"
+ORDER_COLUMNS = ["dataset", "query_id", "reason"]
 
 
 class DiversityFloors:
@@ -148,6 +152,202 @@ class DiversityFloors:
             "slice": CORRUPTION_SLICE, "floor": "corruption:light",
             "amount": owed, "credit": 0.0, "missing": owed, "reason": EXHAUSTED,
         }
+
+
+class SelectionOrder:
+    """The labelling rung's demand (the brief's Phase-3 order: label the
+    datasets first, generate the residual): each class's target_total debt is
+    allocated across lanes by their MEASURED blind yield, then the exact
+    unlabelled catalog queries are named — answer-coverage gated, so a pick
+    can never buy a guaranteed all_zero label."""
+
+    def __init__(self, recipe: Recipe, cells: tuple, data_dir: Path) -> None:
+        self._recipe = recipe
+        self._cells = cells
+        self._data = data_dir
+
+    @staticmethod
+    def yields(pool: pd.DataFrame) -> pd.DataFrame:
+        """Per-lane tier-0 class yields from BLIND rows only — reused rows
+        entered for already having won and estimate nothing."""
+        blind = pool[pool["stage"] != REUSED]
+        out = blind.groupby("dataset").size().to_frame("blind_labelled")
+        for name in CLASSES:
+            hits = blind[(blind["route_class_any"] == name) & ~blind["is_waste"]]
+            out[f"yield_{name}"] = (
+                hits.groupby("dataset").size().reindex(out.index).fillna(0)
+                / out["blind_labelled"]
+            )
+        return out
+
+    def allocate(
+        self, debt: pd.DataFrame, yields: pd.DataFrame, per_ds: pd.DataFrame,
+        pool: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Greedy on the biggest remaining debt: buy labels where the measured
+        yield is best, capped by fresh supply and by each lane's remaining
+        share of the class target, crediting every label's incidental
+        other-class rows so the order never over-buys."""
+        remaining = {r.route_class: float(r.debt) for r in debt.itertuples(index=False)}
+        targets = {r.route_class: float(r.target) for r in debt.itertuples(index=False)}
+        live = pool[~pool["is_waste"]]
+        supplied = {
+            name: live[live["route_class_any"] == name].groupby("dataset").size()
+            for name in CLASSES
+        }
+        cap = {
+            (lane, name): max(
+                0.0,
+                self._recipe.target_lane_share * targets[name]
+                - float(supplied[name].get(lane, 0)),
+            )
+            for lane in yields.index for name in CLASSES
+        }
+        fresh = per_ds["fresh_left"].to_dict()
+        ordered: dict[str, float] = {}
+        for name in sorted(CLASSES, key=lambda k: -remaining[k]):
+            lanes = yields[yields[f"yield_{name}"] > 0].sort_values(
+                f"yield_{name}", ascending=False
+            )
+            for lane in lanes.index:
+                if remaining[name] < 1.0:
+                    break
+                rate = float(lanes.at[lane, f"yield_{name}"])
+                room = float(fresh.get(lane, 0)) - ordered.get(lane, 0.0)
+                take = min(room, cap[(lane, name)] / rate, remaining[name] / rate)
+                if take < 1.0:
+                    continue
+                ordered[lane] = ordered.get(lane, 0.0) + take
+                # credit every class this take buys, but never beyond the
+                # lane's remaining share cap — rows the draw cannot take
+                # must not retire debt
+                for k in CLASSES:
+                    buy = min(
+                        take * float(yields.at[lane, f"yield_{k}"]),
+                        cap[(lane, k)],
+                    )
+                    remaining[k] -= buy
+                    cap[(lane, k)] -= buy
+        out = yields.loc[sorted(ordered, key=lambda k: -ordered[k])].copy()
+        out["labels_ordered"] = [round(ordered[lane]) for lane in out.index]
+        for name in CLASSES:
+            out[f"expected_{name}"] = (
+                out["labels_ordered"] * out[f"yield_{name}"]
+            ).round().astype(int)
+        out["fresh_left"] = out.index.map(fresh)
+        out.attrs["residual_debt"] = {
+            k: int(max(0.0, v)) for k, v in remaining.items()
+        }
+        return out
+
+    def picks(
+        self,
+        allocation: pd.DataFrame,
+        pool: pd.DataFrame,
+        catalog: pd.DataFrame,
+        sheet: pd.DataFrame,
+        *,
+        oversample: float = 1.5,
+    ) -> pd.DataFrame:
+        """The named queries per allocated lane, drawn seeded from the lane's
+        FRESH source queries and answer-coverage gated; hungry-cell targeting
+        applies only where the catalog already carries the row's features
+        (today: labelled rows only, so cells are served at natural rates
+        until catalog_v3 extends to source queries)."""
+        from scripts.label_routes import _source_name
+
+        rng = np.random.default_rng(self._recipe.seed)
+        hungry_names = set(sheet.loc[sheet["slice"] == CELL_SLICE, "floor"])
+        hungry = [cell for cell in self._cells if cell.name in hungry_names]
+        frames = []
+        for lane in allocation.index:
+            need = int(allocation.at[lane, "labels_ordered"])
+            qpath = self._data / _source_name(str(lane)) / "queries.parquet"
+            if need <= 0 or not qpath.exists():
+                continue
+            queries = pd.read_parquet(qpath, columns=["query_id"]).astype(
+                {"query_id": str}
+            )
+            done = set(pool.loc[pool["dataset"] == lane, "query_id"].astype(str))
+            fresh = queries[~queries["query_id"].isin(done)]
+            if fresh.empty:
+                continue
+            cat_rows = catalog[
+                (catalog["dataset"] == lane)
+                & catalog["query_id"].isin(set(fresh["query_id"]))
+            ]
+            reason: dict[str, str] = {}
+            for cell in hungry:
+                for qid in cat_rows.loc[cell.select(cat_rows), "query_id"]:
+                    reason.setdefault(str(qid), f"cell:{cell.name}")
+            rest = fresh[~fresh["query_id"].isin(reason)].sample(
+                frac=1.0, random_state=rng.integers(2**31)
+            )
+            candidates = (list(reason) + rest["query_id"].tolist())[
+                : max(need, round(need * oversample))
+            ]
+            covered = self._answer_covered(lane, pd.Series(candidates), pool)
+            take = [qid for qid in candidates if qid in covered][:need]
+            frames.append(pd.DataFrame({
+                "dataset": lane,
+                "query_id": take,
+                "reason": [reason.get(qid, CLASS_ALLOCATION) for qid in take],
+            }))
+        if not frames:
+            return pd.DataFrame(columns=ORDER_COLUMNS)
+        return pd.concat(frames, ignore_index=True)[ORDER_COLUMNS]
+
+    def _answer_covered(
+        self, lane: str, query_ids: pd.Series, pool: pd.DataFrame
+    ) -> set[str]:
+        """Query ids whose every graded answer doc exists in the lane corpus —
+        labelling the rest buys a guaranteed all_zero row."""
+        from scripts.label_routes import _source_name
+
+        source = self._data / _source_name(lane)
+        qrels_path, corpus_path = source / "qrels.parquet", source / "corpus.parquet"
+        if not qrels_path.exists() or not corpus_path.exists():
+            return set()
+        lane_rows = pool.loc[pool["dataset"] == lane, "min_relevance"]
+        min_rel = int(lane_rows.iloc[0]) if len(lane_rows) else 1
+        qrels = pd.read_parquet(qrels_path).astype({"query_id": str, "doc_id": str})
+        graded = qrels[
+            (qrels["relevance"] >= min_rel)
+            & qrels["query_id"].isin(set(query_ids.astype(str)))
+        ]
+        present: set[str] = set()
+        doc_ids = graded["doc_id"].unique().tolist()
+        for start in range(0, len(doc_ids), 2000):
+            batch = doc_ids[start:start + 2000]
+            present |= set(
+                pd.read_parquet(
+                    corpus_path, columns=["doc_id"],
+                    filters=[("doc_id", "in", batch)],
+                )["doc_id"].astype(str)
+            )
+        ok = graded.groupby("query_id")["doc_id"].agg(
+            lambda docs: all(d in present for d in docs)
+        )
+        return set(ok[ok].index)
+
+    def build(
+        self, pool: pd.DataFrame, per_ds: pd.DataFrame, debt: pd.DataFrame,
+        sheet: pd.DataFrame, catalog: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        allocation = self.allocate(debt, self.yields(pool), per_ds, pool)
+        order = self.picks(allocation, pool, catalog, sheet)
+        named = order.groupby("dataset").size()
+        summary = allocation.assign(
+            queries_named=named.reindex(allocation.index).fillna(0).astype(int)
+        )
+        summary.attrs.update(allocation.attrs)
+        # a footer row, not attrs: attrs do not survive the parquet round-trip
+        # and the residual is the number generation gets sized by
+        summary.loc["(residual after labelling)"] = {
+            f"expected_{k}": v
+            for k, v in allocation.attrs["residual_debt"].items()
+        }
+        return order, summary
 
 
 class UtilityObjective:
