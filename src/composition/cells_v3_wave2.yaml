@@ -1,0 +1,180 @@
+_note: Wave-2 v3 archetype cells (fable_wave2) — a DRAFT, deliberately loaded by
+  no registry; integration happens after review. Additive to the frozen 44 v2
+  cells and the 14 active v3 cells; every cell closes a measured coverage hole
+  from docs/cells_adversarial_review.md Tier 2E or the short-identifier eviction
+  gap. predicts is written in route names, a falsifiable prior tested by
+  labelling, never used to allocate. looks_like is generator-facing surface
+  shape only; the predicate is the sole matcher. No quotas anywhere — allocation
+  is K_cap's job. Gate cases live in tests/test_cell_membership_wave2.py.
+cells:
+- name: thin_grammar_short_lookup
+  looks_like: >
+    Three to six words held together by a thin thread of grammar — usually one
+    function word, occasionally two in the longer ones, with the rest content:
+    a wh-word with a bare verb phrase, or a compact noun phrase joined by of,
+    for, in. More connected than a keyword pile, less than a full spoken
+    sentence. No digits, no code, no identifiers of any kind — plain everyday
+    vocabulary in the register of a lookup typed straight into a search box.
+  predicate:
+  - column: length.length_words
+    at_least: 3
+    below: 7
+  - column: natural_language_signal.natural_language_share
+    at_least: 0.1
+    below: 0.4
+  - column: derived.identifier_spans
+    below: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'The measured modal band between keyword_telegram_short (NL share
+    below 0.1) and short_grammatical_question (0.4 and up): one or two function
+    words thread three to five content words, so neither neighbor''s predicate
+    can reach it — 45,547 real uncovered rows, worst on the most natural
+    sources. Disjoint from both neighbors by the NL band itself, not a
+    refinement of either. The route contest is the neighbors'' own: whether the
+    few content words are the target passage''s literal vocabulary or a
+    paraphrase of it, a phrasing property the thin grammar neither hides nor
+    resolves.'
+  source: fable_wave2
+- name: short_number_lookup
+  looks_like: >
+    Three to six plain words with one bare number among them — a chapter, form,
+    route, model or year written as naked digits, with no unit glued onto the
+    number and no machine date format. The words around it are ordinary
+    vocabulary, not code and not symbols: the compact register of a lookup that
+    pins its topic with a numbered designation.
+  predicate:
+  - column: structured_identifiers.number
+    at_least: 1
+  - column: length.length_words
+    at_least: 3
+    below: 7
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'The unclaimed middle rung of the bare-number ladder:
+    bare_number_token stops below 3 words and number_inside_natural_question
+    starts at 7, while the number span itself evicts the row from
+    keyword_telegram_short, short_grammatical_question and
+    thin_grammar_short_lookup through their identifier_spans bands — so a
+    three-to-six word number-bearing lookup matches nothing. Same regime split
+    as both neighbors: a designation (statute chapter, form number, highway)
+    makes the digits the discriminating term, while a quantity or year leaves
+    the companion words to carry the need.'
+  source: fable_wave2
+- name: bare_technical_lookup
+  looks_like: >
+    One technical token carrying the whole query, bare or with a few plain
+    framing words, under seven words in total: an ALL_CAPS error constant, a
+    numeric web error code beside the word that names it, a CVE number, an
+    issue-tracker key, a sigiled shell variable like $JAVA_HOME, or a single
+    camelCase, snake_case or ALL_CAPS_UNDERSCORE code identifier. Exactly one
+    such token — two or more symbols side by side is a different shape — and
+    no full sentence built around it.
+  predicate:
+  - column: length.length_words
+    below: 7
+  any_of:
+  - column: structured_identifiers.error_code_like
+    at_least: 1
+  - column: structured_identifiers.http_status_code
+    at_least: 1
+  - column: structured_identifiers.cve
+    at_least: 1
+  - column: structured_identifiers.ticket_like
+    at_least: 1
+  - column: structured_identifiers.env_var
+    at_least: 1
+  - column: structured_identifiers.code_identifier
+    at_least: 1
+    below: 2
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'The rows bare_concept_token''s identifier_spans band evicts into
+    nothing: a lone claimed technical token under seven words. Every existing
+    home for these banks starts at seven-plus words (status_code_idf_split,
+    code_symbol_named_in_prose, env_var_configuration via its NL floor,
+    rare_key_buried_in_chatter at ten), and symbol_pile_no_grammar needs two or
+    more code identifiers — which is why the code_identifier branch here is
+    exactly-one, making the two cells complements rather than overlaps. Route
+    splits on token fame, the bare_acronym argument on technical surfaces:
+    LD_LIBRARY_PATH and useEffect are first-class vocabulary in their
+    documentation neighborhoods, while an obscure tracker key is an opaque rare
+    string only exact match reaches. MEASURED bank limits, not archetype
+    limits: error_code_like claims ALL_CAPS constants but misses 0x-hex and
+    %VAR% forms, and single-segment $PATH resolves to stock_ticker_like — those
+    surfaces are members of this archetype the extractor cannot yet see, so the
+    branches stay as-is and the generator is not sent at them.'
+  source: fable_wave2
+- name: content_heavy_midlength
+  looks_like: >
+    Seven to nineteen words that are nearly all content: a long descriptive
+    phrase, or a question so packed with qualifiers that grammar almost
+    disappears — topic, attributes, setting, audience stacked into one search
+    line. Function words stay scarce, well under half the tokens, and nothing
+    else may appear: no digits, no acronyms, no negators, no identifiers, no
+    code. The register is someone loading every constraint they care about
+    into a single line rather than composing prose.
+  predicate:
+  - column: length.length_words
+    at_least: 7
+    below: 20
+  - column: stopword_ratio.stopword_ratio
+    below: 0.45
+  - column: derived.identifier_spans
+    below: 1
+  - column: sentence_markers.acronym
+    below: 1
+  - column: sentence_markers.negation
+    below: 1
+  predicts:
+  - dense_only
+  - sparse_only
+  rationale: 'Nearest is stopword_saturated_midlength — the same 7-19 word
+    window with the glue regime inverted: that cell requires stopword_ratio at
+    least 0.45 and this one forbids it, so the two partition the midlength band
+    instead of overlapping. 34,691 real uncovered rows sit here. Mechanics are
+    the inverse of the buried-anchor shape: BM25 keeps nearly every token —
+    five to fifteen mid-IDF anchors whose union over-matches tangential
+    documents — while dense must compress the stacked qualifiers into one
+    point. The identifier, acronym and negation bands keep the cell out of the
+    anchor and marker families'' claims rather than re-claiming their rows.'
+  source: fable_wave2
+- name: spec_bullet_paste
+  looks_like: >
+    Twenty to sixty words of pasted listing material rather than written
+    language: spec-sheet bullets, product metadata, attribute-value runs, a
+    title with its feature list flattened into one line. Nouns, adjectives and
+    values sit side by side with almost no connective grammar, and there are
+    at most two sentence-like runs in the whole thing. Not code, not a stack
+    trace, not an error log — the register is a catalog entry or a spec table,
+    pasted.
+  predicate:
+  - column: length.length_words
+    at_least: 20
+    below: 60
+  - column: natural_language_signal.natural_language_share
+    below: 0.25
+  - column: syntactic_depth.statement_count
+    below: 3
+  - column: logical_structures.code_fragment
+    below: 1
+  predicts:
+  - sparse_only
+  rationale: 'Sits between keyword_telegram_short and
+    extreme_length_pasted_query: pasted listing material far too long for the
+    telegram cell, below the 60-word floor of the paste cell, and outside
+    verbose_grammatical_request (NL at least 0.4) and
+    multi_statement_context_dump (three statements and an NL floor) — the
+    measured 20-59 word low-NL hole. Nearest mechanism is
+    wide_flat_enumeration, but that cell needs a parsed coordination and bare
+    comma lists yield no conj arcs under the pinned parser, so this cell bands
+    on scalars instead; the code_fragment band keeps pasted_code_fragment''s
+    material out. Mechanics: a flat attribute pile is coverage scoring''s
+    native food and a single vector''s worst case — facets average to a
+    centroid near none of them — so the honest falsifiable prior is the
+    lexical route, with the listing''s gist carrying dense as the stated
+    counter-mechanism.'
+  source: fable_wave2
