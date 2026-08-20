@@ -22,19 +22,11 @@ from hybrid_search_rrf_dataset.router import (
     _is_engineered,
     _score_matrix,
 )
-from scripts.select_v3_prototype import (
-    CLASSES,
-    DATA,
-    OUT,
-    V3_CATALOG,
-    SelectorRecipe,
-    _cluster_ids,
-    _load_labels,
-    classify,
-)
+from composition.composer import V3Composition
+from composition.pool_v3 import CLASSES, DATA, LabelledPool
 
 DUP_CLUSTERS = DATA / "route_labels" / "dup_clusters.parquet"
-ABLATION_OUT = OUT / "ablation"
+ABLATION_OUT = DATA / "v3" / "ablation"
 B_SEED = 999  # deliberately distinct from the selector's own seed=0
 N_BOOT = 5000
 LANE_MIN_N = 20  # below this a lane's own mean is reported but flagged low-n
@@ -44,12 +36,12 @@ def _key(frame: pd.DataFrame) -> pd.Series:
     return frame["dataset"].astype(str) + "\x00" + frame["query_id"].astype(str)
 
 
-def full_pool() -> pd.DataFrame:
+def full_pool(pool: LabelledPool) -> pd.DataFrame:
     """Every labelled row, classified (route_class/certified) and joined to
     every v3 catalog ENGINEERED column — the one frame both arms and the
     frozen eval slice are all read out of, so no join can drift between them."""
-    labels = classify(_load_labels(), SelectorRecipe())
-    names = pq.read_schema(V3_CATALOG).names
+    labels = pool.classify(pool.labels())
+    names = pq.read_schema(pool.v3_catalog_path).names
     # query_corpus.* is NaN where a lane has no index — "unmeasured", not zero
     # (build_v3_catalog's own invariant) — so it cannot go through FeatureSpace's
     # reindex-fills-absent-with-0 contract. Excluded from the router's engineered
@@ -58,7 +50,7 @@ def full_pool() -> pd.DataFrame:
         c for c in names if _is_engineered(c) and not c.startswith("query_corpus.")
     ]
     catalog = pd.read_parquet(
-        V3_CATALOG, columns=["dataset", "query_id", *feat_cols]
+        pool.v3_catalog_path, columns=["dataset", "query_id", *feat_cols]
     ).astype({"query_id": str})
     return labels.merge(catalog, on=["dataset", "query_id"], how="inner")
 
@@ -162,9 +154,11 @@ def main() -> None:
     parser.add_argument("--n-boot", type=int, default=N_BOOT)
     args = parser.parse_args()
 
-    pool = full_pool()
-    selected = pd.read_parquet(OUT / "selected.parquet").astype({"query_id": str})
-    reserve = pd.read_parquet(OUT / "eval_reserve.parquet").astype({"query_id": str})
+    labelled = LabelledPool()
+    composer = V3Composition(pool=labelled)
+    pool = full_pool(labelled)
+    selected = pd.read_parquet(composer.dataset_path).astype({"query_id": str})
+    reserve = pd.read_parquet(composer.eval_reserve_path).astype({"query_id": str})
 
     eval_frame = pool.merge(
         reserve[["dataset", "query_id"]], on=["dataset", "query_id"], how="inner"
@@ -172,11 +166,11 @@ def main() -> None:
     assert len(eval_frame) == len(reserve), "eval_reserve keys missing from pool"
     assert eval_frame["certified"].all(), "eval_reserve must be certified-only"
 
-    key_to_cluster = dict(zip(_key(pool), _cluster_ids(pool)))
+    key_to_cluster = dict(zip(_key(pool), labelled.cluster_ids(pool)))
     reserve_clusters = {key_to_cluster[k] for k in _key(reserve) if k in key_to_cluster}
     # excludes reserve's own cluster-mates too, certified or not — mirrors
-    # select_v3_prototype.reserve_exclusion_keys, restated by KEY here because
-    # this reserve is read back from disk with its own fresh index, not pool's
+    # LabelledPool.reserve_exclusion_keys, restated by KEY here because this
+    # reserve is read back from disk with its own fresh index, not pool's
     exclude_keys = {k for k, c in key_to_cluster.items() if c in reserve_clusters}
     candidate = pool[pool["certified"] & ~_key(pool).isin(exclude_keys)]
 
@@ -208,7 +202,8 @@ def main() -> None:
                 "wherever a cell's free supply allows; forced_reuse_rows is the "
                 "hypergeometric floor no randomization can avoid — read "
                 "alongside the result, not hidden",
-        "class_margin": 0.4, "seed_a_pool": 0, "seed_b": args.seed_b,
+        "class_margin": labelled.recipe.class_margin,
+        "seed_a_pool": labelled.recipe.seed, "seed_b": args.seed_b,
         "n_boot": args.n_boot,
     }
     ABLATION_OUT.mkdir(parents=True, exist_ok=True)

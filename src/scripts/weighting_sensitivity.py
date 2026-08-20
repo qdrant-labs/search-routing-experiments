@@ -15,31 +15,24 @@ import json
 import numpy as np
 import pandas as pd
 
+from composition.objectives import InversionBound
+from composition.pool_v3 import DATA, LabelledPool
+from composition.recipe import Recipe
 from scripts.run_ablation import ABLATION_OUT
-from scripts.select_v3_prototype import OUT, SelectorRecipe, _load_labels
 
-SENSITIVITY_OUT = OUT / "weighting_sensitivity"
+SENSITIVITY_OUT = DATA / "v3" / "weighting_sensitivity"
 PER_LANE = ABLATION_OUT / "per_lane.parquet"
 
 
 def candidate_weightings(
     per_lane: pd.DataFrame, pool_counts: pd.Series, lane_share_cap: float
 ) -> dict[str, pd.Series]:
-    """Every weighting the sensitivity check sweeps, keyed by name. `unweighted`
-    is the headline (weights proportional to each lane's own n, i.e. the pooled
-    row mean — no reweighting applied); `pool_share` and `pool_share_capped` are
-    CANDIDATES, not anchors: they encode which lanes we happened to acquire and
-    how hard the selector caps that, and neither is evidence about traffic."""
-    lanes = per_lane.index
-    counts = pool_counts.reindex(lanes).fillna(0.0)
-    capped = counts / counts.sum() if counts.sum() else counts
-    capped = capped.clip(upper=lane_share_cap)
-    return {
-        "unweighted": per_lane["n"].astype(float),
-        "lane_uniform": pd.Series(1.0, index=lanes),
-        "pool_share": counts,
-        "pool_share_capped": capped,
-    }
+    """The plausible-source family from the inversion bound (one home for the
+    candidates), plus `unweighted` — the headline: weights proportional to each
+    lane's own n, i.e. the pooled row mean, no reweighting applied."""
+    counts = pool_counts.reindex(per_lane.index).fillna(0.0)
+    family = InversionBound.weightings(counts, lane_share_cap)
+    return {"unweighted": per_lane["n"].astype(float), **family}
 
 
 def sign_robustness(
@@ -78,7 +71,7 @@ def check(
     per_lane: pd.DataFrame,
     value_col: str,
     pool_counts: pd.Series,
-    lane_share_cap: float = SelectorRecipe().lane_share_cap,
+    lane_share_cap: float = Recipe().target_lane_share,
     tol: float = 0.0,
 ) -> dict[str, object]:
     """Reweight one per-lane metric under every candidate and apply the rule."""
@@ -132,7 +125,7 @@ def main() -> None:
     args = parser.parse_args()
 
     per_lane = pd.read_parquet(args.per_lane)
-    pool_counts = _load_labels().groupby("dataset").size()
+    pool_counts = LabelledPool().labels().groupby("dataset").size()
     result = check(per_lane, args.column, pool_counts, tol=args.tol)
     SENSITIVITY_OUT.mkdir(parents=True, exist_ok=True)
     (SENSITIVITY_OUT / f"{args.column}.json").write_text(json.dumps(result, indent=2))

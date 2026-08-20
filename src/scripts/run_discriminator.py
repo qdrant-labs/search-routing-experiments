@@ -22,12 +22,12 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import normalize
 
+from composition.pool_v3 import DATA, LabelledPool
 from scripts.run_ablation import DUP_CLUSTERS, _key
-from scripts.select_v3_prototype import DATA, OUT, _load_labels
 
 POOL = DATA / "augmentation" / "pool.parquet"
 SELECTION = DATA / "composition" / "selection.parquet"
-DISC_OUT = OUT / "discriminator"
+DISC_OUT = DATA / "v3" / "discriminator"
 
 MIN_N = 30
 """Smallest per-class n worth fitting. A balanced AUC's null sd is
@@ -133,7 +133,7 @@ def natural_frame(source: str) -> pd.DataFrame:
     frame the children were; `labels` is where v3's natural rows actually come
     from, under a different selection pressure — hence a flag, not a default."""
     if source == "labels":
-        labels = _load_labels()
+        labels = LabelledPool().labels()
         return labels[["dataset", "query_id", "query"]]
     selection = pd.read_parquet(SELECTION).astype({"query_id": str})
     natural = selection[selection["generated_from"].isna()]
@@ -147,7 +147,7 @@ def parent_text() -> pd.Series:
         pd.read_parquet(SELECTION).astype({"query_id": str})[
             ["dataset", "query_id", "query"]
         ],
-        _load_labels()[["dataset", "query_id", "query"]],
+        LabelledPool().labels()[["dataset", "query_id", "query"]],
     ]
     joined = pd.concat(frames, ignore_index=True)
     joined["k"] = _key(joined)

@@ -74,9 +74,9 @@ def _pool_labels() -> pd.DataFrame:
     """The selector's own union (re-derived v2 pool + additive v3 labels), so a
     v3-labelled query gets catalog rows and therefore cell membership — the 342
     in-loop rows previously fell through to zero cells silently."""
-    from scripts.select_v3_prototype import _load_labels
+    from composition.pool_v3 import LabelledPool
 
-    return _load_labels()[["dataset", "query_id", "query"]]
+    return LabelledPool().labels()[["dataset", "query_id", "query"]]
 
 
 def build_v3_catalog(*, force: bool = False) -> pd.DataFrame:

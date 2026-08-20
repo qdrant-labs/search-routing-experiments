@@ -54,10 +54,10 @@ def test_every_v3_band_column_is_built_or_backfilled():
 def test_active_cells_never_band_on_a_column_the_catalog_lacks():
     """The selector's own guard: a cell whose columns are not yet backfilled is
     BLOCKED, not silently empty and not a crash."""
-    from scripts.select_v3_prototype import _active_cells
+    from composition.pool_v3 import LabelledPool
 
     catalog = with_derived(pd.read_parquet(V3_CATALOG)).head(1)
-    for cell in _active_cells(catalog):
+    for cell in LabelledPool().active_cells(catalog):
         cell.select(catalog)
 
 

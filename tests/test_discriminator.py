@@ -157,14 +157,16 @@ def test_exactly_zero_under_one_candidate_is_undecided_not_robust():
 
 
 def test_the_cap_pulls_a_dominant_lane_back_to_the_policy_share():
+    # only weight RATIOS matter (np.average renormalizes): the cap must pull
+    # hog from 99:1 down to the policy 20:1 against small
     per_lane = _per_lane(hog=(10, 1.0), small=(10, 1.0))
     weights = candidate_weightings(
         per_lane, pd.Series({"hog": 9900, "small": 100}), lane_share_cap=0.2
     )
     capped = weights["pool_share_capped"]
-    assert capped["hog"] == pytest.approx(0.2)
-    assert capped["small"] == pytest.approx(0.01)
-    assert weights["pool_share"]["hog"] == 9900
+    assert capped["hog"] / capped["small"] == pytest.approx(0.2 / 0.01)
+    share = weights["pool_share"]
+    assert share["hog"] / share["small"] == pytest.approx(99.0)
 
 
 def test_tolerance_widens_the_at_zero_band():

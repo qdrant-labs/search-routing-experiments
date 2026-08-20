@@ -4,8 +4,8 @@
 decisive yield). Reuses the shared Qdrant collections + indexer + fusion
 strategies; only the output path (data/v3) and the selection differ.
 
-This is the in-loop labelling step: run select_v3_prototype -> label_routes_v3
--> select_v3_prototype again (the new v3 labels feed the next selection). The
+This is the in-loop labelling step: V3Composition.build -> label_routes_v3
+-> build again (the new v3 labels feed the next selection). The
 actual index+label pass embeds corpora and needs `docker compose up -d`;
 `--plan` reports the workload with no retrieval.
 
@@ -52,7 +52,7 @@ from scripts.label_routes import (
 )
 
 V3_DIR = DATA_DIR / "v3"
-PER_DATASET = DATA_DIR / "route_labels" / "v3_feasibility" / "per_dataset.parquet"
+PER_DATASET = DATA_DIR / "v3" / "per_dataset.parquet"
 V2_LABELS = DATA_DIR / "route_labels" / "labels.parquet"
 DEFAULT_YIELD_FLOOR = 0.05  # keep the "need" size finite when yield is tiny
 

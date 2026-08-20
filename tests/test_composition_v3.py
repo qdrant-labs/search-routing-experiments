@@ -1,18 +1,15 @@
-"""Core-logic checks for the v3 selector prototype: the pure class-assignment
-policy, the closed-form feasibility bound, and the corpus stratum axes."""
+"""Core-logic checks for the v3 composition: the pure class-assignment policy,
+the capped feasibility bound, the two-tier utility draw, and the corpus
+stratum axes."""
 
 import numpy as np
 import pandas as pd
 
-from scripts import select_v3_prototype as sel
-from scripts.select_v3_prototype import (
-    CLASSES,
-    SelectorRecipe,
-    assign_classes,
-    feasible_total,
-)
+from composition.objectives import UtilityObjective
+from composition.pool_v3 import CLASSES, LabelledPool, assign_classes
+from composition.recipe import Recipe
 
-R = SelectorRecipe()
+R = Recipe()
 
 
 def _classes(scores, depth):
@@ -50,16 +47,23 @@ def test_all_zero_and_undecisive():
     assert kind[1] == "undecisive" and cls[1] == ""
 
 
-def _corpus_strata(monkeypatch, tmp_path, qcs: pd.DataFrame, query_ids):
+def test_shallow_tie_is_fake_at_any_score():
+    # sub-ceiling depth-1 tie: all routes missed the one judged doc equally —
+    # the same qrels artifact as the ceiling tie, and now filed the same way
+    kind, cls = _classes([[0.3, 0.3, 0.3], [0.3, 0.3, 0.3]], depth=[1, 3])
+    assert list(kind) == ["fake_tie", "genuine_tie"]
+    assert list(cls) == ["", "hybrid"]
+
+
+def _corpus_strata(tmp_path, qcs: pd.DataFrame, query_ids):
     """_attach_corpus_strata over a synthetic query_corpus_stats file."""
     (tmp_path / "route_labels").mkdir(exist_ok=True)
     qcs.to_parquet(tmp_path / "route_labels" / "query_corpus_stats.parquet")
-    monkeypatch.setattr(sel, "DATA", tmp_path)
     pool = pd.DataFrame({"dataset": ["d"] * len(query_ids), "query_id": query_ids})
-    return sel._attach_corpus_strata(pool)
+    return LabelledPool(data_dir=tmp_path)._attach_corpus_strata(pool)
 
 
-def test_pmi_sentinel_nan_and_absent_stay_separate(monkeypatch, tmp_path):
+def test_pmi_sentinel_nan_and_absent_stay_separate(tmp_path):
     qcs = pd.DataFrame({
         "dataset": ["d"] * 5,
         "query_id": ["1", "2", "3", "4", "5"],
@@ -68,7 +72,7 @@ def test_pmi_sentinel_nan_and_absent_stay_separate(monkeypatch, tmp_path):
         # -1.0 is the "never co-occurs" sentinel; NaN is unmeasurable
         "min_pmi": [-1.0, 0.3, np.nan, -0.5, -1.0],
     })
-    out = _corpus_strata(monkeypatch, tmp_path, qcs, ["1", "2", "3", "4", "5", "99"])
+    out = _corpus_strata(tmp_path, qcs, ["1", "2", "3", "4", "5", "99"])
     assert list(out["corpus_pmi"]) == [
         "never_co_occurs", "co_occurring", "unmeasured",
         "co_occurring", "never_co_occurs", "unknown",
@@ -82,7 +86,7 @@ def test_pmi_sentinel_nan_and_absent_stay_separate(monkeypatch, tmp_path):
     ]
 
 
-def test_idf_edges_are_measured_not_hardcoded(monkeypatch, tmp_path):
+def test_idf_edges_are_measured_not_hardcoded(tmp_path):
     # every value sits above the production p75 (~0.50), so hardcoded edges
     # would collapse the axis to one band; the file's own quartiles split it
     qcs = pd.DataFrame({
@@ -92,7 +96,7 @@ def test_idf_edges_are_measured_not_hardcoded(monkeypatch, tmp_path):
         "oov_share": [0.0] * 4,
         "min_pmi": [0.0] * 4,
     })
-    out = _corpus_strata(monkeypatch, tmp_path, qcs, ["1", "2", "3", "4"])
+    out = _corpus_strata(tmp_path, qcs, ["1", "2", "3", "4"])
     assert list(out["corpus_idf"]) == ["low_idf", "mid_idf", "mid_idf", "high_idf"]
 
 
@@ -105,7 +109,9 @@ def test_feasible_total_uncapped_matches_the_closed_form():
     lane_counts = _counts(
         dense={"a": 3149}, sparse={"a": 1731}, hybrid={"a": 1702},
     )
-    total = feasible_total(lane_counts, (0.45, 0.45, 0.10), lane_share_cap=1.0)
+    total = UtilityObjective.feasible_total(
+        lane_counts, (0.45, 0.45, 0.10), lane_share_cap=1.0
+    )
     assert total == int(1731 / 0.45)
     assert all(round(total * s) <= int(lane_counts[c].sum())
                for c, s in zip(CLASSES, (0.45, 0.45, 0.10)))
@@ -118,8 +124,8 @@ def test_feasible_total_shrinks_when_one_lane_holds_the_supply():
         dense={"a": 500, "b": 500}, hybrid={"a": 200, "b": 200},
         sparse={"big": 900, "s1": 25, "s2": 25, "s3": 25, "s4": 25},
     )
-    uncapped = feasible_total(lane_counts, (0.45, 0.45, 0.10), 1.0)
-    capped = feasible_total(lane_counts, (0.45, 0.45, 0.10), 0.2)
+    uncapped = UtilityObjective.feasible_total(lane_counts, (0.45, 0.45, 0.10), 1.0)
+    capped = UtilityObjective.feasible_total(lane_counts, (0.45, 0.45, 0.10), 0.2)
     assert capped < uncapped
     # and the capped total is actually drawable: no class needs more than its
     # lanes can give under the cap
@@ -148,6 +154,10 @@ def _pool(rows):
     return frame
 
 
+def _select(pool, **recipe_kw):
+    return UtilityObjective(Recipe(**recipe_kw)).select(pool)
+
+
 def test_greedy_recomputes_gain_per_pick():
     # rows 1 and 2 both cover cell X (2-cell rows); row 3 covers only Y.
     # A frozen ordering ranks {1, 2} first and never reaches Y within a
@@ -157,8 +167,7 @@ def test_greedy_recomputes_gain_per_pick():
         {"query_id": "2", "dataset": "b", "route_class": "dense", "cells": {"X", "Z"}},
         {"query_id": "3", "dataset": "c", "route_class": "dense", "cells": {"Y"}},
     ])
-    recipe = SelectorRecipe(target_split=(1.0, 0.0, 0.0), lane_share_cap=1.0)
-    picked = sel.greedy_select(pool, recipe)
+    picked = _select(pool, target_split=(1.0, 0.0, 0.0), target_lane_share=1.0)
     # target = feasible total = 3 here, so instead pin the coverage ORDER:
     covered_first_two = set().union(
         *pool.set_index("query_id").loc[picked["query_id"].iloc[:2], "cells"]
@@ -174,8 +183,7 @@ def test_lane_cap_is_exact_no_escape_row():
         + [{"query_id": f"o{i}", "dataset": f"lane{i}", "route_class": "dense",
             "cells": set()} for i in range(2)]
     )
-    recipe = SelectorRecipe(target_split=(1.0, 0.0, 0.0), lane_share_cap=0.5)
-    picked = sel.greedy_select(pool, recipe)
+    picked = _select(pool, target_split=(1.0, 0.0, 0.0), target_lane_share=0.5)
     counts = picked["dataset"].value_counts()
     target = len(picked)
     assert counts.max() <= max(1, int(np.ceil(0.5 * target)))
@@ -188,10 +196,9 @@ def test_waste_draw_is_budgeted_and_typed():
         + [{"query_id": f"w{i}", "dataset": f"l{i % 3}", "route_class": "",
             "cells": set(), "is_waste": True} for i in range(9)]
     )
-    recipe = SelectorRecipe(
-        target_split=(1.0, 0.0, 0.0), lane_share_cap=1.0, waste_cap=0.5,
+    picked = _select(
+        pool, target_split=(1.0, 0.0, 0.0), target_lane_share=1.0, waste_cap=0.5,
     )
-    picked = sel.greedy_select(pool, recipe)
     waste = picked[picked["route_class"] == "waste"]
     assert len(waste) == picked.attrs["waste_budget"] > 0
     assert set(waste["query_id"]).issubset({f"w{i}" for i in range(9)})
@@ -203,18 +210,10 @@ def test_zero_waste_cap_draws_no_waste():
          {"query_id": "w", "dataset": "a", "route_class": "", "cells": set(),
           "is_waste": True}]
     )
-    picked = sel.greedy_select(
-        pool, SelectorRecipe(target_split=(1.0, 0.0, 0.0), lane_share_cap=1.0)
+    picked = _select(
+        pool, target_split=(1.0, 0.0, 0.0), target_lane_share=1.0, waste_cap=0.0,
     )
     assert not (picked["route_class"] == "waste").any()
-
-
-def test_shallow_tie_is_fake_at_any_score():
-    # sub-ceiling depth-1 tie: all routes missed the one judged doc equally —
-    # the same qrels artifact as the ceiling tie, and now filed the same way
-    kind, cls = _classes([[0.3, 0.3, 0.3], [0.3, 0.3, 0.3]], depth=[1, 3])
-    assert list(kind) == ["fake_tie", "genuine_tie"]
-    assert list(cls) == ["", "hybrid"]
 
 
 def test_two_tier_nesting_and_per_tier_splits():
@@ -228,9 +227,8 @@ def test_two_tier_nesting_and_per_tier_splits():
     )
     pool = _pool(rows)
     pool.loc[pool["route_class"] == "", "certified"] = False
-    picked = sel.greedy_select(
-        pool, SelectorRecipe(target_split=(1.0, 0.0, 0.0), lane_share_cap=1.0,
-                             waste_cap=0.0),
+    picked = _select(
+        pool, target_split=(1.0, 0.0, 0.0), target_lane_share=1.0, waste_cap=0.0,
     )
     cert = picked[picked["certified"]]
     top_up = picked[~picked["certified"]]
@@ -258,9 +256,8 @@ def test_top_up_never_leaks_an_undrawn_certified_row():
             "route_class_any": "sparse", "cells": set()} for i in range(6)]
     )
     pool = _pool(rows)
-    picked = sel.greedy_select(
-        pool, SelectorRecipe(target_split=(0.5, 0.5, 0.0), lane_share_cap=1.0,
-                             waste_cap=0.0),
+    picked = _select(
+        pool, target_split=(0.5, 0.5, 0.0), target_lane_share=1.0, waste_cap=0.0,
     )
     top_up_dense = picked[(~picked["certified"]) & (picked["route_class"] == "dense")]
     assert len(top_up_dense) == 3  # true uncertified supply, not the target of 6
@@ -277,17 +274,16 @@ def test_eval_reserve_is_certified_only_stratified_and_disjoint():
             "route_class_any": "", "cells": set()} for i in range(5)]
     )
     pool = _pool(rows)
-    reserve = sel.eval_reserve(pool, SelectorRecipe(eval_reserve_frac=0.2))
+    reserve = LabelledPool(Recipe(eval_reserve_frac=0.2)).eval_reserve(pool)
     assert len(reserve) == 4  # 20% of each 10-row (lane, class) stratum
     assert reserve["certified"].all()
     remaining = pool.drop(index=reserve.index)
-    picked = sel.greedy_select(
-        remaining,
-        SelectorRecipe(target_split=(0.5, 0.5, 0.0), lane_share_cap=1.0,
-                       waste_cap=0.0),
+    picked = _select(
+        remaining, target_split=(0.5, 0.5, 0.0), target_lane_share=1.0,
+        waste_cap=0.0,
     )
     assert not set(picked.index) & set(reserve.index)
 
 
 def test_waste_default_is_five_percent():
-    assert SelectorRecipe().waste_cap == 0.05
+    assert Recipe().waste_cap == 0.05

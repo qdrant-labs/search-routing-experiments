@@ -1,0 +1,362 @@
+"""The three v3 composition objectives as LAYERS (docs/v3_composition_
+objectives.md): DiversityFloors = hard per-axis marginal constraints,
+UtilityObjective = the sole scalar the draw maximizes, InversionBound =
+representation checked as bounds at build and weighted only at eval."""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pandas as pd
+
+from augmentation.config import AugmentationConfig
+from composition.cellfill import CELL_SLICE, EXHAUSTED, MassCap
+from composition.pool_v3 import CLASSES, CORPUS_AXES
+from composition.recipe import Recipe
+
+GENERATION_ONLY = "generation_only"
+CORRUPTION_SLICE = "corruption"
+SHEET_COLUMNS = ["slice", "floor", "amount", "credit", "missing", "reason"]
+
+
+class DiversityFloors:
+    """Layer 1: what MUST be covered, one floor per marginal axis. Deficits
+    come out tagged by servability — cells and corruption degrees go on the
+    generation sheet, lane gaps are labelling demand, corpus bands have no
+    minter and stay report-only."""
+
+    def __init__(self, recipe: Recipe, cells: tuple) -> None:
+        self._recipe = recipe
+        self._cells = cells
+
+    def marginals(self, selected: pd.DataFrame) -> pd.DataFrame:
+        rows = [
+            {"axis": "cell", "stratum": cell.name,
+             "rows": int(selected["cells"].map(lambda s, n=cell.name: n in s).sum())}
+            for cell in self._cells
+        ]
+        for axis in ("corruption_degree", "dataset", *CORPUS_AXES):
+            for stratum, n in selected[axis].value_counts().items():
+                rows.append({"axis": axis, "stratum": str(stratum), "rows": int(n)})
+        out = pd.DataFrame(rows)
+        out["floor"] = self._recipe.stratum_floor
+        out["met"] = out["rows"] >= self._recipe.stratum_floor
+        return out
+
+    def order_sheet(
+        self, selected: pd.DataFrame, pool: pd.DataFrame, certified_total: int
+    ) -> pd.DataFrame:
+        """The generation demands, in CellFill's exact sheet schema so the
+        augmentation loop runs unchanged: per-cell floors clamped by the
+        K_cap allocation (a breached cap means generation-only — declared,
+        never silently over-drawn), plus the census-rate corruption line."""
+        recipe = self._recipe.model_copy(
+            update={"certified_total": certified_total}
+        )
+        lines = []
+        for cell in self._cells:
+            natural = int(pool["cells"].map(lambda s, n=cell.name: n in s).sum())
+            mass = MassCap(natural, len(pool), recipe)
+            credit = int(
+                selected["cells"].map(lambda s, n=cell.name: n in s).sum()
+            )
+            target = self._recipe.stratum_floor
+            lines.append({
+                "slice": CELL_SLICE, "floor": cell.name,
+                "amount": float(target), "credit": float(credit),
+                "missing": float(max(0, target - credit)),
+                "reason": GENERATION_ONLY if mass.generation_only else EXHAUSTED,
+            })
+        lines.append(self._corruption_line(selected))
+        sheet = pd.DataFrame(lines, columns=SHEET_COLUMNS)
+        return sheet[sheet["missing"] > 0].reset_index(drop=True)
+
+    def _corruption_line(self, selected: pd.DataFrame) -> dict:
+        """Damaged-query demand at the census's own pooled any-span rate —
+        the deficit ships as the LIGHT degree, the minimal damage that
+        reaches 'damaged' status; no hand light/heavy split is invented."""
+        census = pd.read_parquet(AugmentationConfig().paths.corruption_census)
+        rate = float(
+            (census["n_sampled"] * census["any_span"]).sum()
+            / census["n_sampled"].sum()
+        )
+        target = round(rate * len(selected))
+        damaged = int(selected["corruption_degree"].isin(["light", "heavy"]).sum())
+        return {
+            "slice": CORRUPTION_SLICE, "floor": "corruption:light",
+            "amount": float(target), "credit": float(damaged),
+            "missing": float(max(0, target - damaged)), "reason": EXHAUSTED,
+        }
+
+
+class UtilityObjective:
+    """Layer 2, the sole scalar: lane x route coverage with qrels-depth-vetted
+    classes; cells and the other diversity strata only break ties. leg-1
+    labels only — no confidence term exists until its referent, direction and
+    mechanism are written down."""
+
+    def __init__(self, recipe: Recipe) -> None:
+        self._recipe = recipe
+
+    @staticmethod
+    def lane_counts(pool: pd.DataFrame) -> dict[str, pd.Series]:
+        return {
+            c: pool.loc[pool["route_class"] == c, "dataset"].value_counts()
+            for c in CLASSES
+        }
+
+    @staticmethod
+    def capped_supply(counts: pd.Series, target: int, lane_share_cap: float) -> int:
+        """Rows actually drawable toward `target` when no lane may exceed
+        the cap."""
+        if target <= 0:
+            return 0
+        per_lane = max(1, math.ceil(lane_share_cap * target))
+        return int(np.minimum(counts.to_numpy(), per_lane).sum())
+
+    @staticmethod
+    def feasible_total(
+        lane_counts: dict[str, pd.Series],
+        split: tuple[float, float, float],
+        lane_share_cap: float = 1.0,
+    ) -> int:
+        """The largest total whose per-class targets fit the CAPPED supply —
+        computed UNDER the lane cap, so the binding class never silently
+        under-fills while the others fill to uncapped targets."""
+        def fits(total: int) -> bool:
+            return all(
+                UtilityObjective.capped_supply(
+                    lane_counts[c], round(total * s), lane_share_cap
+                ) >= round(total * s)
+                for c, s in zip(CLASSES, split) if s > 0
+            )
+
+        lo, hi = 0, min(
+            int(lane_counts[c].sum() / s) for c, s in zip(CLASSES, split) if s > 0
+        )
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    @staticmethod
+    def draw_class(
+        cand: pd.DataFrame,
+        target: int,
+        per_lane_cap: int,
+        pre_lane: dict[str, int] | None = None,
+        pre_covered: set | None = None,
+    ) -> list:
+        """One class's draw: a TRUE greedy coverage pass (gain recomputed per
+        pick, lane x route exhausted before diversity strata break ties) and
+        then a seeded lane-capped fill; `pre_*` seed lane usage and covered
+        strata with an outer tier's picks so a nested draw respects one
+        shared cap."""
+        rows = [
+            (
+                i,
+                cand.at[i, "dataset"],
+                frozenset(cand.at[i, "cells"])
+                | {("corr", cand.at[i, "corruption_degree"])}
+                | {(ax, cand.at[i, ax]) for ax in CORPUS_AXES},
+            )
+            for i in cand.index
+        ]
+        covered: set = set(pre_covered or ())
+        per_lane: dict[str, int] = dict(pre_lane or {})
+        lanes_drawn: set = set(per_lane)
+        taken: list = []
+
+        def admit(i, ds, diversity) -> None:
+            taken.append(i)
+            per_lane[ds] = per_lane.get(ds, 0) + 1
+            lanes_drawn.add(ds)
+            covered.update(diversity)
+
+        remaining = rows
+        while len(taken) < target:
+            best, best_gain = None, (0, 0)
+            for row in remaining:
+                i, ds, diversity = row
+                if per_lane.get(ds, 0) >= per_lane_cap:
+                    continue
+                gain = (ds not in lanes_drawn, len(diversity - covered))
+                if gain > best_gain:
+                    best, best_gain = row, gain
+            if best is None or best_gain == (0, 0):
+                break  # nothing uncovered remains — the fill takes over
+            admit(*best)
+            remaining = [r for r in remaining if r[0] != best[0]]
+        for i, ds, diversity in remaining:
+            if len(taken) >= target:
+                break
+            if per_lane.get(ds, 0) >= per_lane_cap:
+                continue
+            admit(i, ds, diversity)
+        return taken
+
+    def select(self, pool: pd.DataFrame) -> pd.DataFrame:
+        """The two-tier draw: certified tier first at its own capped feasible
+        max, an UNCERTIFIED-only top-up nested under one shared lane cap so
+        the whole artifact also hits the split, then the dictated waste draw.
+        `certified` is a per-row label-quality flag, never a draw record."""
+        recipe = self._recipe
+        counts_c = self.lane_counts(pool)
+        total_c = self.feasible_total(
+            counts_c, recipe.target_split, recipe.target_lane_share
+        )
+        targets_c = {
+            c: round(total_c * s) for c, s in zip(CLASSES, recipe.target_split)
+        }
+        counts_0 = {
+            c: pool.loc[pool["route_class_any"] == c, "dataset"].value_counts()
+            for c in CLASSES
+        }
+        total_0 = self.feasible_total(
+            counts_0, recipe.target_split, recipe.target_lane_share
+        )
+        targets_0 = {
+            c: round(total_0 * s) for c, s in zip(CLASSES, recipe.target_split)
+        }
+
+        chosen: list = []
+        for c in CLASSES:
+            cand = pool[pool["route_class"] == c].sample(
+                frac=1.0, random_state=recipe.seed
+            )
+            cap_c = max(1, math.ceil(recipe.target_lane_share * targets_c[c]))
+            certified_taken = self.draw_class(cand, targets_c[c], cap_c)
+            chosen.extend(certified_taken)
+
+            pre_lane = pool.loc[certified_taken, "dataset"].value_counts().to_dict()
+            pre_covered = set().union(
+                *(pool.at[i, "cells"] for i in certified_taken), *(
+                    {("corr", pool.at[i, "corruption_degree"]),
+                     *((ax, pool.at[i, ax]) for ax in CORPUS_AXES)}
+                    for i in certified_taken
+                ),
+            ) if certified_taken else set()
+            # UNCERTIFIED rows only: admitting other certified rows of class c
+            # here is how the certified TIER once ended up wider than its own
+            # draw and off-split — the top-up may only add supply the
+            # certified pass could not reach.
+            top_up = pool[
+                (pool["route_class_any"] == c) & ~pool["certified"]
+            ].sample(frac=1.0, random_state=recipe.seed)
+            cap_0 = max(1, math.ceil(recipe.target_lane_share * targets_0[c]))
+            chosen.extend(self.draw_class(
+                top_up, targets_0[c] - len(certified_taken), cap_0,
+                pre_lane=pre_lane, pre_covered=pre_covered,
+            ))
+
+        waste_budget = round(recipe.waste_cap * total_0)
+        waste: list = []
+        if waste_budget > 0:
+            wcand = pool[pool["is_waste"]].sample(
+                frac=1.0, random_state=recipe.seed
+            )
+            wcap = max(1, math.ceil(recipe.target_lane_share * waste_budget))
+            per_lane: dict[str, int] = {}
+            for i in wcand.index:
+                if len(waste) >= waste_budget:
+                    break
+                ds = wcand.at[i, "dataset"]
+                if per_lane.get(ds, 0) >= wcap:
+                    continue
+                waste.append(i)
+                per_lane[ds] = per_lane.get(ds, 0) + 1
+
+        selected = pool.loc[chosen + waste].assign(selected=True)
+        # the artifact's class is the tier-0 one (identical for certified
+        # rows); waste is the typed fourth value and never certified
+        selected["route_class"] = selected["route_class_any"]
+        selected.loc[selected["is_waste"], "route_class"] = "waste"
+        selected.loc[selected["is_waste"], "certified"] = False
+        selected.attrs["waste_budget"] = waste_budget
+        selected.attrs["total_certified"] = total_c
+        selected.attrs["total_tier0"] = total_0
+        return selected
+
+
+class InversionBound:
+    """Layer 3: no archetype over-represented >=K x under ANY plausible source
+    weighting — an outcome check on the composed artifact, distinct from the
+    K_cap ALLOCATION dial. Numbers only; the user freezes K."""
+
+    def __init__(self, recipe: Recipe, cells: tuple) -> None:
+        self._recipe = recipe
+        self._cells = cells
+
+    @staticmethod
+    def weightings(pool_counts: pd.Series, lane_share_cap: float) -> dict[str, pd.Series]:
+        """The plausible-source family. `pool_share` is our own acquisition
+        mix (a candidate, never an anchor — it is proxy-circular as a prior);
+        `lane_uniform` and the capped variant bracket it."""
+        share = pool_counts / pool_counts.sum() if pool_counts.sum() else pool_counts
+        return {
+            "lane_uniform": pd.Series(1.0 / len(pool_counts), index=pool_counts.index),
+            "pool_share": share,
+            "pool_share_capped": (capped := share.clip(upper=lane_share_cap))
+            / capped.sum(),
+        }
+
+    def report(self, selected: pd.DataFrame, pool: pd.DataFrame) -> pd.DataFrame:
+        """Per cell: the selected share against the minimum share any
+        candidate weighting implies. `floor_ratio` is the over-representation
+        the stratum floor itself MANDATES; a cell is floor_forced when the
+        observed ratio does not exceed the mandated one."""
+        weightings = self.weightings(
+            pool["dataset"].value_counts(), self._recipe.target_lane_share
+        )
+        lane_of = pool.groupby("dataset")
+        rows = []
+        floor_share = self._recipe.stratum_floor / max(len(selected), 1)
+        for cell in self._cells:
+            in_cell = pool["cells"].map(lambda s, n=cell.name: n in s)
+            p_lane = lane_of.apply(
+                lambda g, m=in_cell: float(m.loc[g.index].mean()),
+                include_groups=False,
+            )
+            p_w = {
+                name: float((w * p_lane.reindex(w.index).fillna(0.0)).sum())
+                for name, w in weightings.items()
+            }
+            min_p = min(p_w.values())
+            s = float(
+                selected["cells"].map(lambda x, n=cell.name: n in x).mean()
+            )
+            max_ratio = s / min_p if min_p > 0 else np.inf
+            floor_ratio = floor_share / min_p if min_p > 0 else np.inf
+            rows.append({
+                "cell": cell.name, "selected_share": round(s, 6),
+                "min_weighted_share": round(min_p, 6),
+                **{f"share_{k}": round(v, 6) for k, v in p_w.items()},
+                "max_ratio": round(max_ratio, 2) if np.isfinite(max_ratio) else np.inf,
+                "floor_ratio": round(floor_ratio, 2) if np.isfinite(floor_ratio) else np.inf,
+                "floor_forced": bool(max_ratio <= floor_ratio + 1e-9),
+            })
+        return pd.DataFrame(rows).sort_values(
+            "max_ratio", ascending=False
+        ).reset_index(drop=True)
+
+    def realism(self, selected: pd.DataFrame) -> pd.DataFrame:
+        """Row realism: the artifact's corruption-degree mix against the
+        census's own pooled rate — the one external fact about how damaged
+        real traffic is."""
+        census = pd.read_parquet(AugmentationConfig().paths.corruption_census)
+        pooled = float(
+            (census["n_sampled"] * census["any_span"]).sum()
+            / census["n_sampled"].sum()
+        )
+        shares = selected["corruption_degree"].value_counts(normalize=True)
+        return pd.DataFrame([{
+            "selected_damaged_share": round(
+                float(shares.get("light", 0) + shares.get("heavy", 0)), 4
+            ),
+            "census_any_span_rate": round(pooled, 4),
+            "selected_unknown_share": round(float(shares.get("unknown", 0)), 4),
+        }])
