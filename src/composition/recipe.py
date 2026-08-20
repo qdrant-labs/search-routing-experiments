@@ -39,6 +39,32 @@ class Recipe(BaseModel):
             "decisive-row target, and the draw scales with it."
         ),
     )
+    k_cap: float | None = Field(
+        default=None,
+        description=(
+            "Policy cap on a cell's allocation: at most this multiple of the "
+            "cell's own share of the catalog, times `certified_total`. None "
+            "keeps the flat `n_per_route` every cell drew before, so a v2 "
+            "rebuild under default arguments is unchanged."
+        ),
+    )
+    certified_total: int = Field(
+        default=4_247,
+        description=(
+            "The total the cap is a share of: the certified-tier feasible total "
+            "the v3 selector reports at its target split (v3_feasibility/"
+            "report.md, binding class sparse). Measured, not chosen."
+        ),
+    )
+    cell_floor: int = Field(
+        default=25,
+        description=(
+            "Rows below which a cell is no longer a usable stratum (the "
+            "selector's per-dataset floor). A cell whose capped allocation "
+            "cannot reach it has no organic path and is reported "
+            "generation-only."
+        ),
+    )
     target_lane_share: float = Field(
         default=0.2,
         description=(

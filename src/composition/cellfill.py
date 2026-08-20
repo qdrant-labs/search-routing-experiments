@@ -88,12 +88,35 @@ class LaneCap:
         return self.admits(self._counts, self.draw)
 
 
+class MassCap:
+    """The rows one cell may quota per route for its own natural mass: a
+    policy multiple of its share of the catalog, never above the flat quota."""
+
+    def __init__(self, natural: int, pool: int, recipe: Recipe) -> None:
+        self.p_natural = natural / pool if pool else 0.0
+        self.flat = recipe.n_per_route
+        self.floor = recipe.cell_floor
+        self.cap = round(
+            recipe.k_cap * self.p_natural * recipe.certified_total
+        ) if recipe.k_cap is not None else self.flat
+        self.quota = min(self.flat, self.cap)
+
+    @property
+    def generation_only(self) -> bool:
+        """Whether the capped draw, both routes, stays under the floor."""
+        return 2 * self.quota < self.floor
+
+
 class CellPlan(NamedTuple):
     """One cell's draw plus the readout line a human reads before paying
     for labels."""
 
     rows: pd.DataFrame
     cell: str
+    p_natural: float
+    quota: int
+    mass_cap: int
+    generation_only: bool
     lanes: int
     top_lane: str
     top_share: float
@@ -172,7 +195,10 @@ class CellFill:
             return pd.read_parquet(self.selection_path)
         catalog = self._catalog()
         masks = {cell.name: cell.select(catalog).to_numpy() for cell in self._cells}
-        plans = [self._plan(cell, catalog[masks[cell.name]]) for cell in self._cells]
+        plans = [
+            self._plan(cell, catalog[masks[cell.name]], len(catalog))
+            for cell in self._cells
+        ]
         cells = pd.concat([plan.rows for plan in plans], ignore_index=True)
         unclaimed = catalog[~np.logical_or.reduce(list(masks.values()))]
         selection = pd.concat(
@@ -184,7 +210,7 @@ class CellFill:
         selection["floors"] = self._membership(catalog, masks, selection)
         selection["query"] = join_text(selection, self._datasets)
         absent = sorted(set(self._datasets) - set(catalog["dataset"]))
-        self._write(selection, sheet, report, absent)
+        self._write(selection, sheet, report, absent, len(unclaimed) / len(catalog))
         return selection
 
     def admit(
@@ -373,9 +399,12 @@ class CellFill:
         )
         return won.div(per_lane, axis=0).fillna(0.0), pooled
 
-    def _plan(self, cell: ArchetypeCell, sub: pd.DataFrame) -> CellPlan:
+    def _plan(
+        self, cell: ArchetypeCell, sub: pd.DataFrame, pool: int
+    ) -> CellPlan:
         """One cell's reuse draw, labelling queue and readout line."""
-        quota = self._recipe.n_per_route
+        mass = MassCap(len(sub), pool, self._recipe)
+        quota = mass.quota
         counts = sub["dataset"].value_counts()
         cap = LaneCap(counts, 2 * quota, self._recipe.target_lane_share)
         reused = {
@@ -401,6 +430,10 @@ class CellFill:
         return CellPlan(
             rows=rows,
             cell=cell.name,
+            p_natural=round(mass.p_natural, 6),
+            quota=quota,
+            mass_cap=mass.cap,
+            generation_only=mass.generation_only,
             lanes=len(counts),
             top_lane=str(counts.index[0]) if len(counts) else "",
             top_share=_top_share(counts, len(sub)),
@@ -508,7 +541,7 @@ class CellFill:
             "missing": short["augmentation_rows"].to_numpy(dtype=float),
         }).assign(
             slice=CELL_SLICE,
-            amount=float(2 * self._recipe.n_per_route),
+            amount=(2 * short["quota"]).to_numpy(dtype=float),
             reason=EXHAUSTED,
         )[["slice", "floor", "amount", "credit", "missing", "reason"]]
 
@@ -521,13 +554,12 @@ class CellFill:
         assert len(report) == len(self._cells), "readout lost a cell"
         duplicated = selection.duplicated(["cell", "stage", "dataset", "query_id"])
         assert not duplicated.any(), "duplicate (cell, stage, row) selection"
-        quota = self._recipe.n_per_route
         over = report[
-            (report[["reused_dense", "reused_sparse"]] > quota).any(axis=1)
+            report[["reused_dense", "reused_sparse"]].max(axis=1) > report["quota"]
         ]
         assert over.empty, f"cells over quota: {list(over['cell'])}"
         # one row of slack per route: the ledger admits the pick that crosses
-        slack = 2.0 / (2 * quota)
+        slack = 1.0 / report["quota"].clip(lower=1)
         broken = report[
             report["lane_share_achieved"] > report["lane_share_cap"] + slack
         ]
@@ -542,13 +574,14 @@ class CellFill:
         sheet: pd.DataFrame,
         report: pd.DataFrame,
         absent: list[str],
+        uncovered: float,
     ) -> None:
         self._out_dir.mkdir(parents=True, exist_ok=True)
         selection.to_parquet(self.selection_path, index=False)
         sheet.to_parquet(self.order_sheet_path, index=False)
         report.to_parquet(self.report_path, index=False)
         self.summary_path.write_text(
-            self._summary(selection, sheet, report, absent)
+            self._summary(selection, sheet, report, absent, uncovered)
         )
 
     def _summary(
@@ -557,22 +590,34 @@ class CellFill:
         sheet: pd.DataFrame,
         report: pd.DataFrame,
         absent: list[str],
+        uncovered: float,
     ) -> str:
         recipe = self._recipe
         stages = selection["stage"].value_counts()
         queue = selection[selection["stage"] == CANDIDATE]["dataset"]
         lanes = queue.value_counts().rename("queue_rows").to_frame()
         lanes["labelled_before"] = lanes.index.isin(self._rates.index)
+        breached = list(report.loc[report["generation_only"], "cell"])
         return "\n".join([
             "# Cell fill — route-signal quotas\n",
             f"{len(selection):,} rows | "
             f"{selection.groupby(['dataset', 'query_id']).ngroups:,} distinct "
             f"queries | seed={recipe.seed} | n_per_route="
-            f"{recipe.n_per_route} | target lane share "
+            f"{recipe.n_per_route} | k_cap={recipe.k_cap} of "
+            f"{recipe.certified_total:,} | target lane share "
             f"{recipe.target_lane_share:.0%}\n",
             f"reused {stages.get(REUSED, 0):,} | queued for labelling "
             f"{stages.get(CANDIDATE, 0):,} | control "
             f"{stages.get(CONTROL, 0):,}\n",
+            f"uncovered {uncovered:.1%} of the catalog — rows no cell claims, "
+            "so the cap is applied to a partition missing that much mass\n",
+            (
+                f"generation-only {len(breached)} cells — capped below the "
+                f"floor {recipe.cell_floor}, so no organic supply: "
+                f"{', '.join(breached)}\n"
+                if breached else
+                f"every cell's allocation reaches the floor {recipe.cell_floor}\n"
+            ),
             "## Per-cell readout\n",
             _block(report),
             "## Labelling queue by lane\n",
