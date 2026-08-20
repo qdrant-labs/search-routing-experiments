@@ -15,6 +15,12 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from composition.floors import SPAN_PREFIXES
 
 CELLS_PATH = Path(__file__).resolve().parent / "cells.yaml"
+V3_CELLS_PATH = Path(__file__).resolve().parent / "cells_v3.yaml"
+
+ROUTE_TO_CLASS = {"dense_only": "dense", "sparse_only": "sparse", "pure_rrf": "hybrid"}
+"""`predicts` is written in route names by the v2 cells and in class names by the
+v3 cells. Both vocabularies are legal; `predicts_class` is the one a consumer
+compares against a label."""
 
 
 class AxisBand(BaseModel):
@@ -103,7 +109,18 @@ class ArchetypeCell(BaseModel):
     def _banded(self) -> ArchetypeCell:
         if not self.bands:
             raise ValueError(f"{self.name}: no bands, claims every row")
+        unknown = set(self.predicts) - set(ROUTE_TO_CLASS) - set(ROUTE_TO_CLASS.values())
+        if unknown:
+            raise ValueError(f"{self.name}: predicts {sorted(unknown)}, not routes")
         return self
+
+    @property
+    def predicts_class(self) -> frozenset[str]:
+        """`predicts` in class names, whichever vocabulary it was written in —
+        the only form a consumer may compare against a label."""
+        return frozenset(
+            ROUTE_TO_CLASS.get(name, name) for name in self.predicts
+        )
 
     @property
     def bands(self) -> tuple[AxisBand, ...]:
@@ -148,8 +165,20 @@ def _load(path: Path = CELLS_PATH) -> tuple[ArchetypeCell, ...]:
 
 
 CELLS: tuple[ArchetypeCell, ...] = _load()
-"""The cell set, in file order. Routing keys off `name`, so names are the
-stable identifier a shortfall, an order-sheet row and a label all share."""
+"""The v2 cell set, in file order and FROZEN — the quota set the cell fill draws
+against. Routing keys off `name`, so names are the stable identifier a shortfall,
+an order-sheet row and a label all share."""
+
+CELLS_V3: tuple[ArchetypeCell, ...] = (
+    _load(V3_CELLS_PATH) if V3_CELLS_PATH.exists() else ()
+)
+"""Additive cells banding on columns only the v3 catalog carries. Deliberately
+NOT in `CELLS`: that tuple is v2's quota set and its length is asserted."""
+
+_ALL = (*CELLS, *CELLS_V3)
+_duplicated = len(_ALL) - len({cell.name for cell in _ALL})
+if _duplicated:
+    raise ValueError(f"{_duplicated} cell name(s) shared between v2 and v3")
 
 CELL_TO_PREDICATE: dict[str, list[str]] = {
     cell.name: [expr for band in cell.predicate for expr in band.expressions]
@@ -158,12 +187,15 @@ CELL_TO_PREDICATE: dict[str, list[str]] = {
 """Each cell's predicate bands as `column<op>value` strings — the flat view
 consumers read instead of walking `AxisBand` objects."""
 
-CELLS_BY_NAME: dict[str, ArchetypeCell] = {cell.name: cell for cell in CELLS}
-"""Name lookup — the consumers dispatch on `name`, so they resolve through
-this rather than scanning `CELLS`."""
+CELLS_BY_NAME: dict[str, ArchetypeCell] = {cell.name: cell for cell in _ALL}
+"""Name lookup over v2 AND v3 — the consumers dispatch on `name`, so they resolve
+through this rather than scanning `CELLS`. It answers "is this floor a cell?",
+which a v3 cell must also answer yes to or the loop cannot serve it and
+`labels._augmented_rows` files its children as floor-based, skipping the audit
+gate. Wider than `CELLS` on purpose."""
 
 CELL_TO_BANKS: dict[str, frozenset[str]] = {
-    cell.name: cell.required_banks for cell in CELLS
+    cell.name: cell.required_banks for cell in _ALL
 }
 """Each cell's required span banks — the unit a cell name resolves to when an
 operator looks up supply, which is indexed per bank and knows no cell names."""
