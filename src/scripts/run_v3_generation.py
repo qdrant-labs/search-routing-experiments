@@ -1,10 +1,12 @@
 """One explicit driver for a v3 generation round: every stage banners itself
 and prints its inputs, outputs and cost before the next begins. LLM spend
-happens ONLY in stages 4-5; --plan stops before any of it.
+happens ONLY in stages 4-5, plus 5b under --llm-coherence; --plan stops before
+any of it.
 
     poetry run python src/scripts/run_v3_generation.py --plan
     poetry run python src/scripts/run_v3_generation.py 2>&1 | tee generation.log
     poetry run python src/scripts/run_v3_generation.py --synthetic-cap 10
+    poetry run python src/scripts/run_v3_generation.py --llm-coherence
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from dotenv import load_dotenv
 
 from augmentation.campaign import NEEDS_SYNTHESIS, AugmentationCampaign
 from augmentation.config import AugmentationConfig
+from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
 from augmentation.pool import GeneratedPool
@@ -28,7 +31,7 @@ from dataset_registry import DATASETS
 _T0 = time.time()
 
 
-def stage(n: int, title: str) -> None:
+def stage(n: int | str, title: str) -> None:
     now = datetime.now().strftime("%H:%M:%S")
     print(f"\n{'=' * 72}\n== STAGE {n}: {title}   [{now}  +{time.time() - _T0:,.0f}s]\n{'=' * 72}")
 
@@ -139,14 +142,24 @@ def synthetic_rung(
         print(f"[{line.floor}] minted {len(produced)}/{n}")
 
 
-def admit(composer: V3Composition) -> None:
+def coherence(judge: CoherenceJudge) -> None:
+    stage("5b", "COHERENCE JUDGE — one verdict per coherence-gated row: is "
+                "the query one a real user could issue, and does its document "
+                "answer it? (LLM SPEND, 1 call per unjudged row)")
+    counts = judge.run(GeneratedPool().load())
+    print(" ".join(f"{key}={value}" for key, value in counts.items()))
+    print(f"verdicts          : {judge.path}")
+
+
+def admit(composer: V3Composition, judge: CoherenceJudge | None) -> None:
     stage(6, "ADMIT — credit generated rows against the sheet (no spend). "
-             "GATED rows (coherence/audit, d42h) are SKIPPED here by design: "
-             "labelling below still measures them; credit waits on the audit")
+             "GATED rows (d42h) are SKIPPED until their audit passes: "
+             "declaration_audit always waits on the human; coherence rows "
+             "enter here iff stage 5b's judge passed them (--llm-coherence)")
     pool = GeneratedPool().load()
     print(f"generated pool    : {len(pool):,} rows, gates: "
           f"{pool['credit_gate'].fillna('none').value_counts().to_dict()}")
-    composer.admit(pool)
+    composer.admit(pool, coherence_passed=judge.passed() if judge else None)
 
 
 def label_synthetic() -> None:
@@ -218,6 +231,10 @@ def main() -> None:
                         help="skip stage 4 (parent-based operators)")
     parser.add_argument("--skip-synthetic", action="store_true",
                         help="skip stage 5 (the synthetic rung)")
+    parser.add_argument("--llm-coherence", action="store_true",
+                        help="judge the coherence gate with an LLM (stage 5b) "
+                             "and admit the rows it passes; without it the "
+                             "gate waits on the human audit")
     args = parser.parse_args()
 
     load_dotenv()
@@ -227,7 +244,10 @@ def main() -> None:
     before = _tiers(composer)
     sheet_readout(composer)
     loop = _loop(composer)
-    campaign = AugmentationCampaign(loop)
+    judge = CoherenceJudge(
+        loop.engine, config=loop.config, docs=loop.docs, parents=loop.parents
+    ) if args.llm_coherence else None
+    campaign = AugmentationCampaign(loop, judge=judge)
     plan = campaign_plan(campaign)
     if args.plan:
         print("\n--plan: stopping before any spend.")
@@ -236,7 +256,9 @@ def main() -> None:
         parent_generation(campaign)
     if not args.skip_synthetic:
         synthetic_rung(loop, plan, args.synthetic_cap)
-    admit(composer)
+    if judge is not None:
+        coherence(judge)
+    admit(composer, judge)
     label_synthetic()
     catalog_refresh()
     rebuild(composer, before)

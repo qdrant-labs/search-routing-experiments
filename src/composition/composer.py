@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from augmentation.core import CreditGate
 from composition.mini_catalog import mini_catalog
 from composition.objectives import (
     CORRUPTION_SLICE,
@@ -114,7 +115,11 @@ class V3Composition:
 
     # ------------------------------------------------------------------ admit ---
     def admit(
-        self, pool: pd.DataFrame, *, extractor: FeatureExtractor | None = None
+        self,
+        pool: pd.DataFrame,
+        *,
+        extractor: FeatureExtractor | None = None,
+        coherence_passed: set[str] | None = None,
     ) -> pd.DataFrame:
         """Credit generated rows against the hungry sheet lines: cell demands
         re-verified by the cell's own predicate over a mini catalog,
@@ -122,7 +127,7 @@ class V3Composition:
         floor still has to measurably serve it."""
         sheet = pd.read_parquet(self.order_sheet_path)
         selection = pd.read_parquet(self.dataset_path)
-        fresh = self._admissible(pool, selection, sheet)
+        fresh = self._admissible(pool, selection, sheet, coherence_passed)
         if fresh.empty:
             print("v3 admit: nothing admissible in the pool")
             return fresh
@@ -172,13 +177,26 @@ class V3Composition:
 
     @staticmethod
     def _admissible(
-        pool: pd.DataFrame, selection: pd.DataFrame, sheet: pd.DataFrame
+        pool: pd.DataFrame,
+        selection: pd.DataFrame,
+        sheet: pd.DataFrame,
+        coherence_passed: set[str] | None = None,
     ) -> pd.DataFrame:
+        """The pool rows this admission may credit: `coherence_passed` is
+        `CoherenceJudge.passed()`, and None (the default) keeps every gated row
+        waiting on its human audit."""
         rows = pool
         if "credit_gate" in rows.columns:
-            gated = rows["credit_gate"].fillna("none") != "none"
-            if gated.any():
-                print(f"v3 admit: skipping {int(gated.sum())} gated rows (d42h)")
+            gate = rows["credit_gate"].fillna(str(CreditGate.NONE))
+            cleared = gate.eq(CreditGate.COHERENCE_GATE) & rows["query_id"].isin(
+                coherence_passed or set()
+            )
+            gated = gate.ne(str(CreditGate.NONE)) & ~cleared
+            if gated.any() or cleared.any():
+                print(
+                    f"v3 admit: skipping {int(gated.sum())} gated rows (d42h), "
+                    f"{int(cleared.sum())} cleared by the coherence judge"
+                )
             rows = rows[~gated]
         hungry = set(sheet.loc[sheet["missing"] > 0, "floor"])
         return rows[

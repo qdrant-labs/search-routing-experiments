@@ -151,6 +151,12 @@ class AugmentationPaths(BaseModel):
         return self.augmentation_dir / "constructed_docs.parquet"
 
     @property
+    def coherence_audit(self) -> Path:
+        """The coherence gate's verdicts — a row's `credit_gate` is provenance,
+        so the verdict is banked beside the pool rather than into it."""
+        return self.augmentation_dir / "coherence_audit.parquet"
+
+    @property
     def order_sheet(self) -> Path:
         return self.data_dir / "composition" / "order_sheet.parquet"
 
@@ -239,6 +245,14 @@ class AugmentationConfig(BaseModel):
         description=(
             "Audit-sample size for gated floors — sized by the human who "
             "reads the sample, not derived."
+        ),
+    )
+    coherence_pass_rate: float = Field(
+        default=0.9,
+        description=(
+            "Share of a floor's judged coherence pilot that must pass before "
+            "its credit gate opens — a HAND policy dial, not derived from any "
+            "measurement: it says how much incoherence the dataset tolerates."
         ),
     )
     first_generation_only: bool = Field(

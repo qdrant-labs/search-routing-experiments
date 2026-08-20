@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 
 from augmentation.config import FAULT_STREAK, MAX_CHANCES
 from augmentation.core import CreditGate
+from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from composition.cells import CELLS_BY_NAME
 
@@ -62,12 +63,19 @@ class AugmentationCampaign:
     """Plans and runs one pass over every hungry floor."""
 
     def __init__(
-        self, loop: AugmentationLoop, *, pilot_n: int | None = None
+        self,
+        loop: AugmentationLoop,
+        *,
+        pilot_n: int | None = None,
+        judge: CoherenceJudge | None = None,
     ) -> None:
         self.loop = loop
         self.pilot_n = loop.config.pilot_n if pilot_n is None else pilot_n
         """Audit-sample size for gated floors — a named policy value from
         the config, sized by the human who will read the sample."""
+        self.judge = judge
+        """Given one, coherence gates open on ITS verdicts; without one the
+        gates wait on the human audit, which is the default."""
 
     def plan(self) -> pd.DataFrame:
         """The spend, before any call: one row per hungry floor with the
@@ -76,7 +84,13 @@ class AugmentationCampaign:
         rather than `operator_for()` directly, which only ever understood
         bare floor labels ("id:tech") and reports every cell name as unservable
         (2026-08 follow-up)."""
-        staged = self.loop.pool.load()["floor"].value_counts()
+        pool = self.loop.pool.load()
+        staged = pool["floor"].value_counts()
+        opened = (
+            self.judge.open_floors(pool, self.loop.config.coherence_pass_rate)
+            if self.judge is not None
+            else set()
+        )
         rows: list[dict[str, object]] = []
         for line in self.loop.order_sheet().itertuples(index=False):
             try:
@@ -92,7 +106,7 @@ class AugmentationCampaign:
                 cell = line.floor in CELLS_BY_NAME
                 rows.append({
                     "floor": line.floor, "missing": line.missing,
-                    "operator": None, "gate": None,
+                    "operator": None, "gate": None, "gate_state": None,
                     "action": NEEDS_SYNTHESIS if cell else action,
                     "target_rows": 0,
                     "synthetic_rows": math.ceil(float(line.missing)) if cell else 0,
@@ -104,8 +118,11 @@ class AugmentationCampaign:
             planned = self.loop.planned(line.floor, result)
             gate = self.loop.owner(planned).declaration.credit_gate
             want = math.ceil(float(line.missing))
+            gate_state = None
             if gate is not CreditGate.NONE:
-                want = self.pilot_n - int(staged.get(line.floor, 0))
+                gate_state = "open" if line.floor in opened else "held"
+                if gate_state == "held":
+                    want = self.pilot_n - int(staged.get(line.floor, 0))
             if want <= 0:
                 action, target, synthetic = SKIP_STAGED, 0, 0
             else:
@@ -126,6 +143,7 @@ class AugmentationCampaign:
                 "missing": line.missing,
                 "operator": ", ".join(op.declaration.operator for op in planned),
                 "gate": str(gate),
+                "gate_state": gate_state,
                 "action": action,
                 "target_rows": target,
                 "synthetic_rows": synthetic,

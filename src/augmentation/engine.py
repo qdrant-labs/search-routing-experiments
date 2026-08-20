@@ -210,6 +210,14 @@ class Augmenter:
         trust the transcript (d2/d42g)."""
         return verify(text, targets, extractor=self._extractor)
 
+    def ask(self, instruction: str, prompt: str) -> tuple[str | None, Spend]:
+        """One completion, no targets and no submit protocol — for a caller
+        whose answer is a verdict rather than a query text."""
+        return self._single_shot([
+            {"role": "system", "content": instruction},
+            {"role": "user", "content": prompt},
+        ])
+
     def run(
         self,
         instruction: str,

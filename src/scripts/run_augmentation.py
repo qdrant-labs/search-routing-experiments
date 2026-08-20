@@ -18,6 +18,7 @@ import pandas as pd
 
 from augmentation.campaign import AugmentationCampaign
 from augmentation.config import AugmentationPaths
+from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
 from composition.cellfill import CellFill
@@ -62,6 +63,11 @@ def main() -> None:
         help="override the audit-sample size for gated floors (default: config.pilot_n)",
     )
     parser.add_argument(
+        "--llm-coherence", action="store_true",
+        help="open coherence gates from the judge's verdicts "
+             "(coherence_audit.parquet); run_v3_generation writes them",
+    )
+    parser.add_argument(
         "--v3", action="store_true",
         help="run against V3Composition's selection + order sheet instead of CellFill's",
     )
@@ -79,7 +85,11 @@ def main() -> None:
         print(f"{len(produced)} rows -> {loop.pool.path}")
         return
 
-    campaign = AugmentationCampaign(loop, pilot_n=args.pilot_n)
+    campaign = AugmentationCampaign(
+        loop,
+        pilot_n=args.pilot_n,
+        judge=CoherenceJudge(config=loop.config) if args.llm_coherence else None,
+    )
     if args.plan:
         campaign.plan()
         return
