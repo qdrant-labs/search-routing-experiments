@@ -133,7 +133,11 @@ class CellFill:
         catalog_path: Path | None = None,
         labels_path: Path | None = None,
         out_dir: Path | None = None,
+        cells: tuple[ArchetypeCell, ...] = CELLS,
     ) -> None:
+        # the quota set is injectable so a v3 build (own cells, own out_dir)
+        # can never rewrite the v2 artifacts; the default keeps v2 byte-identical
+        self._cells = cells
         self._recipe = recipe if recipe is not None else Recipe()
         self._catalog_path = (
             catalog_path if catalog_path is not None else DEFAULT_CATALOG
@@ -167,8 +171,8 @@ class CellFill:
         if self.selection_path.exists() and not force:
             return pd.read_parquet(self.selection_path)
         catalog = self._catalog()
-        masks = {cell.name: cell.select(catalog).to_numpy() for cell in CELLS}
-        plans = [self._plan(cell, catalog[masks[cell.name]]) for cell in CELLS]
+        masks = {cell.name: cell.select(catalog).to_numpy() for cell in self._cells}
+        plans = [self._plan(cell, catalog[masks[cell.name]]) for cell in self._cells]
         cells = pd.concat([plan.rows for plan in plans], ignore_index=True)
         unclaimed = catalog[~np.logical_or.reduce(list(masks.values()))]
         selection = pd.concat(
@@ -198,7 +202,7 @@ class CellFill:
             # rows, so every row it holds is natural
             selection["provenance"] = NATURAL
         sheet = pd.read_parquet(self.order_sheet_path)
-        cells = {cell.name: cell for cell in CELLS}
+        cells = {cell.name: cell for cell in self._cells}
         fresh = self._admissible(pool, selection, sheet)
         if fresh.empty:
             print("cell admit: nothing admissible in the pool")
@@ -208,7 +212,7 @@ class CellFill:
             fresh,
             extractor or FeatureExtractor(engines=None),
             columns=tuple(
-                {band.column for cell in CELLS for band in cell.bands}
+                {band.column for cell in self._cells for band in cell.bands}
             ),
         )
         admitted, gained = [], {}
@@ -514,7 +518,7 @@ class CellFill:
         report: pd.DataFrame,
         sheet: pd.DataFrame,
     ) -> None:
-        assert len(report) == len(CELLS), "readout lost a cell"
+        assert len(report) == len(self._cells), "readout lost a cell"
         duplicated = selection.duplicated(["cell", "stage", "dataset", "query_id"])
         assert not duplicated.any(), "duplicate (cell, stage, row) selection"
         quota = self._recipe.n_per_route
