@@ -24,6 +24,8 @@ ALL_CELLS = (*CELLS, *CELLS_V3)
 PLAIN_CONCEPT = "coffee grinder"
 PLAIN_QUESTION = "why do cats purr"
 TELEGRAM = "postgres index bloat vacuum"
+SATURATED = "i am trying to find out what the cause of the noise in my car is"
+BARE_NUMBER = "1984"
 COURTESY = "hi there, could you please help me with my order, thanks"
 UUID = "3f9a2c1e-77bb-4c0d-9a11-2f8e6d4b0a55"
 CLEAN = "how do I reset my password"
@@ -372,6 +374,38 @@ CASES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "heavily_damaged_query": (
         (MOJIBAKE, "confgure the â€œsettings"),
         (CLEAN, TYPO),
+    ),
+    # ------------------------------------------------- v3: wave 2 (fable) ---
+    "thin_grammar_short_lookup": (
+        ("who invented velcro", "side effects of melatonin in adults"),
+        (PLAIN_QUESTION, TELEGRAM),
+    ),
+    "short_number_lookup": (
+        ("chapter 7 bankruptcy filing timeline", "route 66 attractions map"),
+        (BARE_NUMBER, PLAIN_CONCEPT),
+    ),
+    "bare_technical_lookup": (
+        ("ERR_CONNECTION_RESET", "useEffect cleanup"),
+        (PLAIN_CONCEPT, PLAIN_QUESTION),
+    ),
+    "content_heavy_midlength": (
+        (
+            "treatment options for chronic lower back pain during pregnancy",
+            "energy efficient window replacement options for older homes in "
+            "cold climates",
+        ),
+        (SATURATED, PLAIN_CONCEPT),
+    ),
+    "spec_bullet_paste": (
+        (
+            "stainless steel kitchen sink undermount double bowl 16 gauge "
+            "brushed finish 32 x 19 inch drain included limited lifetime "
+            "warranty",
+            "product name wireless ergonomic keyboard model number K380 "
+            "connectivity bluetooth battery type AAA compatible windows macos "
+            "android warranty two years color graphite",
+        ),
+        (PLAIN_QUESTION, PASTED),
     ),
 }
 
