@@ -14,7 +14,7 @@ from pathlib import Path
 
 from augmentation.config import AugmentationConfig
 from composition.cellfill import CELL_SLICE, EXHAUSTED
-from composition.pool_v3 import CLASSES, CORPUS_AXES, REUSED
+from composition.pool_v3 import CLASSES, CORPUS_AXES, REUSED, native_mask
 from composition.recipe import Recipe
 
 GENERATION_ONLY = "generation_only"
@@ -51,9 +51,9 @@ class DiversityFloors:
         return out
 
     def class_debt(self, pool: pd.DataFrame) -> pd.DataFrame:
-        """Each class's share of target_total minus the pool's own tier-0
-        supply — the rows only generation can add."""
-        live = pool[~pool["is_waste"]]
+        """Each class's share of target_total minus the pool's NATIVE tier-0
+        supply — the rows only acquisition (labelling or generation) can add."""
+        live = pool[~pool["is_waste"] & native_mask(pool)]
         rows = []
         for name, share in zip(CLASSES, self._recipe.target_split):
             target = round(self._recipe.target_total * share)
@@ -146,7 +146,10 @@ class DiversityFloors:
             / census["n_sampled"].sum()
         )
         target = round(rate * self._recipe.target_total)
-        damaged = int(pool["corruption_degree"].isin(["light", "heavy"]).sum())
+        damaged = int(
+            (pool["corruption_degree"].isin(["light", "heavy"])
+             & native_mask(pool)).sum()
+        )
         owed = float(max(0, target - damaged))
         return {
             "slice": CORRUPTION_SLICE, "floor": "corruption:light",
@@ -190,7 +193,7 @@ class SelectionOrder:
         other-class rows so the order never over-buys."""
         remaining = {r.route_class: float(r.debt) for r in debt.itertuples(index=False)}
         targets = {r.route_class: float(r.target) for r in debt.itertuples(index=False)}
-        live = pool[~pool["is_waste"]]
+        live = pool[~pool["is_waste"] & native_mask(pool)]
         supplied = {
             name: live[live["route_class_any"] == name].groupby("dataset").size()
             for name in CLASSES

@@ -124,6 +124,32 @@ def test_build_appends_the_residual_footer(tmp_path):
     assert footer["expected_sparse"] == 450  # nothing labellable -> full debt
 
 
+def test_v2_origin_rows_are_measurement_never_supply(tmp_path):
+    from composition.objectives import DiversityFloors
+    from composition.pool_v3 import LabelledPool
+
+    (tmp_path / "v3").mkdir()
+    pd.DataFrame({
+        "dataset": ["a"], "query_id": ["old"], "checkable": [True],
+    }).to_parquet(tmp_path / "v3" / "labels_rederived.parquet", index=False)
+    pd.DataFrame({
+        "dataset": ["a"], "query_id": ["new"], "checkable": [True],
+    }).to_parquet(tmp_path / "v3" / "labels.parquet", index=False)
+    labels = LabelledPool(data_dir=tmp_path).labels()
+    assert labels.set_index("query_id")["native"].to_dict() == {
+        "old": False, "new": True,
+    }
+
+    pool = pd.DataFrame({
+        "dataset": ["a"] * 6,
+        "route_class_any": ["dense"] * 6,
+        "is_waste": [False] * 6,
+        "native": [True] * 2 + [False] * 4,
+    })
+    debt = DiversityFloors(RECIPE, ()).class_debt(pool).set_index("route_class")
+    assert debt.at["dense", "supply"] == 2  # the four v2-origin rows measure nothing
+
+
 def test_order_selection_joins_text_dedups_and_caps(tmp_path, monkeypatch):
     import scripts.label_routes_v3 as mod
 

@@ -12,7 +12,7 @@ import pandas as pd
 from composition.cells import CELLS
 from composition.cells_v3 import CELLS_V3
 from composition.compose import DEFAULT_OUT_DIR
-from composition.floors import CORRUPTION_SPANS, with_derived
+from composition.floors import CORRUPTION_SPANS, read_catalog, with_derived
 from composition.recipe import Recipe
 
 DATA = DEFAULT_OUT_DIR.parent
@@ -61,6 +61,13 @@ def assign_classes(oracle, runner, low, winner, depth, recipe: Recipe):
     return kind, cls
 
 
+def native_mask(pool: pd.DataFrame) -> pd.Series:
+    """Which rows are v3 supply; a frame without the column is all supply."""
+    if "native" in pool.columns:
+        return pool["native"].astype(bool)
+    return pd.Series(True, index=pool.index)
+
+
 class LabelledPool:
     """Owns loading, classification, strata attachment, clustering and the
     eval reserve over the labelled rows; consumers read, never re-derive."""
@@ -92,6 +99,10 @@ class LabelledPool:
         base = pd.read_parquet(base_path).astype({"query_id": str})
         if "scored_against" not in base.columns:
             base["scored_against"] = "natural"
+        # the provenance boundary (decided 2026-08-20): re-scored v2 rows
+        # measure yields and priors but are never v3 SUPPLY — the v3 dataset
+        # is composed only from material its own pipeline acquired
+        base["native"] = False
         frames = [base]
         for path, scored_against in (
             (self._data / "v3" / "labels.parquet", "natural"),
@@ -102,7 +113,9 @@ class LabelledPool:
             extra = pd.read_parquet(path).astype({"query_id": str})
             if "scored_against" not in extra.columns:
                 extra["scored_against"] = scored_against
-            frames.append(extra.reindex(columns=base.columns))
+            extra = extra.reindex(columns=base.columns)
+            extra["native"] = True
+            frames.append(extra)
         combined = pd.concat(frames, ignore_index=True)
         combined = combined.drop_duplicates(["dataset", "query_id"], keep="first")
         # checkable is a per-LANE registry fact; additive label frames arrive
@@ -217,9 +230,7 @@ class LabelledPool:
             self.v3_catalog_path if self.v3_catalog_path.exists()
             else self._data / "feature_table" / "catalog.parquet"
         )
-        catalog = with_derived(
-            pd.read_parquet(catalog_path).astype({"query_id": str})
-        )
+        catalog = with_derived(read_catalog(catalog_path))
         idx = catalog.set_index(["dataset", "query_id"]).index
         per_row: list[set] = [set() for _ in range(len(catalog))]
         for cell in self.active_cells(catalog):
@@ -306,7 +317,7 @@ class LabelledPool:
         """The frozen ablation eval set, carved BEFORE any selection: a seeded
         stratified draw over (lane x certified route class), certified rows
         only because every proof runs on the certified tier."""
-        certified = pool[pool["certified"]]
+        certified = pool[pool["certified"] & native_mask(pool)]
         return certified.groupby(
             ["dataset", "route_class"], group_keys=False
         ).sample(
@@ -336,4 +347,5 @@ class LabelledPool:
 
     def selectable(self) -> pd.DataFrame:
         pool = self.frame()
-        return pool.drop(index=self.reserve_exclusion_keys(pool, self.reserve()))
+        kept = pool.drop(index=self.reserve_exclusion_keys(pool, self.reserve()))
+        return kept[native_mask(kept)]

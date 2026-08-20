@@ -21,7 +21,7 @@ from composition.objectives import (
     SelectionOrder,
     UtilityObjective,
 )
-from composition.pool_v3 import CEILING, REUSED, LabelledPool
+from composition.pool_v3 import CEILING, REUSED, LabelledPool, native_mask
 from composition.recipe import Recipe
 from query_taxonomy.features import FeatureExtractor
 
@@ -258,8 +258,12 @@ class V3Composition:
         g = pool.groupby("dataset")
         out = pd.DataFrame({
             "labelled": g.size(),
+            # the lane floor is a v3-dataset constraint, so only NATIVE rows
+            # credit it; `labelled`/blind stats stay all-era (measurement)
             "floor_credit": g.apply(
-                lambda d: int((d["is_decisive"] | d["is_hybrid"]).sum()),
+                lambda d: int(
+                    ((d["is_decisive"] | d["is_hybrid"]) & native_mask(d)).sum()
+                ),
                 include_groups=False,
             ),
             "median_depth": g["depth"].median(),
@@ -359,9 +363,11 @@ class V3Composition:
         lines = [
             "# v3 composition",
             "",
-            f"Pool: {len(pool):,} labelled rows, {pool['dataset'].nunique()} lanes. "
-            f"Target {recipe.target_total:,} rows at split {recipe.target_split}, "
-            f"stratum floor {recipe.stratum_floor}, "
+            f"Pool: {len(pool):,} labelled rows, {pool['dataset'].nunique()} lanes — "
+            f"**{int(native_mask(pool).sum()):,} v3-native (the only supply)**; "
+            f"the re-scored v2 rows measure yields and priors, never the "
+            f"dataset. Target {recipe.target_total:,} rows at split "
+            f"{recipe.target_split}, stratum floor {recipe.stratum_floor}, "
             f"class_margin {recipe.class_margin}, k_cap {recipe.k_cap}.",
             "",
             f"## Generation debt to {recipe.target_total:,}",
