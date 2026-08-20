@@ -4,13 +4,15 @@ EXISTING labelled pool, no retrieval, no generation.
 Proves whether the v3 objectives are jointly reachable and, where they are not,
 what the 200K generation debt is. Route classes: dense/sparse = decisive
 routes_differ wins (margin >= class_margin); hybrid = genuine ties (all_tied
-that is NOT a single-doc ceiling tie) + rrf-decisive. Fake ties + all_zero are
+with >= 2 judged docs — a shallow tie is unreadable at any score) + rrf-decisive. Fake ties + all_zero are
 a capped waste budget. Diversity strata (additive, never crossed): cell,
-corruption degree. Utility coverage: (lane x decisive-route). Per-dataset
+corruption degree, and three marginal corpus-relative axes (corpus_idf,
+corpus_oov, corpus_pmi). Utility coverage: (lane x decisive-route). Per-dataset
 decisive floor is a hard constraint whose shortfall is the headline.
 
-Corpus-stat bands and per-query corpus stats are DEFERRED to Phase A (lane
-identity is the corpus proxy here, via lane x route coverage).
+Corpus-relative values live here as stratum axes and NOT as cells: a cell must
+be recomputable from query text alone, while these need a CorpusIndex and
+differ per collection.
 
     poetry run python src/scripts/select_v3_prototype.py                 # 45/45/10, floor 25
     poetry run python src/scripts/select_v3_prototype.py --floor 50 --split 40 40 20
@@ -23,6 +25,7 @@ data/<dataset>/qrels.parquet. Writes: data/route_labels/v3_feasibility/.
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,10 +34,7 @@ import pandas as pd
 
 from composition.cells import CELLS
 from composition.cells_v3 import CELLS_V3
-from composition.floors import with_derived
-from query_taxonomy.core import Engine
-from query_taxonomy.features import FeatureExtractor
-from query_taxonomy.taxonomy import FeatureGroup
+from composition.floors import CORRUPTION_SPANS, with_derived
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 LABELS = DATA / "route_labels" / "labels.parquet"
@@ -42,23 +42,35 @@ CATALOG = DATA / "feature_table" / "catalog.parquet"
 OUT = DATA / "route_labels" / "v3_feasibility"
 
 V3_CATALOG = DATA / "v3" / "catalog_v3.parquet"
+REDERIVED = DATA / "v3" / "labels_rederived.parquet"
+
+REUSED = "reused"
+"""Selection stage whose rows were drawn BECAUSE they already won a route, so
+their decisive rate is conditioned on the outcome and estimates nothing."""
 
 SCORES = ["score_dense_only", "score_pure_rrf", "score_sparse_only"]
 ROUTE_TO_CLASS = {"dense_only": "dense", "sparse_only": "sparse", "pure_rrf": "hybrid"}
 CLASSES = ("dense", "sparse", "hybrid")
+CORPUS_AXES = ("corpus_idf", "corpus_oov", "corpus_pmi")
+"""Corpus-relative diversity, one MARGINAL axis each — never crossed with each
+other, with cell, or with lane."""
 CEILING = 0.999
+"""Reporting bar only: splits each tie kind into at-ceiling (everyone found a
+judged doc at rank 1) vs all-routes-missed. Classification is depth-based."""
 TOL = 1e-9
 
 
 @dataclass(frozen=True)
 class SelectorRecipe:
-    """Every dial for the prototype. Folds into composition/recipe.py when the
-    selector graduates from prototype."""
+    """Every dial for the prototype; folds into composition/recipe.py when the
+    selector graduates. Fold mapping: lane_share_cap unifies with
+    Recipe.target_lane_share (cap vs measured-against semantics must merge) and
+    seed with Recipe.seed — same numbers, currently different contracts."""
 
     target_split: tuple[float, float, float] = (0.45, 0.45, 0.10)  # dense, sparse, hybrid
     per_dataset_floor: int = 25
     waste_cap: float = 0.0  # dictated waste as a fraction of T (0 = exclude waste)
-    genuine_tie_depth: int = 2  # a tie with < this many judged docs AND at ceiling is fake
+    genuine_tie_depth: int = 2  # a tie with fewer judged docs than this is fake
     class_margin: float = 0.4  # decisive if oracle - runner_up >= this
     lane_share_cap: float = 0.2  # no single dataset > this share of a class
     seed: int = 0
@@ -67,17 +79,19 @@ class SelectorRecipe:
 
 # ---------------------------------------------------------------- classify ---
 def _load_labels() -> pd.DataFrame:
-    """v2 labels PLUS the additive v3 labels (new query_ids from the in-loop
-    labelling), aligned on v2's columns. v2 is read-only; v3 rows fill the
-    label-more gaps. New (dataset, query_id) pairs are disjoint, so a dedup
-    only guards against a re-labelled row (v2 kept)."""
-    v2 = pd.read_parquet(LABELS).astype({"query_id": str})
+    """The re-derived pool (v2's labels rescored from the oracle caches at each
+    lane's current min_relevance) PLUS the additive v3 labels, aligned on the
+    base's columns. Falls back to v2's labels.parquet until the re-derivation has
+    run; both are read-only. New (dataset, query_id) pairs are disjoint, so the
+    dedup only guards against a re-labelled row."""
+    base_path = REDERIVED if REDERIVED.exists() else LABELS
+    base = pd.read_parquet(base_path).astype({"query_id": str})
     v3_path = DATA / "v3" / "labels.parquet"
     if not v3_path.exists():
-        return v2
+        return base
     v3 = pd.read_parquet(v3_path).astype({"query_id": str})
-    v3 = v3.reindex(columns=v2.columns)  # v2-only cols (cell/stage) -> NaN, recomputed
-    combined = pd.concat([v2, v3], ignore_index=True)
+    v3 = v3.reindex(columns=base.columns)  # absent cols (cell/stage) -> NaN
+    combined = pd.concat([base, v3], ignore_index=True)
     return combined.drop_duplicates(["dataset", "query_id"], keep="first")
 
 
@@ -114,7 +128,11 @@ def assign_classes(oracle, runner, low, winner, depth, recipe: SelectorRecipe):
     tied = (~zero) & (oracle - low <= TOL)
     differ = (~zero) & (~tied)
     decisive = differ & (oracle - runner >= recipe.class_margin)
-    fake_tie = tied & (depth < recipe.genuine_tie_depth) & (oracle >= CEILING)
+    # a shallow tie is unreadable at ANY score: at ceiling everyone found the
+    # one judged doc, below it everyone missed it — both are the qrels-depth
+    # artifact. The old rule required the ceiling too, which misfiled 491
+    # all-routes-missed rows as genuine hybrid supply.
+    fake_tie = tied & (depth < recipe.genuine_tie_depth)
     genuine_tie = tied & ~fake_tie
 
     kind = np.full(len(oracle), "undecisive", dtype=object)
@@ -148,79 +166,156 @@ def classify(labels: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------ strata ---
-def _active_cells():
-    """v2 cells, plus the v3 cells when the v3 catalog (their columns) exists."""
-    return (*CELLS, *CELLS_V3) if V3_CATALOG.exists() else CELLS
+def _active_cells(catalog: pd.DataFrame | None = None):
+    """v2 cells, plus the v3 cells when the v3 catalog (their columns) exists.
+    Given a catalog, cells banding on a column it does not carry are dropped —
+    a not-yet-backfilled column is a KeyError in `cell.select`, and the cell is
+    BLOCKED until the build runs, not silently empty."""
+    cells = (*CELLS, *CELLS_V3) if V3_CATALOG.exists() else CELLS
+    if catalog is None:
+        return cells
+    return tuple(
+        cell for cell in cells
+        if all(band.column in catalog.columns for band in cell.bands)
+    )
 
 
 def attach_strata(pool: pd.DataFrame) -> pd.DataFrame:
-    """cell membership (multi) from the catalog + corruption degree from the
-    query text. Lane is `dataset` (the corpus proxy for the prototype)."""
+    """cell membership (multi) and corruption degree from the catalog, corpus
+    axes from query_corpus_stats. Lane is `dataset` (the corpus proxy here)."""
     # v3 catalog (v2 columns + new taxonomy columns) enables the v3 cells; fall
     # back to the v2 catalog + v2 cells when it has not been built yet.
     catalog_path = V3_CATALOG if V3_CATALOG.exists() else CATALOG
     catalog = with_derived(pd.read_parquet(catalog_path).astype({"query_id": str}))
     idx = catalog.set_index(["dataset", "query_id"]).index
     per_row: list[set] = [set() for _ in range(len(catalog))]
-    for cell in _active_cells():
+    for cell in _active_cells(catalog):
         for i in np.nonzero(cell.select(catalog).to_numpy())[0]:
             per_row[i].add(cell.name)
     cell_lookup = dict(zip(idx, per_row))
 
+    # Corruption degree reads the catalog's own derived total — the TOKENIZER-
+    # inclusive pass the v3 damage cells band on. The REGEX+WORDFREQ
+    # re-extraction that used to live here disagreed on 1.0% of rows (0.9% of
+    # degrees), always by seeing FEWER spans, so it demoted 367 damaged rows to
+    # clean: two structures on one axis. Rows the catalog does not carry (the
+    # additive v3 labels) are 'unknown', not 'clean'.
+    spans = dict(zip(idx, catalog[CORRUPTION_SPANS]))
     pool_idx = list(zip(pool["dataset"], pool["query_id"]))
+    total = np.array([spans.get(k, np.nan) for k in pool_idx], dtype=float)
+    degree = pd.cut(total, [-np.inf, 0.5, 1.5, np.inf],
+                    labels=["clean", "light", "heavy"]).astype(object)
     pool = pool.assign(
-        cells=[frozenset(cell_lookup.get(k, set())) for k in pool_idx]
+        cells=[frozenset(cell_lookup.get(k, set())) for k in pool_idx],
+        corruption_spans=total,
+        corruption_degree=pd.Series(degree).fillna("unknown").to_numpy(),
     )
-
-    extractor = FeatureExtractor(engines=(Engine.REGEX, Engine.WORDFREQ))
-    spans = []
-    for text in pool["query"].fillna("").astype(str):
-        res = extractor.resolve(text, groups=[FeatureGroup.CORRUPTION])
-        group = res.spans.get(FeatureGroup.CORRUPTION, {})
-        spans.append(sum(len(v) for v in group.values()))
-    spans_arr = np.array(spans)
-    degree = np.where(spans_arr == 0, "clean", np.where(spans_arr == 1, "light", "heavy"))
-    pool = pool.assign(corruption_spans=spans_arr, corruption_degree=degree)
-    return _attach_corpus_band(pool)
+    return _attach_corpus_strata(pool)
 
 
-def _attach_corpus_band(pool: pd.DataFrame) -> pd.DataFrame:
-    """Per-query corpus-rarity band from query_corpus_stats.parquet (Phase A).
-    Absent until that build runs -> one 'unknown' band (graceful fallback; the
-    lane axis still carries corpus identity via lane x route coverage)."""
+def _attach_corpus_strata(pool: pd.DataFrame) -> pd.DataFrame:
+    """The three marginal corpus axes from query_corpus_stats.parquet: IDF
+    quartile band (edges measured off the file, never hand numbers), OOV
+    presence, PMI sentinel. Rows the file does not carry -> 'unknown'."""
     qcs_path = DATA / "route_labels" / "query_corpus_stats.parquet"
     if not qcs_path.exists():
-        return pool.assign(corpus_band="unknown")
-    qcs = pd.read_parquet(qcs_path).astype({"query_id": str})
-    pool = pool.merge(
-        qcs[["dataset", "query_id", "avg_idf"]], on=["dataset", "query_id"], how="left"
+        return pool.assign(**dict.fromkeys(CORPUS_AXES, "unknown"))
+    qcs = (
+        pd.read_parquet(qcs_path)
+        .astype({"query_id": str})
+        .drop_duplicates(["dataset", "query_id"])
+        .set_index(["dataset", "query_id"])
     )
-    band = pd.cut(
-        pool["avg_idf"], [-0.01, 0.2, 0.4, 1.01],
-        labels=["low_idf", "mid_idf", "high_idf"],
-    ).astype(object)
-    return pool.assign(corpus_band=band.fillna("unknown")).drop(columns="avg_idf")
+    key = pd.MultiIndex.from_arrays([pool["dataset"], pool["query_id"]])
+    absent = ~key.isin(qcs.index)
+    rows = qcs.reindex(key)
+    p25, p75 = qcs["avg_idf"].quantile([0.25, 0.75])
+    idf, oov, pmi = (rows[c].to_numpy() for c in ("avg_idf", "oov_share", "min_pmi"))
+    return pool.assign(
+        corpus_idf=np.where(
+            absent | np.isnan(idf), "unknown",
+            np.where(idf < p25, "low_idf",
+                     np.where(idf >= p75, "high_idf", "mid_idf")),
+        ),
+        corpus_oov=np.where(
+            absent | np.isnan(oov), "unknown",
+            np.where(oov > 0, "has_oov", "in_vocab"),
+        ),
+        # -1.0 exactly is PMIBank's "never co-occurs" sentinel — measured. NaN
+        # is the pair never being measurable at all; binning the two together
+        # would call 698 unmeasured rows a structural miss.
+        corpus_pmi=np.where(
+            absent, "unknown",
+            np.where(np.isnan(pmi), "unmeasured",
+                     np.where(pmi == -1.0, "never_co_occurs", "co_occurring")),
+        ),
+    )
 
 
 # ---------------------------------------------------------------- analytics ---
-def feasible_total(supply: dict[str, int], split: tuple[float, float, float]) -> float:
-    """Closed-form: the largest total whose per-class targets all fit supply."""
-    return min(
-        supply[c] / s for c, s in zip(CLASSES, split) if s > 0
+def _lane_counts(pool: pd.DataFrame) -> dict[str, pd.Series]:
+    return {
+        c: pool.loc[pool["route_class"] == c, "dataset"].value_counts()
+        for c in CLASSES
+    }
+
+
+def _capped_supply(counts: pd.Series, target: int, lane_share_cap: float) -> int:
+    """Rows actually drawable toward `target` when no lane may exceed the cap."""
+    if target <= 0:
+        return 0
+    per_lane = max(1, math.ceil(lane_share_cap * target))
+    return int(np.minimum(counts.to_numpy(), per_lane).sum())
+
+
+def feasible_total(
+    lane_counts: dict[str, pd.Series],
+    split: tuple[float, float, float],
+    lane_share_cap: float = 1.0,
+) -> int:
+    """The largest total whose per-class targets fit the CAPPED supply. The old
+    closed form used raw supply, so the binding class silently under-filled at
+    draw time while the others filled to uncapped targets (clerc alone would
+    have taken 26% of the sparse class); cap=1 recovers the closed form."""
+    def fits(total: int) -> bool:
+        return all(
+            _capped_supply(lane_counts[c], round(total * s), lane_share_cap)
+            >= round(total * s)
+            for c, s in zip(CLASSES, split) if s > 0
+        )
+
+    lo, hi = 0, min(
+        int(lane_counts[c].sum() / s) for c, s in zip(CLASSES, split) if s > 0
     )
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def split_report(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
-    supply = {c: int((pool["route_class"] == c).sum()) for c in CLASSES}
+    lane_counts = _lane_counts(pool)
     rows = []
     for split, name in ((recipe.target_split, "target"), ((0.4, 0.4, 0.2), "40/40/20")):
-        total = feasible_total(supply, split)
+        total = feasible_total(lane_counts, split, recipe.lane_share_cap)
         for c, s in zip(CLASSES, split):
+            target_n = round(total * s)
+            grown = round((total + 1) * s)
             rows.append({
                 "split": name, "class": c, "target_share": s,
-                "supply": supply[c], "feasible_total": round(total),
-                "target_n": round(total * s),
-                "binding": abs(supply[c] / s - total) < 1e-6 if s > 0 else False,
+                "supply": int(lane_counts[c].sum()),
+                "capped_supply": _capped_supply(
+                    lane_counts[c], target_n, recipe.lane_share_cap
+                ),
+                "feasible_total": total,
+                "target_n": target_n,
+                # binding = this class cannot grow with the total
+                "binding": s > 0 and _capped_supply(
+                    lane_counts[c], grown, recipe.lane_share_cap
+                ) < grown,
             })
     return pd.DataFrame(rows)
 
@@ -233,39 +328,70 @@ def per_dataset_report(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFra
         "dense": g.apply(lambda d: int((d["route_class"] == "dense").sum()), include_groups=False),
         "sparse": g.apply(lambda d: int((d["route_class"] == "sparse").sum()), include_groups=False),
         "hybrid": g.apply(lambda d: int((d["route_class"] == "hybrid").sum()), include_groups=False),
+        # rows that credit the floor, counted ONCE: an rrf-decisive row is both
+        # decisive and hybrid, so summing the two columns counts it twice
+        "floor_credit": g.apply(
+            lambda d: int((d["is_decisive"] | d["is_hybrid"]).sum()), include_groups=False
+        ),
     })
     out["floor"] = recipe.per_dataset_floor
-    out["floor_met"] = out["decisive_total"] + out["hybrid"] >= recipe.per_dataset_floor
-    out["floor_gap"] = (recipe.per_dataset_floor - out["decisive_total"] - out["hybrid"]).clip(lower=0)
+    out["floor_met"] = out["floor_credit"] >= recipe.per_dataset_floor
+    out["floor_gap"] = (recipe.per_dataset_floor - out["floor_credit"]).clip(lower=0)
     # single-answer lanes (~1 judged doc/query) structurally cannot yield
     # decisive rows -> their floor is WAIVED, not a generation target.
     out["median_depth"] = g["depth"].median()
     out["single_answer"] = out["median_depth"] <= 1
-    # decisive yield among the rows already labelled: distinguishes an
-    # UNDER-LABELLED lane (good yield, few rows -> label more via Qdrant) from a
-    # genuinely LOW-YIELD one (label more nets nothing -> source better data).
+    # What a FRESH query from this lane is worth: decisive-at-margin only, over
+    # BLIND rows only. Genuine ties are excluded because a hybrid row is not what
+    # a decisive floor buys, and `reused` rows are excluded because they entered
+    # the pool for already having won — including either is what over-predicted
+    # the last campaign by 10x.
+    blind = pool[pool["stage"] != REUSED].groupby("dataset")
+    out["blind_labelled"] = blind.size().reindex(out.index).fillna(0).astype(int)
+    out["blind_decisive"] = (
+        blind["is_decisive"].sum().reindex(out.index).fillna(0).astype(int)
+    )
     out["yield_rate"] = (
-        (out["decisive_total"] + out["hybrid"]) / out["labelled"].clip(lower=1)
-    ).round(2)
+        out["blind_decisive"] / out["blind_labelled"].clip(lower=1)
+    ).round(3)
+    # the bar is the pool's own blind rate, not a hand number: "label more" means
+    # this lane converts fresh labels at least as well as the pool average does
+    pooled = out["blind_decisive"].sum() / max(int(out["blind_labelled"].sum()), 1)
 
     def _action(r) -> str:
         if r["floor_met"]:
             return "ok"
         if r["single_answer"]:
             return "waive (single-answer)"
-        return "label more" if r["yield_rate"] >= 0.15 else "source/deepen"
+        if r["blind_labelled"] == 0:
+            return "unmeasured (no blind rows)"
+        return "label more" if r["yield_rate"] >= pooled else "source/deepen"
 
     out["floor_action"] = out.apply(_action, axis=1)
+    out.attrs["pooled_blind_yield"] = round(pooled, 4)
     return out.sort_values("floor_gap", ascending=False)
 
 
 def tie_zero_report(pool: pd.DataFrame) -> pd.DataFrame:
+    """Ties decomposed by kind AND by ceiling: an at-ceiling tie means every
+    route surfaced a judged doc at rank 1, an all-miss tie means none did —
+    the second is the 'no route answers this' signal, tracked per lane."""
     g = pool.groupby("dataset")
+
+    def n(mask_fn) -> pd.Series:
+        return g.apply(lambda d: int(mask_fn(d).sum()), include_groups=False)
+
     return pd.DataFrame({
-        "all_tied": g.apply(lambda d: int(d["kind"].isin(["fake_tie", "genuine_tie"]).sum()), include_groups=False),
-        "genuine_tie": g.apply(lambda d: int((d["kind"] == "genuine_tie").sum()), include_groups=False),
-        "fake_tie": g.apply(lambda d: int((d["kind"] == "fake_tie").sum()), include_groups=False),
-        "all_zero": g.apply(lambda d: int((d["kind"] == "all_zero").sum()), include_groups=False),
+        "all_tied": n(lambda d: d["kind"].isin(["fake_tie", "genuine_tie"])),
+        "genuine_tie": n(lambda d: d["kind"] == "genuine_tie"),
+        "genuine_all_miss": n(
+            lambda d: (d["kind"] == "genuine_tie") & (d["oracle"] < CEILING)
+        ),
+        "fake_tie": n(lambda d: d["kind"] == "fake_tie"),
+        "fake_all_miss": n(
+            lambda d: (d["kind"] == "fake_tie") & (d["oracle"] < CEILING)
+        ),
+        "all_zero": n(lambda d: d["kind"] == "all_zero"),
     }).sort_values("fake_tie", ascending=False)
 
 
@@ -284,9 +410,10 @@ def stratum_coverage(pool: pd.DataFrame) -> pd.DataFrame:
     for deg, n in dec["corruption_degree"].value_counts().items():
         rows.append({"axis": "corruption", "stratum": deg,
                      "coverable_rows": int(n), "coverable": True})
-    for band, n in dec["corpus_band"].value_counts().items():
-        rows.append({"axis": "corpus_idf", "stratum": str(band),
-                     "coverable_rows": int(n), "coverable": True})
+    for axis in CORPUS_AXES:
+        for band, n in dec[axis].value_counts().items():
+            rows.append({"axis": axis, "stratum": str(band),
+                         "coverable_rows": int(n), "coverable": True})
     lr = dec.groupby(["dataset", "route_class"]).size()
     for (ds, rc), n in lr.items():
         rows.append({"axis": "lane_route", "stratum": f"{ds}:{rc}",
@@ -314,7 +441,7 @@ def shortfalls_200k(split_df: pd.DataFrame, per_ds: pd.DataFrame,
         if r["floor_gap"] > 0:
             act = r["floor_action"]
             rows.append({"scope": "dataset_floor", "key": ds,
-                         "natural_supply": int(r["decisive_total"] + r["hybrid"]),
+                         "natural_supply": int(r["floor_credit"]),
                          "target_200k": recipe.per_dataset_floor,
                          "gap_to_generate": 0 if act.startswith("waive") else int(r["floor_gap"]),
                          "x_under": None,
@@ -323,45 +450,91 @@ def shortfalls_200k(split_df: pd.DataFrame, per_ds: pd.DataFrame,
 
 
 # ----------------------------------------------------------------- selector ---
+def _draw_class(cand: pd.DataFrame, target: int, per_lane_cap: int) -> list:
+    """One class's draw: a TRUE greedy coverage pass (gain recomputed per pick,
+    lane×route exhausted before diversity strata break ties) and then a seeded
+    lane-capped fill. Coverage resets per class, so cell coverage is keyed
+    (cell, class) — a cell covered for dense still earns gain for sparse."""
+    rows = [
+        (
+            i,
+            cand.at[i, "dataset"],
+            frozenset(cand.at[i, "cells"])
+            | {("corr", cand.at[i, "corruption_degree"])}
+            | {(ax, cand.at[i, ax]) for ax in CORPUS_AXES},
+        )
+        for i in cand.index
+    ]
+    covered: set = set()
+    lanes_drawn: set = set()
+    per_lane: dict[str, int] = {}
+    taken: list = []
+
+    def admit(i, ds, diversity) -> None:
+        taken.append(i)
+        per_lane[ds] = per_lane.get(ds, 0) + 1
+        lanes_drawn.add(ds)
+        covered.update(diversity)
+
+    remaining = rows
+    while len(taken) < target:
+        best, best_gain = None, (0, 0)
+        for row in remaining:
+            i, ds, diversity = row
+            if per_lane.get(ds, 0) >= per_lane_cap:
+                continue
+            gain = (ds not in lanes_drawn, len(diversity - covered))
+            if gain > best_gain:
+                best, best_gain = row, gain
+        if best is None or best_gain == (0, 0):
+            break  # nothing uncovered remains — the fill takes over
+        admit(*best)
+        remaining = [r for r in remaining if r[0] != best[0]]
+    for i, ds, diversity in remaining:
+        if len(taken) >= target:
+            break
+        if per_lane.get(ds, 0) >= per_lane_cap:
+            continue
+        admit(i, ds, diversity)
+    return taken
+
+
 def greedy_select(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
-    """Coverage-first draw per class up to the feasible split, lane-capped.
-    Coverage pass (one row per uncovered cell / lane-route) then random fill.
-    Deterministic under seed. Its exhaustion is the shortfall."""
-    supply = {c: int((pool["route_class"] == c).sum()) for c in CLASSES}
-    total = feasible_total(supply, recipe.target_split)
+    """Per class: coverage-first greedy then seeded fill, under the SAME lane
+    cap the feasibility bound used, so the targets are reachable by
+    construction and no escape hatch is needed. The dictated waste draw runs
+    last, typed 'waste' in the artifact. Deterministic under seed."""
+    lane_counts = _lane_counts(pool)
+    total = feasible_total(lane_counts, recipe.target_split, recipe.lane_share_cap)
     targets = {c: round(total * s) for c, s in zip(CLASSES, recipe.target_split)}
 
-    chosen: list[int] = []
-    covered_cells: set = set()
-    covered_flat: set = set()  # lane-route, corruption degree, corpus band
-
-    def _gain(cand: pd.DataFrame, i: int, cls: str) -> int:
-        ds = cand.at[i, "dataset"]
-        flats = {("lr", ds, cls),
-                 ("corr", cand.at[i, "corruption_degree"]),
-                 ("corp", cand.at[i, "corpus_band"])}
-        return len(cand.at[i, "cells"] - covered_cells) + len(flats - covered_flat)
-
+    chosen: list = []
     for c in CLASSES:
-        cand = pool[pool["route_class"] == c].sample(frac=1.0, random_state=recipe.seed)
-        cap = max(1, int(recipe.lane_share_cap * targets[c]))
+        cand = pool[pool["route_class"] == c].sample(
+            frac=1.0, random_state=recipe.seed
+        )
+        cap = max(1, math.ceil(recipe.lane_share_cap * targets[c]))
+        chosen.extend(_draw_class(cand, targets[c], cap))
+
+    waste_budget = round(recipe.waste_cap * total)
+    waste: list = []
+    if waste_budget > 0:
+        wcand = pool[pool["is_waste"]].sample(frac=1.0, random_state=recipe.seed)
+        wcap = max(1, math.ceil(recipe.lane_share_cap * waste_budget))
         per_lane: dict[str, int] = {}
-        taken: list[int] = []
-        order = sorted(cand.index, key=lambda i: -_gain(cand, i, c))
-        for i in order:
-            if len(taken) >= targets[c]:
+        for i in wcand.index:
+            if len(waste) >= waste_budget:
                 break
-            ds = cand.at[i, "dataset"]
-            if per_lane.get(ds, 0) >= cap and len(taken) < targets[c] - 1:
+            ds = wcand.at[i, "dataset"]
+            if per_lane.get(ds, 0) >= wcap:
                 continue
-            taken.append(i)
+            waste.append(i)
             per_lane[ds] = per_lane.get(ds, 0) + 1
-            covered_cells |= cand.at[i, "cells"]
-            covered_flat |= {("lr", ds, c),
-                             ("corr", cand.at[i, "corruption_degree"]),
-                             ("corp", cand.at[i, "corpus_band"])}
-        chosen.extend(taken)
-    return pool.loc[chosen].assign(selected=True)
+
+    selected = pool.loc[chosen + waste].assign(selected=True)
+    selected.loc[selected["is_waste"], "route_class"] = "waste"
+    selected.attrs["waste_budget"] = waste_budget
+    return selected
 
 
 # -------------------------------------------------------------------- write ---
@@ -397,20 +570,26 @@ def write_report(pool: pd.DataFrame, selected: pd.DataFrame,
         "## Verdict",
         f"- Feasible total at target split: **{round(tgt['feasible_total'].iloc[0]):,} rows** "
         f"(binding class: {', '.join(binding) or 'none'}).",
-        f"- Selected: **{len(selected):,} rows**.",
+        f"- Selected: **{len(selected):,} rows** "
+        f"(waste drawn {int((selected['route_class'] == 'waste').sum())} "
+        f"of a dictated budget {selected.attrs.get('waste_budget', 0)}).",
         f"- Per-dataset floor {recipe.per_dataset_floor} unmet by **{n_fail}/{len(per_ds)}** "
         f"({n_label} label-more, {n_source} source/deepen, {n_waive} waive single-answer).",
         f"- Cells with zero decisive supply: **{int((~cov['coverable']).sum())}/{len(cov)}**.",
+        f"- `yield_rate` is decisive-at-margin over BLIND rows (reused excluded); "
+        f"the label-more bar is the pool's own blind yield, "
+        f"**{per_ds.attrs.get('pooled_blind_yield', float('nan')):.1%}**.",
         "",
         "## Class split (target)",
-        tgt[["class", "target_share", "supply", "target_n", "binding"]].to_markdown(index=False),
+        tgt[["class", "target_share", "supply", "capped_supply", "target_n", "binding"]].to_markdown(index=False),
         "",
         "## 200K generation debt (the Phase-B order sheet)",
         shortfalls[shortfalls["scope"] == "class"].to_markdown(index=False),
         "",
         f"## Per-dataset floor shortfalls — {n_label} label-more, "
         f"{n_source} source/deepen, {n_waive} waive",
-        unmet[["labelled", "decisive_total", "hybrid", "floor_gap", "yield_rate", "floor_action"]]
+        unmet[["labelled", "floor_credit", "floor_gap", "blind_labelled",
+               "blind_decisive", "yield_rate", "floor_action"]]
         .head(24).to_markdown(),
         "",
         "## Tie / zero (waste) totals",
