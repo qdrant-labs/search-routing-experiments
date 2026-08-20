@@ -28,6 +28,7 @@ from scripts.select_v3_prototype import (
     OUT,
     V3_CATALOG,
     SelectorRecipe,
+    _cluster_ids,
     _load_labels,
     classify,
 )
@@ -63,24 +64,31 @@ def full_pool() -> pd.DataFrame:
 
 
 def _match_random(
-    pool: pd.DataFrame, contingency: pd.Series, exclude: set[str], seed: int
+    pool: pd.DataFrame,
+    contingency: pd.Series,
+    exclude_clusters: set[str],
+    key_to_cluster: dict[str, str],
+    seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Arm B: for each (dataset, route_class) cell, a random draw of the SAME
-    size drawn from the cell MINUS arm A's own rows (`exclude`) first — a cell
+    size drawn from the cell MINUS every row sharing a near-dup CLUSTER with
+    arm A first — not just row-identical matches, since a cluster-mate is the
+    same signal wearing different characters and is just as forced. A cell
     where arm A already took most or all of the candidate supply otherwise
     forces near-total overlap regardless of how B is drawn (a hypergeometric
     fact, not a randomization bug); only when a cell's free supply is smaller
-    than the count does it reuse an arm A row, and that reuse is counted, not
-    hidden. Returns the draw and a per-cell exhaustion report."""
+    than the count does it reuse an arm-A-clustered row, and that reuse is
+    counted, not hidden. Returns the draw and a per-cell exhaustion report."""
     rng = np.random.default_rng(seed)
     parts, report = [], []
     for (lane, cls), n in contingency.items():
         cell = pool[(pool["dataset"] == lane) & (pool["route_class"] == cls)]
-        free = cell[~_key(cell).isin(exclude)]
+        in_exclude = _key(cell).map(key_to_cluster).isin(exclude_clusters)
+        free = cell[~in_exclude]
         forced = max(0, n - len(free))
         drawn = free.sample(n=min(n, len(free)), random_state=rng.integers(2**31))
         if forced:
-            reused = cell[_key(cell).isin(exclude)].sample(
+            reused = cell[in_exclude].sample(
                 n=forced, random_state=rng.integers(2**31)
             )
             drawn = pd.concat([drawn, reused])
@@ -171,8 +179,11 @@ def main() -> None:
     arm_a = candidate.merge(arm_a_keys, on=["dataset", "query_id"], how="inner")
     assert len(arm_a) == len(arm_a_keys), "arm A keys missing from candidate pool"
     contingency = arm_a.groupby(["dataset", "route_class"]).size()
+
+    key_to_cluster = dict(zip(_key(pool), _cluster_ids(pool)))
+    arm_a_clusters = set(_key(arm_a).map(key_to_cluster))
     arm_b, exhaustion = _match_random(
-        candidate, contingency, set(_key(arm_a)), args.seed_b
+        candidate, contingency, arm_a_clusters, key_to_cluster, args.seed_b
     )
     forced_reuse = int(exhaustion["forced_reuse"].sum())
     exhausted_cells = exhaustion[exhaustion["free_supply"] < exhaustion["drawn"]]
@@ -189,9 +200,10 @@ def main() -> None:
         "endpoint": "paired per-row objective, arm A minus arm B, on eval_reserve",
         "resampling": "lane-cluster bootstrap, resample lanes with replacement",
         "direction": "positive = arm A (selector) beats arm B (disjoint-first random)",
-        "note": "arm B draws disjoint from arm A wherever a cell's free supply "
-                "allows; forced_reuse_rows is the hypergeometric floor no "
-                "randomization can avoid — read alongside the result, not hidden",
+        "note": "arm B draws disjoint from arm A at the near-dup CLUSTER level "
+                "wherever a cell's free supply allows; forced_reuse_rows is the "
+                "hypergeometric floor no randomization can avoid — read "
+                "alongside the result, not hidden",
         "class_margin": 0.4, "seed_a_pool": 0, "seed_b": args.seed_b,
         "n_boot": args.n_boot,
     }
@@ -262,12 +274,6 @@ def main() -> None:
         print(f"Wilcoxon on discordant pairs: p={wilcoxon_p:.4f}")
     print(f"\narm A mean objective: {results['arm_a_mean_objective']:.4f}  |  "
           f"arm B: {results['arm_b_mean_objective']:.4f}")
-    verdict = (
-        "A beats B" if ci_lo > 0 else
-        "B beats A" if ci_hi < 0 else
-        "CI spans zero — not distinguishable at this n"
-    )
-    print(f"\nVERDICT: {verdict}")
     print("\nper-lane mean diff (negative n = low-n, read with caution):")
     print(per_lane.to_string())
     for arm, leak in (("A", results["dup_leak_arm_a"]), ("B", results["dup_leak_arm_b"])):

@@ -239,6 +239,34 @@ def test_two_tier_nesting_and_per_tier_splits():
     assert (picked["route_class"] == "dense").all()
 
 
+def test_top_up_never_leaks_an_undrawn_certified_row():
+    # dense: 10 certified rows in one lane, but sparse's thin certified supply
+    # (2) caps total_c at 4 -> dense's certified target is only 2, leaving 8
+    # certified dense rows undrawn. dense's tier-0 target (8) then exceeds
+    # those 2, so top-up goes looking for 6 more dense rows; only 3 truly
+    # uncertified ones exist. The pre-fix top-up filter
+    # (~index.isin(certified_taken)) would have happily grafted 3 of the 8
+    # undrawn CERTIFIED rows in to make up the shortfall.
+    rows = (
+        [{"query_id": f"cd{i}", "dataset": "d0", "route_class": "dense",
+          "cells": set()} for i in range(10)]
+        + [{"query_id": f"ud{i}", "dataset": "d0", "route_class": "",
+            "route_class_any": "dense", "cells": set()} for i in range(3)]
+        + [{"query_id": f"cs{i}", "dataset": "s0", "route_class": "sparse",
+            "cells": set()} for i in range(2)]
+        + [{"query_id": f"us{i}", "dataset": "s0", "route_class": "",
+            "route_class_any": "sparse", "cells": set()} for i in range(6)]
+    )
+    pool = _pool(rows)
+    picked = sel.greedy_select(
+        pool, SelectorRecipe(target_split=(0.5, 0.5, 0.0), lane_share_cap=1.0,
+                             waste_cap=0.0),
+    )
+    top_up_dense = picked[(~picked["certified"]) & (picked["route_class"] == "dense")]
+    assert len(top_up_dense) == 3  # true uncertified supply, not the target of 6
+    assert set(top_up_dense["query_id"]) == {f"ud{i}" for i in range(3)}
+
+
 def test_eval_reserve_is_certified_only_stratified_and_disjoint():
     rows = (
         [{"query_id": f"a{i}", "dataset": "laneA", "route_class": "dense",

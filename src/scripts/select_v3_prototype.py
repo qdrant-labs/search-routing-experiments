@@ -37,6 +37,7 @@ from composition.cells_v3 import CELLS_V3
 from composition.floors import CORRUPTION_SPANS, with_derived
 
 DATA = Path(__file__).resolve().parent.parent / "data"
+DUP_CLUSTERS = DATA / "route_labels" / "dup_clusters.parquet"
 LABELS = DATA / "route_labels" / "labels.parquet"
 CATALOG = DATA / "feature_table" / "catalog.parquet"
 OUT = DATA / "route_labels" / "v3_feasibility"
@@ -535,6 +536,24 @@ def _draw_class(
     return taken
 
 
+def _cluster_ids(pool: pd.DataFrame) -> pd.Series:
+    """Each row's near-dup cluster id: `dup_clusters.parquet`'s real id where
+    known, else a unique per-row placeholder — rows the file does not cover
+    (the additive campaigns run after it was built) have NO KNOWN relationship,
+    which must never be conflated with knowing they are singletons."""
+    if not DUP_CLUSTERS.exists():
+        return pd.Series(pool.index.astype(str), index=pool.index)
+    dup = pd.read_parquet(DUP_CLUSTERS).astype({"query_id": str})
+    lookup = {
+        (d, q): c for d, q, c in
+        zip(dup["dataset"], dup["query_id"], dup["cluster_id"])
+    }
+    keys = list(zip(pool["dataset"], pool["query_id"]))
+    return pd.Series(
+        [lookup.get(k, f"solo:{k[0]}:{k[1]}") for k in keys], index=pool.index
+    )
+
+
 def eval_reserve(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
     """The frozen ablation eval set, carved BEFORE any selection: a seeded
     stratified draw over (lane x certified route class). Every proof runs on
@@ -543,6 +562,16 @@ def eval_reserve(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
     return certified.groupby(
         ["dataset", "route_class"], group_keys=False
     ).sample(frac=recipe.eval_reserve_frac, random_state=recipe.seed)
+
+
+def reserve_exclusion_keys(pool: pd.DataFrame, reserve: pd.DataFrame) -> pd.Index:
+    """Every row to exclude from selection: the reserve itself, PLUS any row —
+    certified or not — sharing a near-dup cluster with a reserved row. A
+    cluster-mate left in the training pool is a train/eval leak regardless of
+    its own certification, which is why this is wider than `reserve.index`."""
+    cluster = _cluster_ids(pool)
+    reserved_clusters = set(cluster.loc[reserve.index])
+    return pool.index[cluster.isin(reserved_clusters)]
 
 
 def greedy_select(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
@@ -579,8 +608,13 @@ def greedy_select(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
                 for i in certified_taken
             ),
         ) if certified_taken else set()
+        # UNCERTIFIED rows only: `~pool.index.isin(certified_taken)` alone still
+        # admitted OTHER certified rows of class c that just weren't drawn in
+        # the certified pass, which is how the certified TIER ended up wider
+        # than certified_taken and off-split (48/40/11 instead of 45/45/10) —
+        # the top-up must only add supply the certified pass could not reach.
         top_up = pool[
-            (pool["route_class_any"] == c) & ~pool.index.isin(certified_taken)
+            (pool["route_class_any"] == c) & ~pool["certified"]
         ].sample(frac=1.0, random_state=recipe.seed)
         cap_0 = max(1, math.ceil(recipe.lane_share_cap * targets_0[c]))
         chosen.extend(_draw_class(
@@ -750,7 +784,9 @@ def main() -> None:
     labels = _load_labels()
     pool = attach_strata(classify(labels, recipe))
     reserve = eval_reserve(pool, recipe)
-    selectable = pool.drop(index=reserve.index)
+    # excludes reserve's own cluster-mates too, certified or not — a near-dup
+    # twin of a reserved row left in the training pool is a leak regardless
+    selectable = pool.drop(index=reserve_exclusion_keys(pool, reserve))
 
     split_df = split_report(pool, recipe)
     per_ds = per_dataset_report(pool, recipe)
