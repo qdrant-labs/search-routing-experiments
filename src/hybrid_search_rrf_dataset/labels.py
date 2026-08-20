@@ -75,20 +75,30 @@ def route_label(scores: dict[str, float]) -> str | None:
 
 
 def _augmented_rows(
-    pool: pd.DataFrame, wanted: pd.DataFrame, home_lane: str, generation: Generation,
+    pool: pd.DataFrame,
+    wanted: pd.DataFrame,
+    home_lane: str,
+    generation: Generation,
+    *,
+    include_gated: bool = False,
 ) -> pd.DataFrame:
     """This lane's augmentation-pool rows admissible for evaluation: `floor_based`
     unconditionally once ungated, `cell_based` only once `wanted` already admits
     them (SPEC d61). A gated row has no human-audited credit yet regardless of
     generation — the d42h gate applies to both (2026-08-10 fix: `floor_based`
-    originally skipped this check, leaking 240 unaudited rows)."""
+    originally skipped this check, leaking 240 unaudited rows). `include_gated`
+    is the deliberate override for labelling gated rows anyway: a label is a
+    measurement, credit is what the audit gates, and the synthetic rung's rows
+    are unreachable without it — every caller passing True is making the same
+    explicit call the 2026-08-10 batch made."""
     # lazy: composition/__init__ pulls in hybrid_search_rrf_dataset.router, which
     # imports this module — a top-level import here would be circular (same
     # reason augmentation/supply.py's lane_dirs() defers its own).
     from composition.cells import CELLS_BY_NAME
 
     rows = pool[pool["home_lane"] == home_lane]
-    rows = rows[rows["credit_gate"].fillna("none") == "none"]
+    if not include_gated:
+        rows = rows[rows["credit_gate"].fillna("none") == "none"]
     if generation == "floor_based":
         return rows[~rows["floor"].isin(CELLS_BY_NAME)]
     admitted = set(wanted["query_id"].astype(str))
@@ -145,6 +155,7 @@ class RouteLabels:
         qrels: QrelStore | None = None,
         force: bool = False,
         generation: Generation = "cell_based",
+        include_gated: bool = False,
     ) -> pd.DataFrame:
         """Label this dataset's query_ids not already in the artifact, and
         append. Already-labelled query_ids (natural or augmented) are never
@@ -182,7 +193,8 @@ class RouteLabels:
         from augmentation.qrels import AugmentationQrels
 
         aug_rows = _augmented_rows(
-            GeneratedPool(self._aug_paths).load(), wanted, key, generation
+            GeneratedPool(self._aug_paths).load(), wanted, key, generation,
+            include_gated=include_gated,
         )
         if aug_rows.empty:
             eval_dataset, eval_qrels = subset, qrels
