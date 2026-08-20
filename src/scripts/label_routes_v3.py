@@ -59,14 +59,17 @@ DEFAULT_YIELD_FLOOR = 0.05  # keep the "need" size finite when yield is tiny
 
 def label_more_selection(oversample: float = 1.0) -> pd.DataFrame:
     """Additional (dataset, query_id, query) rows to label for the label-more
-    lanes: source queries NOT already in v2 labels, sized to net each lane's
-    floor gap given its decisive yield. The selection RouteLabels reads."""
+    lanes: source queries NOT already labelled in v2 OR a previous v3 campaign,
+    sized to net each lane's floor gap given its decisive yield. The selection
+    RouteLabels reads."""
     per_ds = pd.read_parquet(PER_DATASET)
     label_more = per_ds[per_ds["floor_action"] == "label more"]
-    v2 = pd.read_parquet(V2_LABELS, columns=["dataset", "query_id"]).astype(
-        {"query_id": str}
-    )
-    seen = v2.groupby("dataset")["query_id"].agg(set).to_dict()
+    done = [pd.read_parquet(V2_LABELS, columns=["dataset", "query_id"])]
+    v3_labels = V3_DIR / "labels.parquet"
+    if v3_labels.exists():
+        done.append(pd.read_parquet(v3_labels, columns=["dataset", "query_id"]))
+    labelled = pd.concat(done, ignore_index=True).astype({"query_id": str})
+    seen = labelled.groupby("dataset")["query_id"].agg(set).to_dict()
 
     frames: list[pd.DataFrame] = []
     for dataset, row in label_more.iterrows():

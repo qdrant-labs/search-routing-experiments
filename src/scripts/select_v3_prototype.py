@@ -357,6 +357,7 @@ def per_dataset_report(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFra
     # the bar is the pool's own blind rate, not a hand number: "label more" means
     # this lane converts fresh labels at least as well as the pool average does
     pooled = out["blind_decisive"].sum() / max(int(out["blind_labelled"].sum()), 1)
+    out["fresh_left"] = _fresh_queries_left(out)
 
     def _action(r) -> str:
         if r["floor_met"]:
@@ -365,11 +366,29 @@ def per_dataset_report(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFra
             return "waive (single-answer)"
         if r["blind_labelled"] == 0:
             return "unmeasured (no blind rows)"
-        return "label more" if r["yield_rate"] >= pooled else "source/deepen"
+        if r["yield_rate"] < pooled:
+            return "source/deepen"
+        # good yield but nothing left to label: the lever is spent, not usable
+        return "label more" if r["fresh_left"] > 0 else "exhausted (source/deepen)"
 
     out["floor_action"] = out.apply(_action, axis=1)
     out.attrs["pooled_blind_yield"] = round(pooled, 4)
     return out.sort_values("floor_gap", ascending=False)
+
+
+def _fresh_queries_left(out: pd.DataFrame) -> pd.Series:
+    """Source queries not yet labelled, per lane — 'label more' with zero fresh
+    queries is a dead instruction, and antique reached exactly that state."""
+    from pyarrow.parquet import ParquetFile
+
+    from scripts.label_routes import _source_name
+
+    left = {}
+    for lane in out.index:
+        qpath = DATA / _source_name(str(lane)) / "queries.parquet"
+        total = ParquetFile(qpath).metadata.num_rows if qpath.exists() else 0
+        left[lane] = max(0, total - int(out.at[lane, "labelled"]))
+    return pd.Series(left)
 
 
 def tie_zero_report(pool: pd.DataFrame) -> pd.DataFrame:
