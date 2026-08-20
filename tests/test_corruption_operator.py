@@ -44,6 +44,59 @@ def test_each_perturbation_fires_its_own_detector(perturbation, bank):
     assert bank.compute(damaged), f"{perturbation.kind} left {bank.name} silent"
 
 
+# (query, identifier) — the identifier sits mid-query in some cases (JIRA-4821,
+# JAVA_HOME), so it must be named explicitly rather than inferred from position.
+# Each identifier also contains an accent-eligible char (a/e/i/o/u/c/n) — the
+# UUID's mixed hex/letter runs and v1.2.3's bare "v" do NOT, which is why they
+# were dropped: there is nothing inside them for the guard to have to exclude.
+MOJIBAKE_TRAPS = [
+    ("why does JIRA-4821 keep reopening", "JIRA-4821"),
+    ("explain the hook useEffect", "useEffect"),
+    ("check env value of JAVA_HOME setting", "JAVA_HOME"),
+]
+# Truncate's guarantee differs from Mojibake's: it may legitimately DROP an
+# identifier entirely by cutting before it (nothing wrong with that), so
+# "identifier still present" is the wrong check. The only forbidden outcome is
+# cutting THROUGH it. Both traps need the identifier's trailing _WORD-match
+# segment >= 2 chars, or the pre-existing length guard protects it regardless
+# of this fix (true of the UUID/v1.2.3 cases — verified empirically, dropped).
+TRUNCATE_TRAPS = [
+    ("ticket status for JIRA-4821", "JIRA-4821"),
+    ("explain the hook useEffect", "useEffect"),
+]
+
+
+@pytest.mark.parametrize("query, identifier", MOJIBAKE_TRAPS)
+def test_mojibake_never_touches_a_claimed_identifier(query, identifier):
+    from random import Random
+
+    for seed in range(50):
+        damaged = Mojibake().apply(query, Random(seed))
+        assert identifier in damaged, (
+            f"seed {seed}: {damaged!r} corrupted {identifier!r} in {query!r}"
+        )
+
+
+@pytest.mark.parametrize("query, identifier", TRUNCATE_TRAPS)
+def test_truncate_never_cuts_inside_a_claimed_identifier(query, identifier):
+    from random import Random
+
+    from augmentation.corruption import _claimed_identifier_ranges
+
+    claimed = _claimed_identifier_ranges(query.rstrip())
+    for seed in range(50):
+        damaged = Truncate().apply(query, Random(seed))
+        if damaged == query or not damaged.endswith("..."):
+            continue
+        cut = len(damaged) - 3  # Truncate always appends "..." when it fires
+        assert not any(start < cut < end for start, end in claimed), (
+            f"seed {seed}: cut at {cut} lands inside {identifier!r} in {damaged!r}"
+        )
+        assert damaged == query or identifier not in query[: len(damaged)] or (
+            identifier in damaged
+        ), f"seed {seed}: {damaged!r} cut inside {identifier!r}"
+
+
 def test_degree_adds_spans_over_the_parent_count(corruptor):
     base = corruptor.spans(QUERY)
     for degree in (CorruptionDegree.LIGHT, CorruptionDegree.HEAVY):

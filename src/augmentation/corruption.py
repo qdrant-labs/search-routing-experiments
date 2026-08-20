@@ -60,6 +60,20 @@ def _zipf() -> Callable[..., float]:
     return zipf_frequency
 
 
+def _claimed_identifier_ranges(text: str) -> list[tuple[int, int]]:
+    """Character ranges a structured-identifier bank already claims on this
+    text — the exact string an identifier cell's label and inherited answer
+    key depend on, so no perturbation site may land inside one. Reuses
+    `operators._regex_extractor` (lazy: `operators` imports `CorruptOperator`
+    from this module, so the reverse import must not happen at load time)."""
+    from augmentation.operators import _regex_extractor
+
+    found = _regex_extractor().resolve(
+        text, groups=[FeatureGroup.STRUCTURED_IDENTIFIERS]
+    ).spans.get(FeatureGroup.STRUCTURED_IDENTIFIERS, {})
+    return [(span.start, span.end) for spans in found.values() for span in spans]
+
+
 class CorruptionDegree(StrEnum):
     """How far past its own natural noise a row is pushed, counted in
     detector spans rather than a hand-set character rate."""
@@ -142,7 +156,15 @@ class Mojibake(Perturbation):
     kind = CorruptionKind.ENCODING_ARTIFACT
 
     def apply(self, text: str, rng: Random) -> str:
-        sites = [i for i, char in enumerate(text) if char.lower() in _ACCENTS]
+        # every accent-eligible letter (a/e/i/o/u/c/n) is also a valid hex
+        # digit, so an unguarded site can corrupt a UUID or hex token the
+        # cell's label depends on verbatim
+        claimed = _claimed_identifier_ranges(text)
+        sites = [
+            i for i, char in enumerate(text)
+            if char.lower() in _ACCENTS
+            and not any(start <= i < end for start, end in claimed)
+        ]
         if not sites:
             return text
         i = rng.choice(sites)
@@ -159,10 +181,21 @@ class Truncate(Perturbation):
 
     def apply(self, text: str, rng: Random) -> str:
         stripped = text.rstrip()
-        matches = list(_WORD.finditer(stripped))
-        if not matches or stripped.endswith("..."):
+        if stripped.endswith("..."):
             return text
-        last = matches[-1]
+        claimed = _claimed_identifier_ranges(stripped)
+        # walk back from the true last word past any claimed identifier —
+        # cutting mid-UUID or mid-version-string destroys the answer key.
+        # _WORD matches letters only (no digits), so an identifier's
+        # alphabetic segments can overlap a claimed span without the match
+        # STARTING inside it — a real interval overlap, not a start check.
+        candidates = [
+            m for m in _WORD.finditer(stripped)
+            if not any(start < m.end() and m.start() < end for start, end in claimed)
+        ]
+        if not candidates:
+            return text
+        last = candidates[-1]
         if len(last.group()) < 2:
             return text
         return stripped[: last.start() + rng.randrange(1, len(last.group()))] + "..."
