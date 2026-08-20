@@ -78,6 +78,22 @@ def test_available_key_is_the_dataset_and_query_id_pair(tmp_path):
     assert list(zip(available["dataset"], available["query_id"])) == [("B", "q1")]
 
 
+def test_available_carries_the_derived_span_totals(tmp_path):
+    """Cells band on `derived.*` totals no bank emits, so the parent pool
+    must serve a catalog that already carries them — the missing-column
+    KeyError that killed a campaign plan the first time every cell was
+    hungry."""
+    catalog = pd.DataFrame({
+        "dataset": ["A"], "query_id": ["q1"], "checkable": [True],
+        "structured_identifiers.code_identifier": [2],
+        "structured_identifiers.number": [1],
+    })
+    selection = pd.DataFrame(columns=["dataset", "query_id"])
+    available = _pool(AugmentationPaths(data_dir=tmp_path), catalog, selection).available()
+    assert available["derived.identifier_spans"].tolist() == [3]
+    assert available["derived.corruption_spans"].tolist() == [0]
+
+
 # --------------------------------------------------------------------------
 # reserved()
 # --------------------------------------------------------------------------

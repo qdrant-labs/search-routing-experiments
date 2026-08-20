@@ -48,6 +48,10 @@ class V3Composition:
         self._bound = InversionBound(self._recipe, cells)
 
     @property
+    def catalog_path(self) -> Path:
+        return self._pool.v3_catalog_path
+
+    @property
     def dataset_path(self) -> Path:
         return self._out / "dataset_v3.parquet"
 

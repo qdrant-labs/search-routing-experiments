@@ -18,7 +18,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from augmentation.campaign import NEEDS_SYNTHESIS, AugmentationCampaign
-from augmentation.config import AugmentationConfig, AugmentationPaths
+from augmentation.config import AugmentationConfig
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
 from augmentation.pool import GeneratedPool
@@ -34,8 +34,7 @@ def stage(n: int, title: str) -> None:
 
 
 def _loop(composer: V3Composition) -> AugmentationLoop:
-    paths = AugmentationPaths()
-    catalog = pd.read_parquet(paths.catalog).astype({"query_id": str})
+    catalog = pd.read_parquet(composer.catalog_path).astype({"query_id": str})
     selection = pd.read_parquet(composer.dataset_path).astype({"query_id": str})
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
     return AugmentationLoop(

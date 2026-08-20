@@ -15,7 +15,7 @@ from augmentation.config import AugmentationPaths
 from augmentation.pool import GeneratedPool
 from augmentation.supply import lane_dirs
 from composition.compose import RegistryDataset, join_text
-from composition.floors import identifier_floor_key
+from composition.floors import identifier_floor_key, with_derived
 from query_taxonomy.taxonomy import FeatureGroup
 
 _IDENTIFIERS = f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
@@ -73,7 +73,7 @@ class ParentPool:
         pool: GeneratedPool | None = None,
         paths: AugmentationPaths | None = None,
     ) -> None:
-        self._catalog = catalog
+        self._catalog = with_derived(catalog)
         self._selection = selection
         self._datasets = datasets
         self._paths = paths or AugmentationPaths()

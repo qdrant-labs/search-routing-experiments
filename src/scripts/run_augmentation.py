@@ -26,16 +26,17 @@ from dataset_registry import DATASETS
 
 
 def _loop(v3: bool) -> AugmentationLoop:
-    paths = AugmentationPaths()
-    catalog = pd.read_parquet(paths.catalog).astype({"query_id": str})
     if v3:
         composer = V3Composition()
+        catalog_path = composer.catalog_path
         selection = pd.read_parquet(composer.dataset_path).astype({"query_id": str})
         sheet_path = composer.order_sheet_path
     else:
         fill = CellFill()
+        catalog_path = AugmentationPaths().catalog
         selection = pd.read_parquet(fill.selection_path).astype({"query_id": str})
         sheet_path = fill.order_sheet_path
+    catalog = pd.read_parquet(catalog_path).astype({"query_id": str})
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
     return AugmentationLoop(selection, sheet_path=sheet_path, parents=parents)
 
