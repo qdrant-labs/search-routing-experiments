@@ -140,6 +140,11 @@ def _pool(rows):
         if column not in frame.columns:
             frame[column] = value
     frame["is_waste"] = frame["is_waste"].fillna(False).astype(bool)
+    if "route_class_any" not in frame.columns:
+        frame["route_class_any"] = frame["route_class"]
+    frame["route_class_any"] = frame["route_class_any"].fillna(frame["route_class"])
+    if "certified" not in frame.columns:
+        frame["certified"] = frame["route_class"] != ""
     return frame
 
 
@@ -210,3 +215,51 @@ def test_shallow_tie_is_fake_at_any_score():
     kind, cls = _classes([[0.3, 0.3, 0.3], [0.3, 0.3, 0.3]], depth=[1, 3])
     assert list(kind) == ["fake_tie", "genuine_tie"]
     assert list(cls) == ["", "hybrid"]
+
+
+def test_two_tier_nesting_and_per_tier_splits():
+    # 6 certified dense + 6 uncertified (margin-0 only) dense, one lane each;
+    # sparse/hybrid shares zero so the tier totals are driven by dense alone
+    rows = (
+        [{"query_id": f"c{i}", "dataset": f"l{i}", "route_class": "dense",
+          "cells": set()} for i in range(6)]
+        + [{"query_id": f"u{i}", "dataset": f"m{i}", "route_class": "",
+            "route_class_any": "dense", "cells": set()} for i in range(6)]
+    )
+    pool = _pool(rows)
+    pool.loc[pool["route_class"] == "", "certified"] = False
+    picked = sel.greedy_select(
+        pool, SelectorRecipe(target_split=(1.0, 0.0, 0.0), lane_share_cap=1.0,
+                             waste_cap=0.0),
+    )
+    cert = picked[picked["certified"]]
+    top_up = picked[~picked["certified"]]
+    assert len(cert) == 6 and set(cert["query_id"]) == {f"c{i}" for i in range(6)}
+    assert len(top_up) == 6  # tier-0 total 12, minus the certified 6
+    assert (picked["route_class"] == "dense").all()
+
+
+def test_eval_reserve_is_certified_only_stratified_and_disjoint():
+    rows = (
+        [{"query_id": f"a{i}", "dataset": "laneA", "route_class": "dense",
+          "cells": set()} for i in range(10)]
+        + [{"query_id": f"b{i}", "dataset": "laneB", "route_class": "sparse",
+            "cells": set()} for i in range(10)]
+        + [{"query_id": f"w{i}", "dataset": "laneA", "route_class": "",
+            "route_class_any": "", "cells": set()} for i in range(5)]
+    )
+    pool = _pool(rows)
+    reserve = sel.eval_reserve(pool, SelectorRecipe(eval_reserve_frac=0.2))
+    assert len(reserve) == 4  # 20% of each 10-row (lane, class) stratum
+    assert reserve["certified"].all()
+    remaining = pool.drop(index=reserve.index)
+    picked = sel.greedy_select(
+        remaining,
+        SelectorRecipe(target_split=(0.5, 0.5, 0.0), lane_share_cap=1.0,
+                       waste_cap=0.0),
+    )
+    assert not set(picked.index) & set(reserve.index)
+
+
+def test_waste_default_is_five_percent():
+    assert SelectorRecipe().waste_cap == 0.05

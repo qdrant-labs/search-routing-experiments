@@ -91,6 +91,39 @@ def label_more_selection(oversample: float = 1.0) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def class_supply_selection(spec: dict[str, int | None]) -> pd.DataFrame:
+    """Fresh queries from named lanes for CLASS supply (the sparse ceiling),
+    not floor gaps: lane -> how many to take, None = every fresh query.
+    Ordered by the useful-yield priority, capped where the lane cap makes
+    further labelling wasted spend (clerc past ~16K)."""
+    done = [pd.read_parquet(V2_LABELS, columns=["dataset", "query_id"])]
+    v3_labels = V3_DIR / "labels.parquet"
+    if v3_labels.exists():
+        done.append(pd.read_parquet(v3_labels, columns=["dataset", "query_id"]))
+    labelled = pd.concat(done, ignore_index=True).astype({"query_id": str})
+    seen = labelled.groupby("dataset")["query_id"].agg(set).to_dict()
+
+    frames: list[pd.DataFrame] = []
+    for dataset, take_n in spec.items():
+        qpath = DATA_DIR / _source_name(dataset) / "queries.parquet"
+        if not qpath.exists():
+            print(f"[{dataset}] no queries.parquet — skipped")
+            continue
+        queries = pd.read_parquet(qpath).astype({"query_id": str})
+        if "query" not in queries.columns:
+            queries = queries.rename(columns={"text": "query"})
+        fresh = queries[~queries["query_id"].isin(seen.get(dataset, set()))]
+        take = fresh if take_n is None else fresh.head(take_n)
+        frames.append(
+            take.assign(dataset=dataset, home_lane=dataset)[
+                ["dataset", "query_id", "query", "home_lane"]
+            ]
+        )
+    if not frames:
+        return pd.DataFrame(columns=["dataset", "query_id", "query", "home_lane"])
+    return pd.concat(frames, ignore_index=True)
+
+
 class V3LabelSweep:
     """Index + label the v3 selection into data/v3, reusing shared collections."""
 
@@ -178,9 +211,23 @@ def main() -> None:
     parser.add_argument("--only", nargs="*", default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--oversample", type=float, default=1.0)
+    parser.add_argument(
+        "--supply", nargs="*", default=None, metavar="LANE[=N]",
+        help="class-supply mode: label N fresh queries (default: all) from "
+        "each named lane, instead of the floor-gap selection",
+    )
     args = parser.parse_args()
 
-    selection = label_more_selection(oversample=args.oversample)
+    if args.supply:
+        spec = {
+            (part.split("=", 1)[0]): (
+                int(part.split("=", 1)[1]) if "=" in part else None
+            )
+            for part in args.supply
+        }
+        selection = class_supply_selection(spec)
+    else:
+        selection = label_more_selection(oversample=args.oversample)
     print(f"v3 label-more selection: {len(selection):,} queries across "
           f"{selection['dataset'].nunique()} lanes")
     if selection.empty:

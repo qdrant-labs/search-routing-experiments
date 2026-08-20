@@ -69,7 +69,8 @@ class SelectorRecipe:
 
     target_split: tuple[float, float, float] = (0.45, 0.45, 0.10)  # dense, sparse, hybrid
     per_dataset_floor: int = 25
-    waste_cap: float = 0.0  # dictated waste as a fraction of T (0 = exclude waste)
+    waste_cap: float = 0.05  # dictated waste share of the tier-0 total (decided 2026-08-20)
+    eval_reserve_frac: float = 0.2  # carved BEFORE selection, frozen for every ablation
     genuine_tie_depth: int = 2  # a tie with fewer judged docs than this is fake
     class_margin: float = 0.4  # decisive if oracle - runner_up >= this
     lane_share_cap: float = 0.2  # no single dataset > this share of a class
@@ -149,16 +150,25 @@ def assign_classes(oracle, runner, low, winner, depth, recipe: SelectorRecipe):
 
 
 def classify(labels: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
-    """Attach oracle/margin/depth and the row's route class + kind."""
+    """Attach oracle/margin/depth and BOTH tiers' route classes: `route_class`
+    at the certified margin, `route_class_any` at margin 0 (bare routes_differ).
+    The winner is the argmax either way, so a certified row's two classes agree
+    — which is what makes the tiers nested rather than parallel."""
     ordered = np.sort(labels[SCORES].to_numpy(), axis=1)
     oracle, runner, low = ordered[:, -1], ordered[:, -2], ordered[:, 0]
     winner = labels[SCORES].idxmax(axis=1).str.replace("score_", "").to_numpy()
     depth = _qrels_depth(labels)
     kind, cls = assign_classes(oracle, runner, low, winner, depth, recipe)
+    _, cls_any = assign_classes(
+        oracle, runner, low, winner, depth,
+        SelectorRecipe(class_margin=0.0, genuine_tie_depth=recipe.genuine_tie_depth),
+    )
 
     return labels.assign(
         oracle=oracle, margin=oracle - runner, depth=depth,
         winner=winner, kind=kind, route_class=cls,
+        route_class_any=cls_any,
+        certified=np.isin(cls, CLASSES),
         is_decisive=np.isin(cls, CLASSES) & (kind != "genuine_tie"),
         is_hybrid=cls == "hybrid",
         is_waste=np.isin(kind, ["fake_tie", "all_zero"]),
@@ -469,11 +479,18 @@ def shortfalls_200k(split_df: pd.DataFrame, per_ds: pd.DataFrame,
 
 
 # ----------------------------------------------------------------- selector ---
-def _draw_class(cand: pd.DataFrame, target: int, per_lane_cap: int) -> list:
+def _draw_class(
+    cand: pd.DataFrame,
+    target: int,
+    per_lane_cap: int,
+    pre_lane: dict[str, int] | None = None,
+    pre_covered: set | None = None,
+) -> list:
     """One class's draw: a TRUE greedy coverage pass (gain recomputed per pick,
     lane×route exhausted before diversity strata break ties) and then a seeded
     lane-capped fill. Coverage resets per class, so cell coverage is keyed
-    (cell, class) — a cell covered for dense still earns gain for sparse."""
+    (cell, class); `pre_*` seed the lane usage and covered strata with an outer
+    tier's picks so a nested draw respects one shared cap."""
     rows = [
         (
             i,
@@ -484,9 +501,9 @@ def _draw_class(cand: pd.DataFrame, target: int, per_lane_cap: int) -> list:
         )
         for i in cand.index
     ]
-    covered: set = set()
-    lanes_drawn: set = set()
-    per_lane: dict[str, int] = {}
+    covered: set = set(pre_covered or ())
+    per_lane: dict[str, int] = dict(pre_lane or {})
+    lanes_drawn: set = set(per_lane)
     taken: list = []
 
     def admit(i, ds, diversity) -> None:
@@ -518,24 +535,60 @@ def _draw_class(cand: pd.DataFrame, target: int, per_lane_cap: int) -> list:
     return taken
 
 
+def eval_reserve(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
+    """The frozen ablation eval set, carved BEFORE any selection: a seeded
+    stratified draw over (lane x certified route class). Every proof runs on
+    the certified tier, so the reserve is certified rows only."""
+    certified = pool[pool["certified"]]
+    return certified.groupby(
+        ["dataset", "route_class"], group_keys=False
+    ).sample(frac=recipe.eval_reserve_frac, random_state=recipe.seed)
+
+
 def greedy_select(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
-    """Per class: coverage-first greedy then seeded fill, under the SAME lane
-    cap the feasibility bound used, so the targets are reachable by
-    construction and no escape hatch is needed. The dictated waste draw runs
-    last, typed 'waste' in the artifact. Deterministic under seed."""
-    lane_counts = _lane_counts(pool)
-    total = feasible_total(lane_counts, recipe.target_split, recipe.lane_share_cap)
-    targets = {c: round(total * s) for c, s in zip(CLASSES, recipe.target_split)}
+    """The two-tier draw. Certified tier first (margin-certified classes, its
+    own capped feasible max, 45/45/10); then the tier-0 top-up per class from
+    margin-0 rows, nested under one shared lane cap so the WHOLE artifact also
+    hits the split at ITS capped feasible max; then the dictated waste draw.
+    `certified` is a per-row label-quality flag, never a draw record."""
+    counts_c = _lane_counts(pool)
+    total_c = feasible_total(counts_c, recipe.target_split, recipe.lane_share_cap)
+    targets_c = {c: round(total_c * s) for c, s in zip(CLASSES, recipe.target_split)}
+
+    counts_0 = {
+        c: pool.loc[pool["route_class_any"] == c, "dataset"].value_counts()
+        for c in CLASSES
+    }
+    total_0 = feasible_total(counts_0, recipe.target_split, recipe.lane_share_cap)
+    targets_0 = {c: round(total_0 * s) for c, s in zip(CLASSES, recipe.target_split)}
 
     chosen: list = []
     for c in CLASSES:
         cand = pool[pool["route_class"] == c].sample(
             frac=1.0, random_state=recipe.seed
         )
-        cap = max(1, math.ceil(recipe.lane_share_cap * targets[c]))
-        chosen.extend(_draw_class(cand, targets[c], cap))
+        cap_c = max(1, math.ceil(recipe.lane_share_cap * targets_c[c]))
+        certified_taken = _draw_class(cand, targets_c[c], cap_c)
+        chosen.extend(certified_taken)
 
-    waste_budget = round(recipe.waste_cap * total)
+        pre_lane = pool.loc[certified_taken, "dataset"].value_counts().to_dict()
+        pre_covered = set().union(
+            *(pool.at[i, "cells"] for i in certified_taken), *(
+                {("corr", pool.at[i, "corruption_degree"]),
+                 *((ax, pool.at[i, ax]) for ax in CORPUS_AXES)}
+                for i in certified_taken
+            ),
+        ) if certified_taken else set()
+        top_up = pool[
+            (pool["route_class_any"] == c) & ~pool.index.isin(certified_taken)
+        ].sample(frac=1.0, random_state=recipe.seed)
+        cap_0 = max(1, math.ceil(recipe.lane_share_cap * targets_0[c]))
+        chosen.extend(_draw_class(
+            top_up, targets_0[c] - len(certified_taken), cap_0,
+            pre_lane=pre_lane, pre_covered=pre_covered,
+        ))
+
+    waste_budget = round(recipe.waste_cap * total_0)
     waste: list = []
     if waste_budget > 0:
         wcand = pool[pool["is_waste"]].sample(frac=1.0, random_state=recipe.seed)
@@ -551,23 +604,72 @@ def greedy_select(pool: pd.DataFrame, recipe: SelectorRecipe) -> pd.DataFrame:
             per_lane[ds] = per_lane.get(ds, 0) + 1
 
     selected = pool.loc[chosen + waste].assign(selected=True)
+    # the artifact's class is the tier-0 one (identical for certified rows);
+    # waste is the typed fourth value and never certified
+    selected["route_class"] = selected["route_class_any"]
     selected.loc[selected["is_waste"], "route_class"] = "waste"
+    selected.loc[selected["is_waste"], "certified"] = False
     selected.attrs["waste_budget"] = waste_budget
+    selected.attrs["total_certified"] = total_c
+    selected.attrs["total_tier0"] = total_0
     return selected
 
 
 # -------------------------------------------------------------------- write ---
+def _sidecar(recipe: SelectorRecipe, selected: pd.DataFrame,
+             reserve: pd.DataFrame) -> dict[str, object]:
+    """What this artifact was built from — the record no earlier v3 artifact
+    carried, which is how a campaign once ran against a report that no longer
+    existed."""
+    import hashlib
+    import subprocess
+    from dataclasses import asdict
+    from datetime import UTC, datetime
+
+    def rev(spec: str) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", spec], capture_output=True, text=True,
+            cwd=Path(__file__).resolve().parent.parent.parent,
+        ).stdout.strip()
+
+    inputs = {}
+    for path in (REDERIVED, DATA / "v3" / "labels.parquet", V3_CATALOG,
+                 DATA / "route_labels" / "query_corpus_stats.parquet"):
+        if path.exists():
+            inputs[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    tiers = selected["certified"].value_counts().to_dict()
+    return {
+        "built_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        "git_head": rev("HEAD"),
+        "query_taxonomy": rev("HEAD:src/query-taxonomy"),
+        "recipe": asdict(recipe),
+        "rows": len(selected),
+        "certified": int(tiers.get(True, 0)),
+        "uncertified": int(tiers.get(False, 0)),
+        "eval_reserve_rows": len(reserve),
+        "inputs_sha256_16": inputs,
+    }
+
+
 def write_report(pool: pd.DataFrame, selected: pd.DataFrame,
                  split_df, per_ds, tie_zero, coverage, shortfalls,
-                 recipe: SelectorRecipe) -> None:
+                 recipe: SelectorRecipe, reserve: pd.DataFrame) -> None:
+    import json
+
     OUT.mkdir(parents=True, exist_ok=True)
     split_df.to_parquet(OUT / "split_achieved.parquet", index=False)
     per_ds.to_parquet(OUT / "per_dataset.parquet")
     tie_zero.to_parquet(OUT / "tie_zero.parquet")
     coverage.to_parquet(OUT / "stratum_coverage.parquet", index=False)
     shortfalls.to_parquet(OUT / "shortfalls_200k.parquet", index=False)
-    selected[["dataset", "query_id", "route_class"]].to_parquet(
+    selected[["dataset", "query_id", "route_class", "certified"]].to_parquet(
         OUT / "selected.parquet", index=False
+    )
+    reserve[["dataset", "query_id", "route_class"]].to_parquet(
+        OUT / "eval_reserve.parquet", index=False
+    )
+    (OUT / "selected.provenance.json").write_text(
+        json.dumps(_sidecar(recipe, selected, reserve), indent=2) + "\n"
     )
 
     tgt = split_df[split_df["split"] == "target"]
@@ -589,9 +691,13 @@ def write_report(pool: pd.DataFrame, selected: pd.DataFrame,
         "## Verdict",
         f"- Feasible total at target split: **{round(tgt['feasible_total'].iloc[0]):,} rows** "
         f"(binding class: {', '.join(binding) or 'none'}).",
-        f"- Selected: **{len(selected):,} rows** "
-        f"(waste drawn {int((selected['route_class'] == 'waste').sum())} "
-        f"of a dictated budget {selected.attrs.get('waste_budget', 0)}).",
+        f"- Selected: **{len(selected):,} rows** — certified tier "
+        f"{int(selected['certified'].sum()):,}, uncertified top-up "
+        f"{int((~selected['certified'] & (selected['route_class'] != 'waste')).sum()):,}, "
+        f"waste {int((selected['route_class'] == 'waste').sum())} of a dictated "
+        f"budget {selected.attrs.get('waste_budget', 0)}.",
+        f"- Eval reserve (frozen BEFORE selection, certified rows only): "
+        f"**{len(reserve):,} rows**, excluded from every tier.",
         f"- Per-dataset floor {recipe.per_dataset_floor} unmet by **{n_fail}/{len(per_ds)}** "
         f"({n_label} label-more, {n_source} source/deepen, {n_waive} waive single-answer).",
         f"- Cells with zero decisive supply: **{int((~cov['coverable']).sum())}/{len(cov)}**.",
@@ -643,16 +749,18 @@ def main() -> None:
 
     labels = _load_labels()
     pool = attach_strata(classify(labels, recipe))
+    reserve = eval_reserve(pool, recipe)
+    selectable = pool.drop(index=reserve.index)
 
     split_df = split_report(pool, recipe)
     per_ds = per_dataset_report(pool, recipe)
     tie_zero = tie_zero_report(pool)
     coverage = stratum_coverage(pool)
     shortfalls = shortfalls_200k(split_df, per_ds, pool, recipe)
-    selected = greedy_select(pool, recipe)
+    selected = greedy_select(selectable, recipe)
 
     write_report(pool, selected, split_df, per_ds, tie_zero, coverage,
-                 shortfalls, recipe)
+                 shortfalls, recipe, reserve)
     print((OUT / "report.md").read_text())
     print(f"\nartifacts -> {OUT}")
 
