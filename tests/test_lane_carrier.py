@@ -120,14 +120,15 @@ def test_synthesize_lane_rejects_dups_and_verbatim(tmp_path):
     assert loop.qrels.load().empty
 
 
-def test_lane_minted_selection_filters(tmp_path, monkeypatch):
+def test_lane_minted_selection_honours_verdicts_and_the_sample(tmp_path, monkeypatch):
     import scripts.label_routes_v3 as mod
 
     frame = pd.DataFrame({
-        "query_id": ["lane-a-0", "lane-a-1", "lane-a-2", "aug-x-1"],
-        "query": ["one", "two", "three", "four"],
-        "operator": ["lane_synthesize"] * 3 + ["inject"],
-        "home_lane": ["a"] * 4,
+        "query_id": [f"lane-a-{i}" for i in range(34)] + ["aug-x-1"],
+        "query": ["fine query"] * 32
+        + ["I cannot generate a query for this document", "unjudged ok", "four"],
+        "operator": ["lane_synthesize"] * 34 + ["inject"],
+        "home_lane": ["a"] * 35,
     })
 
     class FakePool:
@@ -141,17 +142,34 @@ def test_lane_minted_selection_filters(tmp_path, monkeypatch):
     pd.DataFrame({"dataset": ["a"], "query_id": ["lane-a-1"]}).to_parquet(
         tmp_path / "v3" / "labels.parquet", index=False
     )
+    # 30 judged rows = the sample (29 pass, 1 fail -> 96.7% >= 0.9 bar);
+    # rows 32/33 unjudged (a refusal and a clean one); row 31 judged FAIL
+    audit = pd.DataFrame({
+        "query_id": [f"lane-a-{i}" for i in range(31)],
+        "verdict": [True] * 30 + [False],
+    })
+    audit_path = tmp_path / "coherence_audit.parquet"
+    audit.to_parquet(audit_path, index=False)
     monkeypatch.setattr("augmentation.pool.GeneratedPool", lambda: FakePool())
     monkeypatch.setattr(mod, "V2_LABELS", tmp_path / "labels_v2.parquet")
     monkeypatch.setattr(mod, "V3_DIR", tmp_path / "v3")
     monkeypatch.setattr(mod, "AUGMENTED_DIR", tmp_path / "v3" / "augmented")
 
-    # lane-a-0 passed; lane-a-1 passed but already labelled; lane-a-2 unjudged
-    selection = mod.lane_minted_selection({"lane-a-0", "lane-a-1"})
+    got = set(mod.lane_minted_selection(audit_path=audit_path)["query_id"])
 
-    assert list(selection["query_id"]) == ["lane-a-0"]
-    assert list(selection["dataset"]) == ["a"]
-    assert list(selection["query"]) == ["one"]
+    assert "lane-a-0" in got          # judged pass
+    assert "lane-a-1" not in got      # passed but already labelled
+    assert "lane-a-30" not in got     # judged FAIL: its own verdict wins
+    assert "lane-a-32" not in got     # unjudged refusal text
+    assert "lane-a-33" in got         # unjudged, operator sample cleared
+    assert "aug-x-1" not in got       # not a lane row
+
+    # below the sample bar, unjudged rows wait
+    audit.assign(verdict=[True] * 20 + [False] * 11).to_parquet(
+        audit_path, index=False
+    )
+    got_low = set(mod.lane_minted_selection(audit_path=audit_path)["query_id"])
+    assert "lane-a-33" not in got_low
 
 
 def test_lane_operator_never_enters_the_dispatcher():

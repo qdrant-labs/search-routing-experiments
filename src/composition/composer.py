@@ -205,8 +205,17 @@ class V3Composition:
         measurably serves too."""
         sheet = pd.read_parquet(self.order_sheet_path)
         selection = pd.read_parquet(self.dataset_path)
+        from augmentation.campaign import audit_opened
+        from augmentation.config import AugmentationConfig
+
+        config = AugmentationConfig()
+        opened_floors = audit_opened(
+            pool, audit_passed,
+            rate=config.coherence_pass_rate, pilot_n=config.pilot_n,
+        )
         fresh = self._admissible(
-            pool, selection, sheet, coherence_passed, audit_passed
+            pool, selection, sheet, coherence_passed, audit_passed,
+            opened_floors,
         )
         if fresh.empty:
             print("v3 admit: nothing admissible in the pool")
@@ -312,10 +321,12 @@ class V3Composition:
         sheet: pd.DataFrame,
         coherence_passed: set[str] | None = None,
         audit_passed: set[str] | None = None,
+        opened_floors: set[str] | None = None,
     ) -> pd.DataFrame:
-        """The pool rows this admission may credit: one cleared-id set per gate
-        — `CoherenceJudge.passed()` for the coherence gate, the human's list for
-        the declaration audit — and None keeps that gate's rows waiting."""
+        """The pool rows this admission may credit: per-row verdicts for the
+        coherence gate (every row is judged), and for the declaration audit
+        either the row's own cleared id or its FLOOR's passed pilot — the
+        sample-audit certifies the operator, not just the sampled rows."""
         rows = pool
         if "credit_gate" in rows.columns:
             gate = rows["credit_gate"].fillna(str(CreditGate.NONE))
@@ -326,6 +337,9 @@ class V3Composition:
             cleared = pd.Series(False, index=rows.index)
             for value, ids in cleared_by_gate.items():
                 cleared |= gate.eq(value) & rows["query_id"].isin(ids)
+            cleared |= gate.eq(str(CreditGate.DECLARATION_AUDIT)) & rows[
+                "floor"
+            ].isin(opened_floors or set())
             gated = gate.ne(str(CreditGate.NONE)) & ~cleared
             if gated.any() or cleared.any():
                 print(

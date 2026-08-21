@@ -330,19 +330,40 @@ def lane_rung(
         print(f"[{lane}] minted {len(produced)}/{n}")
 
 
-def label_lane_minted(judge: CoherenceJudge | None) -> None:
-    stage("7b", "LABEL LANE-MINTED — coherence-passed lane rows against the "
-                "REAL lane collections (qdrant retrieval, no LLM); their "
-                "labels are how the residual actually shrinks")
-    if judge is None:
-        print("no judge this round (--llm-coherence off) — lane rows wait "
-              "gated; rerun with the judge to label them")
+def label_admitted() -> None:
+    stage("7c", "LABEL ADMITTED OPERATOR ROWS — corrupt/rewrite/inject rows "
+                "the admit door credited, against the REAL lane collections "
+                "(qdrant retrieval, no LLM); how corruption reaches the pool")
+    from qdrant_client import QdrantClient
+
+    from scripts.label_routes_v3 import V3LabelSweep, admitted_selection
+
+    selection = admitted_selection()
+    if selection.empty:
+        print("no admitted operator rows awaiting labels")
         return
+    print(f"to label          : {len(selection):,} rows across "
+          f"{selection['dataset'].nunique()} lane(s)")
+    client = QdrantClient(
+        url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        api_key=os.getenv("QDRANT_API_KEY"), timeout=60,
+    )
+    sweep = V3LabelSweep(client, selection, augmented=True)
+    failed = sweep.run()
+    if failed:
+        print(f"skipped lanes     : {failed}")
+
+
+def label_lane_minted() -> None:
+    stage("7b", "LABEL LANE-MINTED — cleared lane rows against the REAL lane "
+                "collections (qdrant retrieval, no LLM): a row's own passed "
+                "verdict, or an unjudged row of a SAMPLE-CLEARED operator "
+                "(98.4% measured), minus refusal text")
     from qdrant_client import QdrantClient
 
     from scripts.label_routes_v3 import V3LabelSweep, lane_minted_selection
 
-    selection = lane_minted_selection(judge.passed())
+    selection = lane_minted_selection()
     if selection.empty:
         print("no coherence-passed lane-minted rows awaiting labels")
         return
@@ -443,7 +464,8 @@ def main() -> None:
     admit(composer, judge)
     label_synthetic()
     if not args.skip_lanes:
-        label_lane_minted(judge)
+        label_lane_minted()
+    label_admitted()
     catalog_refresh()
     rebuild(composer, before)
     print(f"\nDONE in {time.time() - _T0:,.0f}s")

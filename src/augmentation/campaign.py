@@ -54,6 +54,32 @@ def _dead_end(line, action: str, synthetic: int) -> dict[str, object]:
     }
 
 
+def audit_opened(
+    pool: pd.DataFrame,
+    cleared: set[str] | None,
+    *,
+    rate: float,
+    pilot_n: int,
+) -> set[str]:
+    """Declaration floors whose PILOT (the first pilot_n staged rows) the
+    human cleared at `rate` — an audited pilot certifies the operator's
+    declaration, so the floor's later rows inherit the verdict; scoring the
+    whole floor instead would dilute a passed pilot the moment production
+    runs."""
+    if not cleared or pool.empty or "credit_gate" not in pool.columns:
+        return set()
+    gated = pool[
+        pool["credit_gate"].fillna("none")
+        == str(CreditGate.DECLARATION_AUDIT)
+    ]
+    if gated.empty:
+        return set()
+    pilot = gated.groupby("floor").head(pilot_n)
+    passed = pilot["query_id"].astype(str).isin(cleared)
+    share = passed.groupby(pilot["floor"]).mean()
+    return set(share[share >= rate].index)
+
+
 @dataclass
 class RowBudget:
     """One round's row ceiling, spent by every stage that produces: stage 4
@@ -121,20 +147,10 @@ class AugmentationCampaign:
         judge's floors open at is unclamped; None keeps every one held."""
 
     def _audit_opened(self, pool: pd.DataFrame) -> set[str]:
-        """Declaration floors whose whole staged pilot the human cleared at
-        the bar coherence floors open at — an audited pilot is a paid-for
-        verdict, not feature-stock."""
-        if not self.audit_cleared or pool.empty:
-            return set()
-        gated = pool[
-            pool["credit_gate"].fillna("none")
-            == str(CreditGate.DECLARATION_AUDIT)
-        ]
-        if gated.empty:
-            return set()
-        passed = gated["query_id"].astype(str).isin(self.audit_cleared)
-        rate = passed.groupby(gated["floor"]).mean()
-        return set(rate[rate >= self.loop.config.coherence_pass_rate].index)
+        return audit_opened(
+            pool, self.audit_cleared,
+            rate=self.loop.config.coherence_pass_rate, pilot_n=self.pilot_n,
+        )
 
     def plan(self) -> pd.DataFrame:
         """The spend, before any call: one row per hungry floor with the

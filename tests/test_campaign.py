@@ -507,3 +507,42 @@ def test_audit_file_opens_a_declaration_floor_at_the_bar(tmp_path):
     opened = AugmentationCampaign(loop, audit_cleared=cleared)._audit_opened(pool)
     assert opened == {"corruption:light"}
     assert AugmentationCampaign(loop)._audit_opened(pool) == set()
+
+
+def test_a_passed_pilot_survives_production_dilution(tmp_path):
+    """The pilot (first pilot_n staged rows) carries the verdict; thousands
+    of later production rows on the same floor must not dilute it shut."""
+    from augmentation.campaign import audit_opened
+
+    pilot = [f"p{i}" for i in range(30)]
+    pool = pd.DataFrame({
+        "query_id": pilot + [f"prod{i}" for i in range(1000)],
+        "floor": ["corruption:light"] * 1030,
+        "credit_gate": [str(CreditGate.DECLARATION_AUDIT)] * 1030,
+    })
+    opened = audit_opened(pool, set(pilot), rate=0.9, pilot_n=30)
+    assert opened == {"corruption:light"}
+
+
+def test_admission_inherits_a_floors_passed_pilot(tmp_path):
+    """A declaration-gated production row is admissible once its FLOOR's
+    pilot passed — the sample audit certifies the operator, not only the
+    thirty rows the human happened to read."""
+    from composition.composer import V3Composition
+
+    pool = pd.DataFrame({
+        "query_id": ["prod1", "prod2"],
+        "floor": ["corruption:light", "unaudited:floor"],
+        "credit_gate": [str(CreditGate.DECLARATION_AUDIT)] * 2,
+        "home_lane": ["a", "a"],
+    })
+    selection = pd.DataFrame({"query_id": [], "provenance": []})
+    sheet = pd.DataFrame({
+        "floor": ["corruption:light", "unaudited:floor"], "missing": [5.0, 5.0],
+    })
+    fresh = V3Composition._admissible(
+        pool, selection, sheet,
+        coherence_passed=None, audit_passed=None,
+        opened_floors={"corruption:light"},
+    )
+    assert list(fresh["query_id"]) == ["prod1"]

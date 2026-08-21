@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -194,11 +195,15 @@ def admitted_selection() -> pd.DataFrame:
     return fresh.assign(dataset=lane, home_lane=lane)[columns]
 
 
-def lane_minted_selection(passed: set[str]) -> pd.DataFrame:
-    """Coherence-passed lane-rung rows not yet labelled, straight from the
-    generated pool — a lane-minted row's query text is its own, and its lane
-    is its home."""
-    from augmentation.lane_synthetic import LANE_OPERATOR
+def lane_minted_selection(audit_path: Path | None = None) -> pd.DataFrame:
+    """Lane-rung rows cleared for labelling, straight from the generated
+    pool: a row's own passed verdict always clears it, a failed verdict
+    always blocks it, and an UNJUDGED row flows once the operator's judged
+    sample passes at the coherence bar (decided 2026-08-21: doc-grounded
+    mints measured 98.4% pass, so per-row judging is a sample audit now) —
+    minus the free refusal-text guard."""
+    from augmentation.config import AugmentationConfig
+    from augmentation.lane_synthetic import LANE_OPERATOR, is_refusal
     from augmentation.pool import GeneratedPool
 
     columns = ["dataset", "query_id", "query", "home_lane"]
@@ -206,9 +211,24 @@ def lane_minted_selection(passed: set[str]) -> pd.DataFrame:
     if pool.empty:
         return pd.DataFrame(columns=columns)
     pool = pool.astype({"query_id": str})
-    rows = pool[
-        (pool["operator"] == LANE_OPERATOR) & pool["query_id"].isin(passed)
-    ]
+    lane_rows = pool[pool["operator"] == LANE_OPERATOR]
+    config = AugmentationConfig()
+    path = audit_path if audit_path is not None else config.paths.coherence_audit
+    verdicts = (
+        pd.read_parquet(path).set_index("query_id")["verdict"].astype(bool)
+        if path.exists() else pd.Series(dtype=bool)
+    )
+    judged = lane_rows["query_id"].map(verdicts)
+    sample = judged.dropna()
+    sample_cleared = (
+        len(sample) >= config.pilot_n
+        and float(sample.mean()) >= config.coherence_pass_rate
+    )
+    refusal = lane_rows["query"].astype(str).map(is_refusal)
+    ok = judged.eq(True) | (
+        sample_cleared & judged.isna() & ~refusal
+    )
+    rows = lane_rows[ok.fillna(False).astype(bool)]
     done = [pd.read_parquet(V2_LABELS, columns=["query_id"])]
     for labels in (
         V3_DIR / "labels.parquet",
