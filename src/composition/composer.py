@@ -448,6 +448,23 @@ class V3Composition:
             left[lane] = max(0, total - int(out.at[lane, "labelled"]))
         return pd.Series(left)
 
+    @staticmethod
+    def _certified_split(selected: pd.DataFrame) -> str:
+        """Certified rows split at the objective's own hit-vs-miss boundary —
+        above it the winner found an answer the runner-up missed; below it
+        both found the answer and only ranked it differently."""
+        from hybrid_search_rrf_dataset.objective import RouterObjective
+
+        boundary = RouterObjective().decisive_margin
+        cert = selected[selected["certified"] & (selected["kind"] == "decisive")]
+        strict = int((cert["margin"] >= boundary).sum())
+        return (
+            f"Certified decisive rows: **{strict:,} answer-separating** "
+            f"(margin >= {boundary:g}: the losing route MISSED the answer) and "
+            f"**{len(cert) - strict:,} rank-preference** (both routes found "
+            f"it; the winner ranks it higher)."
+        )
+
     def _sidecar(self, selected: pd.DataFrame, reserve: pd.DataFrame) -> dict:
         """What this artifact was built from — the record whose absence once
         let a campaign run against a report that no longer existed."""
@@ -554,6 +571,8 @@ class V3Composition:
             "",
             "## Class split (tier-0 artifact)",
             selected["route_class"].value_counts().to_frame("rows").to_markdown(),
+            "",
+            self._certified_split(selected),
             "",
             "## Worst inversion ratios",
             inversion.head(10).to_markdown(index=False),

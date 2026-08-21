@@ -101,10 +101,14 @@ class Recipe(BaseModel):
         ),
     )
     class_margin: float = Field(
-        default=0.4,
+        default=0.1,
         description=(
             "oracle - runner_up at or above this certifies a decisive route "
-            "class; margin 0 is the tier-0 (routes_differ) bar."
+            "class; margin 0 is the tier-0 (routes_differ) bar. 0.1 certifies "
+            "a consistent RANKING preference (decided 2026-08-21); the "
+            "stricter hit-vs-miss boundary (RouterObjective.decisive_margin, "
+            "0.4 = the winner found an answer the runner-up missed) is "
+            "reported alongside, never gated on."
         ),
     )
     target_total: int = Field(

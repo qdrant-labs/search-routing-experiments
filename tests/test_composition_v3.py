@@ -49,7 +49,8 @@ def test_genuine_tie_is_hybrid_fake_tie_is_waste():
 
 def test_all_zero_and_undecisive():
     # nothing retrieved; and a routes_differ below the decisive margin
-    kind, cls = _classes([[0.0, 0.0, 0.0], [0.5, 0.3, 0.4]], depth=[0, 5])
+    # 0.03 margin: clearly under the 0.1 certification bar, not float-luck
+    kind, cls = _classes([[0.0, 0.0, 0.0], [0.5, 0.3, 0.47]], depth=[0, 5])
     assert kind[0] == "all_zero" and cls[0] == ""
     assert kind[1] == "undecisive" and cls[1] == ""
 
