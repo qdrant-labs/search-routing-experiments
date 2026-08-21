@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
+from threading import Lock
 
 from litellm import completion
 from litellm.exceptions import (
@@ -37,6 +40,27 @@ from augmentation.config import EngineSettings
 from query_taxonomy.features import FeatureExtractor
 from taxonomy_generators.tools import build_tools
 from taxonomy_generators.verify import TargetCheck, Targets, VerifyReport, verify
+
+def windowed_map(fn, items, workers: int):
+    """Run `fn` over `items` with at most `workers` calls in flight, yielding
+    (item, result) in SUBMISSION order — serial semantics (fault streaks,
+    dup guards, id assignment) survive because the consumer sees the same
+    order a serial loop would."""
+    if workers <= 1:
+        for item in items:
+            yield item, fn(item)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        queue: deque = deque()
+        for item in items:
+            queue.append((item, pool.submit(fn, item)))
+            if len(queue) >= workers:
+                head, future = queue.popleft()
+                yield head, future.result()
+        while queue:
+            head, future = queue.popleft()
+            yield head, future.result()
+
 
 TRANSIENT_PROVIDER_ERRORS = (
     APIConnectionError,
@@ -211,6 +235,9 @@ class Augmenter:
         self.max_rounds = settings.max_rounds
         self.max_attempts = settings.max_attempts
         self._extractor = extractor or FeatureExtractor()
+        # ponytail: one lock for all local re-measures; per-thread extractors
+        # if verification ever costs enough to be worth the model reloads
+        self._measuring = Lock()
         tools = build_tools(seed=seed, extractor=self._extractor)
         self._runners = {tool.name: tool.run for tool in tools}
         self._tool_schemas = [
@@ -227,8 +254,11 @@ class Augmenter:
 
     def accept(self, text: str, targets: Targets) -> VerifyReport:
         """The only acceptance: re-measure the final text locally, never
-        trust the transcript (d2/d42g)."""
-        return verify(text, targets, extractor=self._extractor)
+        trust the transcript (d2/d42g). Serialized: `windowed_map` calls `run`
+        from several threads, and the extractor behind this is one shared
+        spaCy pipeline plus its parse cache — neither is thread-safe."""
+        with self._measuring:
+            return verify(text, targets, extractor=self._extractor)
 
     def ask(self, instruction: str, prompt: str) -> tuple[str | None, Spend]:
         """One completion, no targets and no submit protocol — for a caller

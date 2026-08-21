@@ -94,6 +94,35 @@ class AugmentationQrels:
         )
         return len(rows)
 
+    def mint_constructed_many(
+        self, keys: list[tuple[str, list[str], int]]
+    ) -> int:
+        """`mint_constructed` for a batch — ONE read-modify-write for many
+        queries, because the per-row variant rewrites the whole file each
+        call and turns a long minting run quadratic."""
+        existing = self.load()
+        seen = set(existing["query_id"])
+        fresh = pd.DataFrame(
+            [
+                {
+                    "query_id": query_id, "doc_id": doc_id,
+                    "relevance": relevance, "source": "constructed",
+                    "inherited_from": None,
+                }
+                for query_id, doc_ids, relevance in keys
+                if query_id not in seen
+                for doc_id in doc_ids
+            ],
+            columns=_COLUMNS,
+        )
+        if fresh.empty:
+            return 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        pd.concat([existing, fresh], ignore_index=True).to_parquet(
+            self.path, index=False
+        )
+        return len(fresh)
+
     def backfill(self, pool: pd.DataFrame) -> pd.DataFrame:
         """Retry the inherit-path lookup for every pool row with no qrels
         entry yet — a parent whose lane wasn't fully materialized at mint

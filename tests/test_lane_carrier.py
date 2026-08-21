@@ -32,7 +32,7 @@ def _loop(tmp_path, engine) -> AugmentationLoop:
     paths = AugmentationPaths(data_dir=tmp_path)
     return AugmentationLoop(
         pd.DataFrame(columns=["dataset", "query_id", "query", "checkable"]),
-        config=AugmentationConfig(paths=paths), engine=engine,
+        config=AugmentationConfig(paths=paths, llm_workers=1), engine=engine,
         sheet_path=tmp_path / "sheet.parquet",
         pool=GeneratedPool(paths), qrels=AugmentationQrels(paths),
         docs=ConstructedDocs(paths),

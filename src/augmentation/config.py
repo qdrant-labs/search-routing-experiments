@@ -247,6 +247,14 @@ class AugmentationConfig(BaseModel):
             "reads the sample, not derived."
         ),
     )
+    llm_workers: int = Field(
+        default=8,
+        description=(
+            "Concurrent completion calls for the judge and the lane rung "
+            "(1 = serial). A resource dial, not a semantics one: results are "
+            "consumed in submission order either way."
+        ),
+    )
     coherence_pass_rate: float = Field(
         default=0.9,
         description=(

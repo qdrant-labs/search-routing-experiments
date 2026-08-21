@@ -49,3 +49,19 @@ def test_refresh_makes_a_rebuild_see_new_labels(tmp_path):
     assert "stale" in pool.frame().columns, "cache still served"
     assert pool.refresh() is pool and pool._frame is None
     assert len(first()) == 2
+
+
+def test_windowed_map_preserves_submission_order():
+    import time
+
+    from augmentation.engine import windowed_map
+
+    def slow_when_even(n):
+        time.sleep(0.02 if n % 2 == 0 else 0.0)
+        return n * 10
+
+    items = list(range(12))
+    out = list(windowed_map(slow_when_even, items, workers=4))
+    # even items finish LAST per-thread, yet results arrive in submission order
+    assert out == [(n, n * 10) for n in items]
+    assert list(windowed_map(slow_when_even, [3, 1], workers=1)) == [(3, 30), (1, 10)]

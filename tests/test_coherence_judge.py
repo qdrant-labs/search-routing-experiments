@@ -66,7 +66,7 @@ def _judge(tmp_path, engine, *, docs_for=(), parents=None) -> CoherenceJudge:
         docs.add(query_id=query_id, source_dataset="beir-nfcorpus", text=DOC)
     return CoherenceJudge(
         engine,
-        config=AugmentationConfig(paths=paths),
+        config=AugmentationConfig(paths=paths, llm_workers=1),
         docs=docs,
         parents=parents,
     )
@@ -162,7 +162,7 @@ def _campaign_loop(tmp_path, staged: list[AugmentedCandidate]) -> AugmentationLo
         "dataset": "beir-nfcorpus", "query_id": "q1", "checkable": True,
         "length.length_words": 2.0,
     }]).to_parquet(paths.catalog, index=False)
-    config = AugmentationConfig(paths=paths)
+    config = AugmentationConfig(paths=paths, llm_workers=1)
     sheet_path = tmp_path / "sheet.parquet"
     _sheet(CELL).to_parquet(sheet_path, index=False)
     pool = GeneratedPool(paths)

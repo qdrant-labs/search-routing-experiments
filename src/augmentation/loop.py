@@ -31,7 +31,13 @@ from augmentation.dispatch import (
     targets_of,
     unreachable,
 )
-from augmentation.engine import AugmentationOutcome, Augmenter, ErrorCase, Spend
+from augmentation.engine import (
+    AugmentationOutcome,
+    Augmenter,
+    ErrorCase,
+    Spend,
+    windowed_map,
+)
 from augmentation.operators import default_operators
 from augmentation.parents import ParentPool
 from augmentation.constructed import ConstructedDocs
@@ -457,12 +463,22 @@ class AugmentationLoop:
 
         prefix = f"lane-{lane}-"
         keys = self.qrels.load()
+        pool_rows = self.pool.load()
         mine = keys[keys["query_id"].astype(str).str.startswith(prefix)]
-        used_docs = set(mine["doc_id"].astype(str))
-        suffixes = [
-            q[len(prefix):] for q in mine["query_id"].astype(str).unique()
-        ]
-        index = max((int(s) for s in suffixes if s.isdigit()), default=-1) + 1
+        # banking writes two stores, so a crash between them leaves an id in
+        # one and not the other — spend both, or a reissued id keys an existing
+        # query to another query's document
+        banked = pool_rows[pool_rows["query_id"].astype(str).str.startswith(prefix)]
+        used_docs = set(mine["doc_id"].astype(str)) | set(
+            banked["grounding_doc_id"].dropna().astype(str)
+        )
+        suffixes = set(mine["query_id"].astype(str)) | set(
+            banked["query_id"].astype(str)
+        )
+        index = max(
+            (int(s) for q in suffixes if (s := q[len(prefix):]).isdigit()),
+            default=-1,
+        ) + 1
 
         doc_ids = pd.read_parquet(corpus_path, columns=["doc_id"])[
             "doc_id"
@@ -472,7 +488,6 @@ class AugmentationLoop:
         )
         lane_queries = self._lane_query_texts(source)
         taken = {normalized(q) for q in lane_queries}
-        pool_rows = self.pool.load()
         if not pool_rows.empty:
             taken |= {normalized(q) for q in pool_rows["query"].astype(str)}
         exemplars = tuple(
@@ -485,19 +500,40 @@ class AugmentationLoop:
         spend = Spend()
         faults = FaultStreak(max_consecutive_faults)
         minted: list[AugmentedCandidate] = []
-        bar = tqdm(total=n, desc=f"lane:{lane}", unit="row")
-        for doc_id in fresh_docs:
-            if len(minted) >= n or faults.tripped():
-                break
+        pending: list[AugmentedCandidate] = []
+        pending_keys: list[tuple[str, list[str], int]] = []
+
+        def flush() -> None:
+            # chunked banking: per-row full-file rewrites are quadratic at
+            # lane-rung volumes; a crash re-pays at most one chunk of calls
+            if not pending:
+                return
+            self.pool.append(list(pending))
+            self.qrels.mint_constructed_many(list(pending_keys))
+            pending.clear()
+            pending_keys.clear()
+
+        def attempt(doc_id):
             doc_text = _corpus_text(corpus_path, str(doc_id))[:1200]
             if not doc_text:
-                continue
-            query_id = f"{prefix}{index}"
-            index += 1
-            outcome = self.engine.run(
+                return None, None
+            return doc_text, self.engine.run(
                 operator.instruction(lane, doc_text, exemplars), "", Targets()
             )
+
+        bar = tqdm(total=n, desc=f"lane:{lane}", unit="row")
+        for doc_id, (doc_text, outcome) in windowed_map(
+            attempt, fresh_docs, self.config.llm_workers
+        ):
+            if doc_text is None:
+                continue
+            # credited before the stop check: the window runs ahead, so this
+            # call is already paid for whether or not its row is wanted
             spend.add(outcome)
+            if len(minted) >= n or faults.tripped():
+                break
+            query_id = f"{prefix}{index}"
+            index += 1
             reason = operator.rejects(
                 outcome.text or "", doc_text, taken
             ) if outcome.accepted else (outcome.error or "not accepted")
@@ -515,10 +551,13 @@ class AugmentationLoop:
                 "grounding_doc_id": str(doc_id),
             })
             minted.append(candidate)
-            self.pool.append([candidate])
-            self.qrels.mint_constructed(query_id, [str(doc_id)], relevance)
+            pending.append(candidate)
+            pending_keys.append((query_id, [str(doc_id)], relevance))
+            if len(pending) >= 50:
+                flush()
             bar.update(1)
             bar.write(f"+ {query_id}: {outcome.text!r}")
+        flush()
         bar.close()
         produced = pd.DataFrame([c.model_dump() for c in minted])
         print(f"  {spend.summary(len(minted))}")

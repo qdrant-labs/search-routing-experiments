@@ -20,7 +20,7 @@ from tqdm.auto import tqdm
 from augmentation.config import AugmentationConfig
 from augmentation.constructed import ConstructedDocs
 from augmentation.core import CreditGate
-from augmentation.engine import Augmenter, Spend
+from augmentation.engine import Augmenter, Spend, windowed_map
 from augmentation.parents import ParentPool
 
 _COLUMNS: Final[tuple[str, ...]] = (
@@ -114,7 +114,9 @@ class CoherenceJudge:
         }
 
     def run(self, pool: pd.DataFrame) -> dict[str, int]:
-        """Judge every unjudged gated row and bank the verdicts."""
+        """Judge every unjudged gated row — `llm_workers` calls in flight,
+        verdicts consumed in submission order and banked in 100-row chunks
+        (per-row full-file rewrites were quadratic; a crash re-pays <=100)."""
         staged = self.candidates(pool)
         already = set(self.load()["query_id"].astype(str))
         todo = staged[~staged["query_id"].astype(str).isin(already)]
@@ -127,26 +129,33 @@ class CoherenceJudge:
         )
         constructed = self.docs.load()
         spend = Spend()
-        for row in tqdm(
-            todo.itertuples(index=False), total=len(todo),
-            desc="coherence", unit="row",
-        ):
+
+        def attempt(row):
             evidence = self._evidence(row, constructed)
             if not evidence:
-                counts["no_evidence"] += 1
-                continue
+                return "no_evidence", None, Spend()
             reply, hop = engine.ask(
                 INSTRUCTION, f"Query: {row.query}\n\nDocument:\n{evidence}"
             )
-            spend.add(hop)
             parsed = _parse(reply or "")
             if parsed is None:
-                counts["unparsed"] += 1
+                return "unparsed", None, hop
+            return "judged", parsed, hop
+
+        buffer: list[dict] = []
+        bar = tqdm(total=len(todo), desc="coherence", unit="row")
+        for row, (status, parsed, hop) in windowed_map(
+            attempt, todo.itertuples(index=False), self.config.llm_workers
+        ):
+            bar.update(1)
+            spend.add(hop)
+            if status != "judged":
+                counts[status] += 1
                 continue
             verdict, reason = parsed
             counts["judged"] += 1
             counts["passed" if verdict else "failed"] += 1
-            self._append({          # banked per row — the call is already paid for
+            buffer.append({
                 "query_id": str(row.query_id),
                 "floor": str(row.floor),
                 "verdict": verdict,
@@ -154,6 +163,12 @@ class CoherenceJudge:
                 "model": engine.model,
                 "judged_at": datetime.now(UTC).isoformat(timespec="seconds"),
             })
+            if len(buffer) >= 100:
+                self._append(buffer)
+                buffer = []
+        if buffer:
+            self._append(buffer)
+        bar.close()
         print(f"  {spend.summary(counts['judged'])}")
         return counts
 
@@ -171,8 +186,8 @@ class CoherenceJudge:
             pd.Series({**row._asdict(), "dataset": row.home_lane})
         )
 
-    def _append(self, verdict: dict[str, object]) -> None:
-        fresh = pd.DataFrame([verdict], columns=_COLUMNS)
+    def _append(self, verdicts: list[dict[str, object]]) -> None:
+        fresh = pd.DataFrame(verdicts, columns=_COLUMNS)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         pd.concat([self.load(), fresh], ignore_index=True).to_parquet(
             self.path, index=False
