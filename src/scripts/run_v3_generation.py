@@ -428,7 +428,15 @@ def main() -> None:
                              "pilot with e.g. 30)")
     parser.add_argument("--skip-lanes", action="store_true",
                         help="skip stages 5c/7b (the lane rung)")
+    parser.add_argument("--fold-only", action="store_true",
+                        help="produce nothing: skip every generating and "
+                             "labelling-order stage, then admit, label and "
+                             "fold what is already banked (stages 5b-9)")
     args = parser.parse_args()
+    if args.fold_only:
+        # skip everything that PRODUCES; the labelling stages 7-7c still run
+        args.skip_parents = args.skip_synthetic = True
+        args.skip_labelling = True
 
     load_dotenv()
     composer = V3Composition()
@@ -457,7 +465,7 @@ def main() -> None:
         parent_generation(campaign, budget)
     if not args.skip_synthetic:
         synthetic_rung(loop, plan, args.synthetic_cap, budget)
-    if not args.skip_lanes:
+    if not (args.skip_lanes or args.fold_only):
         lane_rung(loop, composer, args.lane_cap, budget)
     if judge is not None:
         coherence(judge)
