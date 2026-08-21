@@ -80,12 +80,13 @@ REGIME_SUFFIX = ".provenance.json"
 
 
 class ScoringRegime(BaseModel):
-    """The scoring inputs `metric_name` cannot show — the relevance threshold
-    and each route's fetch depth.
+    """The scoring inputs `metric_name` cannot show — the relevance threshold,
+    each route's fetch depth, and the model behind each vector slot.
 
     Written beside a cache and compared on load, because `Objective.name` is
-    invariant to both: nfcorpus' `min_relevance` 1→2 and `fetch_limit`
-    1000→50 each moved scores under an unchanged name.
+    invariant to all three: nfcorpus' `min_relevance` 1→2 and `fetch_limit`
+    1000→50 each moved scores under an unchanged name, and a swapped encoder
+    moves every dense rank the same way.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -93,6 +94,9 @@ class ScoringRegime(BaseModel):
     objective: str
     min_relevance: int
     fetch_limit: dict[str, int]
+    slots: dict[str, str] = Field(default_factory=dict)
+    """Vector slot name -> model id. Defaulted so sidecars written before the
+    encoder was fingerprinted still load."""
 
 
 class QueryContext(BaseModel):
@@ -195,6 +199,11 @@ class FusionBuilder(ABC, Generic[T]):
             objective=self.objective.name,
             min_relevance=self.objective.min_relevance,
             fetch_limit={str(s.name): s.fetch_limit for s in self.strategies},
+            slots={
+                cfg.name: cfg.model_id
+                for s in self.strategies
+                for cfg in (s.dense_cfg, s.sparse_cfg)
+            },
         )
 
     def _ranked(self, strategy: FusionStrategy, ctx: QueryContext) -> dict[str, float]:
@@ -326,13 +335,17 @@ class FusionBuilder(ABC, Generic[T]):
                 f"the file to rebuild, or point at a different path — "
                 f"mixing objectives silently would corrupt every comparison."
             )
+        self._assert_regime(file)
+
+    def _assert_regime(self, file: Path) -> None:
+        """Refuse a cache whose sidecar records different scoring inputs."""
         sidecar = file.with_suffix(REGIME_SUFFIX)
         if not sidecar.exists():
             warnings.warn(
                 f"{file} carries no {REGIME_SUFFIX} sidecar, so its "
-                f"min_relevance and fetch_limit cannot be checked against "
-                f"{self.regime.model_dump()} — reuse is unverified. Rebuild "
-                f"to record them.",
+                f"min_relevance, fetch_limit and vector slots cannot be "
+                f"checked against {self.regime.model_dump()} — reuse is "
+                f"unverified. Rebuild to record them.",
                 stacklevel=3,
             )
             return
@@ -340,8 +353,8 @@ class FusionBuilder(ABC, Generic[T]):
         if cached != self.regime:
             raise ValueError(
                 f"{file} was scored under {cached.model_dump()}, but this "
-                f"builder is configured for {self.regime.model_dump()}. Both "
-                f"move the score while leaving metric_name untouched. Delete "
+                f"builder is configured for {self.regime.model_dump()}. Each "
+                f"moves the score while leaving metric_name untouched. Delete "
                 f"the file to rebuild, or point at a different path."
             )
 

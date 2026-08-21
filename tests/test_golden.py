@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from hybrid_search_rrf_dataset.fusion import FusionStrategy, StrategyName
+from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
 from hybrid_search_rrf_dataset.golden import (
     BaselineBuilder,
     BaselineDataset,
@@ -90,18 +91,30 @@ def test_truncation_never_splits_a_character():
 
 
 class _FixedDepth(FusionStrategy):
-    """A route that carries only its fetch depth — no client, no retrieval."""
+    """A route that carries only the regime's inputs — fetch depth and vector
+    slots — with no client and no retrieval."""
 
     name: ClassVar[StrategyName] = StrategyName.DENSE_ONLY
 
-    def __init__(self, fetch_limit: int) -> None:
-        self.fetch_limit = fetch_limit
+    def __init__(self, fetch_limit: int, dense_model: str = "dense/v1") -> None:
+        super().__init__(
+            None,  # type: ignore[arg-type]
+            "lane",
+            EmbeddingConfig(name="dense", model_id=dense_model, kind="dense"),
+            EmbeddingConfig(name="sparse", model_id="sparse/v1", kind="sparse"),
+            fetch_limit,
+        )
 
     def rank(self, query: str) -> dict[str, float]:
         return {}
 
 
-def _cached(out: Path, objective: RouterObjective, fetch_limit: int) -> None:
+def _cached(
+    out: Path,
+    objective: RouterObjective,
+    fetch_limit: int,
+    dense_model: str = "dense/v1",
+) -> None:
     """One saved single-route cache, sidecar included."""
     row = BaselineDataset(
         id=0,
@@ -113,7 +126,9 @@ def _cached(out: Path, objective: RouterObjective, fetch_limit: int) -> None:
         metric_name=objective.name,
         strategy_name=StrategyName.DENSE_ONLY,
     )
-    BaselineBuilder(_FixedDepth(fetch_limit), objective=objective).save([row], out)
+    BaselineBuilder(
+        _FixedDepth(fetch_limit, dense_model), objective=objective
+    ).save([row], out)
 
 
 def test_reuse_refuses_a_cache_scored_at_another_min_relevance(tmp_path):
@@ -135,6 +150,18 @@ def test_reuse_refuses_a_cache_fetched_at_another_depth(tmp_path):
     builder = BaselineBuilder(_FixedDepth(50), objective=RouterObjective())
 
     with pytest.raises(ValueError, match="fetch_limit"):
+        builder.build_or_load(None, tmp_path)  # type: ignore[arg-type]
+
+
+def test_reuse_refuses_a_cache_scored_by_another_encoder(tmp_path):
+    """A swapped dense model moves every dense rank, and it lives on the
+    strategy's vector slots — invisible to objective and fetch depth alike."""
+    _cached(tmp_path, RouterObjective(), 50, dense_model="dense/v1")
+    builder = BaselineBuilder(
+        _FixedDepth(50, dense_model="dense/v2"), objective=RouterObjective()
+    )
+
+    with pytest.raises(ValueError, match="dense/v1"):
         builder.build_or_load(None, tmp_path)  # type: ignore[arg-type]
 
 
