@@ -160,3 +160,12 @@ def test_lane_operator_never_enters_the_dispatcher():
 
     assert LaneSyntheticOperator not in OPERATOR_FAMILIES
     assert not LaneSyntheticOperator(AugmentationConfig()).serves("lane:limit")
+
+
+def test_a_refusal_is_rejected_at_mint():
+    from augmentation.lane_synthetic import LaneSyntheticOperator
+
+    op = LaneSyntheticOperator(AugmentationConfig())
+    assert op.rejects("I cannot generate a query for this document.",
+                      "some doc text", set()) == "model refusal, not a query"
+    assert op.rejects("capital of France?", "some doc text", set()) is None

@@ -26,6 +26,18 @@ def normalized(text: str) -> str:
     return " ".join(str(text).lower().split())
 
 
+REFUSAL_OPENINGS = (
+    "i cannot", "i can't", "i am unable", "i'm unable", "i apologize",
+    "i won't", "sorry,",
+)
+
+
+def is_refusal(text: str) -> bool:
+    """Model refusal text banked as a query — 1,828 reached the pool before
+    this guard existed; a refusal is never a query."""
+    return normalized(text).startswith(REFUSAL_OPENINGS)
+
+
 class LaneSyntheticOperator(Operator):
     """Mint ONE query a sampled real corpus document answers, in the lane's
     own register; the class outcome is earned later by retrieval labels."""
@@ -91,6 +103,8 @@ class LaneSyntheticOperator(Operator):
         key = normalized(query)
         if not key:
             return "empty"
+        if is_refusal(query):
+            return "model refusal, not a query"
         if key in taken:
             return "duplicate of an existing query"
         if key in normalized(doc_text):
