@@ -11,3 +11,4 @@ __pycache__
 docs/research
 docs/adr
 **/.logs/
+*.log
