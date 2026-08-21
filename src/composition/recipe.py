@@ -127,8 +127,10 @@ class Recipe(BaseModel):
         default=0.85,
         description=(
             "d42i/d43 review: minimum share of the composition that is "
-            "natural provenance. Enforced by the cell fill as an admission "
-            "ceiling — natural_rows*(1-m)/m augmented rows at most."
+            "natural provenance. Enforced ONLY by the frozen v2 cell fill as "
+            "an admission ceiling; the v3 composer reports the share and "
+            "never gates on it — the v3 dataset is generation-fed by "
+            "decision (2026-08-21)."
         ),
     )
 

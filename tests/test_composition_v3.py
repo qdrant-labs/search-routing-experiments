@@ -389,18 +389,17 @@ def test_natural_share_is_cumulative_and_counts_no_row_twice():
         "provenance": ["natural"] * 9 + ["augmented"],
     })
     # g0 already sits in the selection AND on the admission record: 9/10, not
-    # 9/11, or the guard would double-charge the row it already counted
-    V3Composition._assert_natural_share(
-        selection, pd.DataFrame({"query_id": ["g0"]}), 0.9
+    # 9/11, or the report would double-charge the row it already counted
+    share = V3Composition._natural_share(
+        selection, pd.DataFrame({"query_id": ["g0"]})
     )
-    fired = False
-    try:  # one more generated row -> 9/11 = 0.818, under the 0.85 minimum
-        V3Composition._assert_natural_share(
-            selection, pd.DataFrame({"query_id": ["g0", "g1"]}), 0.85
-        )
-    except AssertionError:
-        fired = True
-    assert fired
+    assert share == pytest.approx(9 / 10)
+    # one more generated row dilutes to 9/11 — reported, never asserted:
+    # the v3 dataset is generation-fed by decision
+    diluted = V3Composition._natural_share(
+        selection, pd.DataFrame({"query_id": ["g0", "g1"]})
+    )
+    assert diluted == pytest.approx(9 / 11)
 
 
 def test_admission_record_appends_and_keeps_the_newest_verdict(tmp_path):

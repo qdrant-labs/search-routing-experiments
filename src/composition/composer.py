@@ -257,8 +257,9 @@ class V3Composition:
         rows = pd.concat(admitted)
         extra = self._extra_credit(hungry, rows, gained, cells, mini)
         record = self._admission_record(self.admitted_path, rows)
-        self._assert_natural_share(
-            selection, record, self._recipe.min_natural_share
+        print(
+            f"v3 admit: cumulative natural share "
+            f"{self._natural_share(selection, record):.3f}"
         )
         credited = sheet["floor"].map(
             {floor: gained.get(floor, 0) + extra.get(floor, 0)
@@ -364,19 +365,19 @@ class V3Composition:
         ).reset_index(drop=True)
 
     @staticmethod
-    def _assert_natural_share(
-        selection: pd.DataFrame, admitted: pd.DataFrame, minimum: float
-    ) -> None:
+    def _natural_share(
+        selection: pd.DataFrame, admitted: pd.DataFrame
+    ) -> float:
         """Cumulative and by provenance: every generated row ever admitted
-        counts against the share, whether or not this batch minted it."""
+        counts against the share, whether or not this batch minted it — a
+        REPORTED representation fact, never a gate: the v3 dataset is
+        generation-fed by decision (2026-08-21), so a natural floor would
+        assert against the design itself. v2's CellFill keeps its gate."""
         natural = int((selection["provenance"] == NATURAL).sum())
         generated = set(admitted["query_id"]) | set(
             selection.loc[selection["provenance"] != NATURAL, "query_id"]
         )
-        share = natural / max(natural + len(generated), 1)
-        assert share >= minimum - 1e-9, (
-            f"natural share {share:.3f} fell below the recipe minimum {minimum}"
-        )
+        return natural / max(natural + len(generated), 1)
 
     # ---------------------------------------------------------------- reports ---
     def _per_dataset(self, pool: pd.DataFrame) -> pd.DataFrame:
