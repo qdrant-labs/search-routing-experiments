@@ -297,6 +297,28 @@ class FusionBuilder(ABC, Generic[T]):
         )
         return file
 
+    def append(self, rows: list[T], path: Path | str | None = None) -> Path:
+        """Add `rows` to a cache, starting one if absent and keeping the newest
+        row per query — `RouteLabels.label` caches chunk by chunk, so the whole
+        lane is never in hand at once."""
+        out = Path(path or self.default_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        file = out / "rows.parquet"
+        frame = pd.DataFrame([r.model_dump() for r in rows])
+        if file.exists():
+            self._assert_regime(file)
+            # ponytail: read-modify-write per chunk, quadratic in chunk count.
+            # Same shape the labels artifact itself already accepts; move to
+            # row-group append if a lane's cache outgrows memory.
+            frame = pd.concat(
+                [pd.read_parquet(file), frame], ignore_index=True
+            ).drop_duplicates("query_id", keep="last")
+        frame.to_parquet(file, index=False)
+        file.with_suffix(REGIME_SUFFIX).write_text(
+            self.regime.model_dump_json(indent=2) + "\n"
+        )
+        return file
+
     @classmethod
     def load(cls, path: Path | str | None = None) -> list[T]:
         file = Path(path or cls.default_dir) / "rows.parquet"

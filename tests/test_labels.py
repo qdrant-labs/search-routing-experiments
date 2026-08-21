@@ -9,6 +9,7 @@ from hybrid_search_rrf_dataset.labels import (
 )
 from hybrid_search_rrf_dataset.fusion import StrategyName
 from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
+from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
 from hybrid_search_rrf_dataset.objective import NDCGObjective, RouterObjective
 from hybrid_search_rrf_dataset.retrieval import QuerySupplement
 
@@ -251,6 +252,13 @@ class _StubStrategy:
 
     def __init__(self, name: StrategyName, rankings: dict, seen: list) -> None:
         self.name = name
+        self.fetch_limit = 50
+        self.dense_cfg = EmbeddingConfig(
+            name="dense", model_id="dense/v1", kind="dense"
+        )
+        self.sparse_cfg = EmbeddingConfig(
+            name="sparse", model_id="sparse/v1", kind="sparse"
+        )
         self._rankings = rankings
         self._seen = seen
 

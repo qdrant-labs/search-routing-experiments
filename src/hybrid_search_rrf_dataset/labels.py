@@ -49,6 +49,11 @@ ALL_TIED = "all_tied"
 ALL_ZERO = "all_zero"
 
 
+def oracle_dir(out_dir: Path, dataset: str) -> Path:
+    """Where a lane's oracle rows live, beside the labels they produced."""
+    return out_dir / f"{dataset}_oracle"
+
+
 def outcome_shape(scores: dict[str, float], tolerance: float = TIE_TOLERANCE) -> str:
     """Classify a query by whether its routes disagree.
 
@@ -257,13 +262,11 @@ class RouteLabels:
         # loses one chunk of work instead of all of it.
         for start in range(0, len(queued), chunk_size):
             batch = queued[start : start + chunk_size]
-            labelled = self._labelled(
-                builder.build(_Chunk(eval_dataset, batch), qrels=eval_qrels),
-                key,
-                carry,
-            )
+            oracle_rows = builder.build(_Chunk(eval_dataset, batch), qrels=eval_qrels)
+            labelled = self._labelled(oracle_rows, key, carry)
             if labelled.empty:  # a chunk the qrels cover none of
                 continue
+            self._persist_rankings(builder, key, oracle_rows)
             # keep every row this call didn't touch — force only replaces the
             # query_ids it actually rescored, never the rest of the dataset
             stale = (merged.get("dataset") == key) & (
@@ -280,6 +283,18 @@ class RouteLabels:
                 f"query_ids — check that the qrels cover them."
             )
         return pd.concat(written, ignore_index=True)
+
+    def _persist_rankings(
+        self,
+        builder: GoldenRoutingBuilder,
+        key: str,
+        rows: list[GoldenRoutingDataset],
+    ) -> None:
+        """The per-route top-k doc ids behind each score, banked in the lane's
+        own oracle dir — the tail judge's evidence, which the v2 oracle caches
+        never learn for additive rows, so each out_dir owns its own."""
+        if rows:
+            builder.append(rows, oracle_dir(self.labels_path.parent, key))
 
     def _labelled(
         self, rows: list[GoldenRoutingDataset], key: str, carry: pd.DataFrame
