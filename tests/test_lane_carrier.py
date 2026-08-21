@@ -77,6 +77,16 @@ def test_lane_order_allocates_by_yield_under_caps():
     footer = order.loc[LaneOrder.FOOTER]
     assert footer["expected_sparse"] == 210  # 200 from hi + 10 from lo
 
+    # minted-but-unlabelled rows are paid demand: a mid-crank restart must
+    # order only the remainder, and a fully-pending lane leaves the order
+    netted = LaneOrder(RECIPE).build(
+        {"dense": 370, "sparse": 430, "hybrid": 100},
+        yields, pool, capacity={"hi": 400, "lo": 100},
+        pending={"hi": 150, "lo": 100},
+    )
+    assert netted.at["hi", "rows_to_mint"] == 250
+    assert "lo" not in netted.index
+
 
 def test_synthesize_lane_keys_queries_to_real_docs(tmp_path):
     source = _lane_fixture(tmp_path, [

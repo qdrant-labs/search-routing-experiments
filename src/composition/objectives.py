@@ -340,6 +340,7 @@ class LaneOrder:
         yields: pd.DataFrame,
         pool: pd.DataFrame,
         capacity: dict[str, int],
+        pending: dict[str, int] | None = None,
     ) -> pd.DataFrame:
         """Greedy on the biggest residual class, lanes ranked by that class's
         yield, each take bounded by grounding capacity and the lane's
@@ -387,8 +388,16 @@ class LaneOrder:
                     )
                     remaining[k] -= buy
                     cap[(lane, k)] -= buy
-        out = lanes.loc[sorted(ordered, key=lambda k: -ordered[k])].copy()
-        out["rows_to_mint"] = [round(ordered[lane]) for lane in out.index]
+        # minted-but-unlabelled rows already carry paid demand — they re-net
+        # through the pool only at labelling, so subtract them here or a
+        # mid-crank restart re-orders rows it already owns
+        owed = {
+            lane: max(0, round(total) - (pending or {}).get(lane, 0))
+            for lane, total in ordered.items()
+        }
+        out = lanes.loc[sorted(owed, key=lambda k: -owed[k])].copy()
+        out = out[[owed[lane] > 0 for lane in out.index]]
+        out["rows_to_mint"] = [owed[lane] for lane in out.index]
         for name in CLASSES:
             out[f"expected_{name}"] = (
                 out["rows_to_mint"] * out[f"yield_{name}"]

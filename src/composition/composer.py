@@ -177,7 +177,9 @@ class V3Composition:
             if paths.qrels.exists() else pd.Series(dtype=str)
         )
         dirs = lane_dirs()
+        pool_ids = pool["query_id"].astype(str)
         capacity: dict[str, int] = {}
+        pending: dict[str, int] = {}
         for lane in yields.index:
             corpus = paths.lane_corpus(dirs.get(str(lane), str(lane)))
             if not corpus.exists():
@@ -185,9 +187,14 @@ class V3Composition:
             total = ParquetFile(corpus).metadata.num_rows
             if total > 1_000_000:
                 continue
-            spent = int(used.str.startswith(f"lane-{lane}-").sum()) if len(used) else 0
+            prefix = f"lane-{lane}-"
+            spent = int(used.str.startswith(prefix).sum()) if len(used) else 0
+            labelled = int(pool_ids.str.startswith(prefix).sum())
             capacity[str(lane)] = max(0, total - spent)
-        return LaneOrder(self._recipe).build(residual, yields, pool, capacity)
+            pending[str(lane)] = max(0, spent - labelled)
+        return LaneOrder(self._recipe).build(
+            residual, yields, pool, capacity, pending
+        )
 
     # ------------------------------------------------------------------ admit ---
     def admit(
