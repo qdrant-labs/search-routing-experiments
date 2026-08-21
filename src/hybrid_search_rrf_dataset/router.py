@@ -818,6 +818,10 @@ class RouterExperiment:
                 self._catalog_path, columns=["dataset", "query_id", *feat_cols]
             )
             merged = labels.merge(catalog, on=["dataset", "query_id"], how="inner")
+            # the v3 catalog's corpus-relative stats are NaN where unmeasurable
+            # (PMI needs a token pair); a feature not measured is a feature not
+            # fired — the same 0-default _derive_engineered documents
+            merged[feat_cols] = merged[feat_cols].fillna(0.0)
             self._data = merged.reset_index(drop=True)
         return self._data
 
