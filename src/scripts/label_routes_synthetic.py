@@ -21,7 +21,7 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, Modifier
+from qdrant_client.models import Distance
 from tqdm.auto import tqdm
 
 from augmentation.constructed import ConstructedDocs
@@ -97,12 +97,8 @@ class SyntheticLabelSweep:
             size=DENSE_SIZE, distance=Distance.COSINE, parallel=4,
         )
         self._sparse = EmbeddingConfig(
-            # IDF is collection schema, as in every other sweep; omitting it
-            # silently rebuilds TF-only and corrupts the sparse signal
             name="sparse_base", model_id=SPARSE_MODEL, kind="sparse",
-            modifier=Modifier.IDF,
         )
-        self._cache = EmbeddingCache("./.embedding_cache")
 
     def plan(self) -> pd.DataFrame:
         live = {c.name for c in self._client.get_collections().collections}
@@ -122,9 +118,13 @@ class SyntheticLabelSweep:
 
     def _index(self, lane: str, corpus: pd.DataFrame) -> str:
         collection = synthetic_collection(lane)
+        # the lane, not the collection: this corpus is the paid lane's plus its
+        # constructed docs, so sharing the lane's namespace reuses those vectors
+        # while the `constructed-` ids stay unambiguous
         indexer = CorpusIndexer(
             self._client, collection,
-            embeddings=[self._dense, self._sparse], cache=self._cache,
+            embeddings=[self._dense, self._sparse],
+            cache=EmbeddingCache(namespace=_source_name(lane)),
         )
         indexer.ensure_collection()
         if self._client.count(collection, exact=True).count < len(corpus):

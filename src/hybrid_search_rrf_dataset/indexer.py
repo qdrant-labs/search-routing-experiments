@@ -34,20 +34,27 @@ def _chunked(seq: list[Any], size: int) -> Iterator[list[Any]]:
 
 
 class EmbeddingCache:
-    """Disk-backed cache of vectors keyed by (model_id, item_id).
+    """Disk-backed cache of vectors keyed by (namespace, model_id, item_id).
 
     Survives kernel restarts so a stopped/crashed upload doesn't lose work.
-    One pickle file per (model_id, kind). Atomic write via tmp-then-rename.
+    One pickle file per (namespace, model_id, kind). Atomic write via
+    tmp-then-rename. `namespace` is the lane: `item_id` hashes a bare `doc_id`
+    and doc_ids collide across lanes, so an unnamespaced cache hands one lane's
+    vectors to another lane's document under the same id.
     """
 
-    def __init__(self, cache_dir: str | Path = "./.embedding_cache") -> None:
+    def __init__(
+        self, cache_dir: str | Path = "./.embedding_cache", namespace: str = ""
+    ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.namespace = namespace
         self._memory: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _path(self, model_id: str, kind: str) -> Path:
         safe = model_id.replace("/", "__")
-        return self.cache_dir / f"{safe}.{kind}.pkl"
+        parts = [safe, self.namespace, kind] if self.namespace else [safe, kind]
+        return self.cache_dir / f"{'.'.join(parts)}.pkl"
 
     def load(self, model_id: str, kind: str) -> dict[str, Any]:
         key = (model_id, kind)
@@ -89,14 +96,42 @@ class EmbeddingConfig(BaseModel):
     distance: Distance = Distance.COSINE
     providers: list[str] | None = None
     parallel: int | None = None
-    """fastembed multi-process workers for CPU inference. None = single process.
-    Set to number of CPU cores - 1 for ~2-4x speedup on CPU. Leave None when
-    using GPU providers."""
-    modifier: Modifier | None = None
+    """fastembed multi-process workers for CPU inference. None = single process,
+    onnxruntime's own intra-op threading. Each worker loads its OWN full model
+    copy — N workers means N times the model's on-disk size in RAM before any
+    inference buffers, e.g. bge-small (0.067GB) at 4 is ~270MB, but a 2GB+
+    model at 4 is 8GB+. Scale to CPU cores - 1 only for small models; leave
+    None for anything bge-large-sized or up, and always when using GPU
+    providers."""
+    modifier: Modifier | None = Modifier.IDF
     """Qdrant query-time scoring modifier for sparse slots. Qdrant/bm25 vectors
     carry only the TF/length half of BM25 and expect `Modifier.IDF` on the
     collection — without it, matches are scored TF-only and rare tokens get no
-    rarity weight. Collection schema: changing it requires recreate + re-upload."""
+    rarity weight. Collection schema: changing it requires recreate + re-upload.
+    Defaulted rather than passed per call site, because a missed one creates a
+    TF-only collection that every later `ensure_collection` skips. Pass None
+    explicitly for a learned-sparse model (SPLADE) that bakes in its own
+    rarity weights; ignored for dense slots."""
+    query_prompt: str = ""
+    doc_prompt: str = ""
+    """Retrieval prefixes prepended before embedding — the role marker asymmetric
+    dense models need and won't infer. e5 wants `query: ` / `passage: `; Qwen3
+    wants an `Instruct: ...\\nQuery: ` on queries and nothing on docs; bge-small
+    needs neither, so both default empty and leg-1 embeds exactly as before.
+    Applied to text, so cached vectors already carry the prefix — one prompt per
+    (model, run); change it and re-index under a fresh namespace."""
+    cloud: bool = False
+    """Embed via Qdrant Cloud Inference (`Document`) instead of local fastembed
+    — for a model with no local ONNX build (e.g. an OpenRouter-hosted one).
+    Per-slot, not per-client: the client still needs `cloud_inference=True` to
+    construct, but that flag only activates handling for the slots marked
+    here, so a dense OpenRouter model and a local sparse BM25 can share one
+    indexer without BM25 losing its embedding cache."""
+    provider_options: dict[str, Any] | None = None
+    """Passed verbatim as `Document.options` — provider auth/routing, e.g.
+    `{"openrouter-api-key": ...}`. Qdrant forwards it to the inference service
+    as-is (Document.options docstring). Never log this config: it carries the
+    API key in plain text."""
 
 
 class BaseIndexer(ABC, Generic[T]):
@@ -220,7 +255,15 @@ class BaseIndexer(ABC, Generic[T]):
             PointStruct(id=ids[i], vector=vectors[i], payload=payloads[i])
             for i in range(len(items))
         ]
-        for chunk in _chunked(points, batch_size):
+        # for a cloud slot, embedding happens INSIDE this upsert (Qdrant calls
+        # the provider per point), so this loop — not `_embed` — is where a
+        # remote-encoder upload actually spends its time; local runs get the
+        # same bar for a big corpus's upsert phase, cheaply.
+        total_chunks = -(-len(points) // batch_size)  # ceiling division
+        for chunk in tqdm(
+            _chunked(points, batch_size), total=total_chunks,
+            desc=f"upload:{self.collection_name}",
+        ):
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=chunk,
@@ -313,7 +356,7 @@ class BaseIndexer(ABC, Generic[T]):
         batch_size: int,
     ) -> list[Any]:
         """Return vectors aligned with `ids`/`texts`, hitting cache where possible."""
-        if self.cache is None or self.client.cloud_inference:
+        if self.cache is None or cfg.cloud:
             return self._embed(cfg, texts, batch_size)
 
         store = self.cache
@@ -340,8 +383,13 @@ class BaseIndexer(ABC, Generic[T]):
         texts: list[str],
         batch_size: int,
     ) -> list[Any]:
-        if self.client.cloud_inference:
-            return [Document(text=text, model=cfg.model_id) for text in texts]
+        if cfg.doc_prompt:  # role marker for asymmetric dense models; "" for bm25/bge
+            texts = [cfg.doc_prompt + t for t in texts]
+        if cfg.cloud:  # this slot only; a sibling local slot embeds unaffected
+            return [
+                Document(text=text, model=cfg.model_id, options=cfg.provider_options)
+                for text in texts
+            ]
 
         if cfg.kind == "dense":
             model = self._dense(cfg)

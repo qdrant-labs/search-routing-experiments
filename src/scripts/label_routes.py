@@ -85,7 +85,6 @@ class RouteLabelSweep:
         self._sparse_cfg = EmbeddingConfig(
             name="sparse_base", model_id=SPARSE_MODEL, kind="sparse"
         )
-        self._cache = EmbeddingCache("./.embedding_cache")
         self.selection = CellFill().build()
         self.labels = RouteLabels(self.selection)
 
@@ -118,9 +117,12 @@ class RouteLabelSweep:
 
     def _index(self, key: str, corpus: pd.DataFrame) -> str:
         collection = _collection(key)
+        # per lane, not per sweep: `item_id` hashes a bare doc_id and lanes
+        # share doc_ids, so one cache across lanes serves the wrong vectors
         indexer = CorpusIndexer(
             self._client, collection,
-            embeddings=[self._dense_cfg, self._sparse_cfg], cache=self._cache,
+            embeddings=[self._dense_cfg, self._sparse_cfg],
+            cache=EmbeddingCache(namespace=_source_name(key)),
         )
         indexer.ensure_collection()
         # count is the cheap "did this corpus grow?" trigger; the id diff is

@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, Modifier
+from qdrant_client.models import Distance
 from scipy.stats import binomtest, chi2_contingency
 from wordfreq import zipf_frequency
 
@@ -202,14 +202,16 @@ def _label(
     )
     sparse = EmbeddingConfig(
         name="sparse_base", model_id=SPARSE_MODEL, kind="sparse",
-        modifier=Modifier.IDF,
     )
     source = QuerySupplement(
         SnapshotDataset(_source_name(lane), path=str(DATA_DIR)),
         pairs.rename(columns={"query": "text"})[["query_id", "text"]],
         qrels,
     )
-    args = (client, _collection(lane), dense, sparse, EmbeddingCache("./.embedding_cache"))
+    args = (
+        client, _collection(lane), dense, sparse,
+        EmbeddingCache(namespace=_source_name(lane)),
+    )
     strategies = (
         DenseOnlyStrategy(*args[:4]), PureRRFStrategy(*args[:4]),
         SparseOnlyStrategy(*args[:4]),

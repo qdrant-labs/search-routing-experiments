@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, Modifier
+from qdrant_client.models import Distance
 from tqdm.auto import tqdm
 
 from hybrid_search_rrf_dataset.fusion import (
@@ -263,13 +263,8 @@ class V3LabelSweep:
             size=DENSE_SIZE, distance=Distance.COSINE, parallel=4,
         )
         self._sparse = EmbeddingConfig(
-            # IDF is collection schema; a fresh/recreated lane must match the
-            # live *_routes collections, which already carry it. Omitting it
-            # silently rebuilds TF-only and corrupts the sparse signal.
             name="sparse_base", model_id=SPARSE_MODEL, kind="sparse",
-            modifier=Modifier.IDF,
         )
-        self._cache = EmbeddingCache("./.embedding_cache")
 
     def _keys(self, keys: tuple[str, ...] | None) -> list[str]:
         wanted = list(keys) if keys else sorted(self._selection["dataset"].unique())
@@ -291,9 +286,12 @@ class V3LabelSweep:
 
     def _index(self, key: str, corpus: pd.DataFrame) -> str:
         collection = _collection(key)
+        # per lane, not per sweep: `item_id` hashes a bare doc_id and lanes
+        # share doc_ids, so one cache across lanes serves the wrong vectors
         indexer = CorpusIndexer(
             self._client, collection,
-            embeddings=[self._dense, self._sparse], cache=self._cache,
+            embeddings=[self._dense, self._sparse],
+            cache=EmbeddingCache(namespace=_source_name(key)),
         )
         indexer.ensure_collection()
         if self._client.count(collection, exact=True).count < len(corpus):
