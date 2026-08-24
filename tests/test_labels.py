@@ -2,9 +2,13 @@ import pandas as pd
 import pytest
 
 from hybrid_search_rrf_dataset.labels import (
+    ALL_TIED,
+    ALL_ZERO,
+    ROUTES_DIFFER,
     AcceptabilityLabels,
     RouteLabels,
     _augmented_rows,
+    outcome_shape,
     route_label,
 )
 from hybrid_search_rrf_dataset.fusion import StrategyName
@@ -36,6 +40,17 @@ def labels(tmp_path):
     frame.to_parquet(out_dir / "labels.parquet", index=False)
     selection = pd.DataFrame({"dataset": [], "query_id": []})
     return RouteLabels(selection, out_dir=out_dir)
+
+
+def test_outcome_shape_classifies_the_three_label_time_buckets():
+    """The classifier behind both the end-of-lane summary and the live
+    per-chunk progress postfix — had zero direct coverage."""
+    assert outcome_shape({"dense_only": 1.0, "pure_rrf": 0.15, "sparse_only": 0.0}) == (
+        ROUTES_DIFFER
+    )
+    assert outcome_shape({"dense_only": 0.5, "pure_rrf": 0.5, "sparse_only": 0.5}) == ALL_TIED
+    assert outcome_shape({"dense_only": 0.0, "pure_rrf": 0.0, "sparse_only": 0.0}) == ALL_ZERO
+    assert outcome_shape({}) == ALL_ZERO
 
 
 def test_decisive_margin():

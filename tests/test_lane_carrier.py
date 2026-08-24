@@ -87,6 +87,15 @@ def test_lane_order_allocates_by_yield_under_caps():
     assert netted.at["hi", "rows_to_mint"] == 250
     assert "lo" not in netted.index
 
+    # a residual nothing owes still returns a footer-shaped frame: the empty
+    # order used to drop every yield column and raise
+    settled = LaneOrder(RECIPE).build(
+        {"dense": 0, "sparse": 0, "hybrid": 0},
+        yields, pool, capacity={"hi": 400, "lo": 100},
+    )
+    assert list(settled.index) == [LaneOrder.FOOTER]
+    assert settled.loc[LaneOrder.FOOTER, "expected_sparse"] == 0
+
 
 def test_synthesize_lane_keys_queries_to_real_docs(tmp_path):
     source = _lane_fixture(tmp_path, [

@@ -1,6 +1,7 @@
 """The classify payload's cap, the assess score/ranking round-trip invariant,
 and the cache-reuse guard."""
 
+import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -183,3 +184,87 @@ def test_a_cache_without_a_sidecar_still_loads_but_says_so(tmp_path):
 
     with pytest.warns(UserWarning, match="sidecar"):
         assert len(builder.build_or_load(None, tmp_path)) == 1  # type: ignore[arg-type]
+
+
+class _EchoStrategy:
+    """Ranks by query text, with per-query sleep — a naive concurrent
+    implementation that returns completion order instead of submission order
+    would reorder rows whose delays are deliberately mismatched."""
+
+    fetch_limit = 50
+    dense_cfg = EmbeddingConfig(name="dense", model_id="dense/v1", kind="dense")
+    sparse_cfg = EmbeddingConfig(name="sparse", model_id="sparse/v1", kind="sparse")
+
+    def __init__(
+        self, delays: dict[str, float], name: StrategyName = StrategyName.DENSE_ONLY
+    ) -> None:
+        self._delays = delays
+        self.name = name
+
+    def rank(self, query: str) -> dict[str, float]:
+        time.sleep(self._delays.get(query, 0))
+        return {f"doc-{query}": 1.0}
+
+
+class _StubDataset:
+    name = "lane"
+
+    def __init__(self, query_ids: list[str]) -> None:
+        self._ids = query_ids
+
+    def queries(self) -> pd.DataFrame:
+        return pd.DataFrame({"query_id": self._ids, "text": self._ids})
+
+    def qrels(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            "query_id": self._ids, "doc_id": [f"doc-{q}" for q in self._ids],
+            "relevance": [1] * len(self._ids),
+        })
+
+    def provenance(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=["query_id", "provenance"])
+
+
+def test_build_stays_serial_by_default():
+    ids = ["a", "b", "c"]
+    dataset = _StubDataset(ids)
+    builder = BaselineBuilder(_EchoStrategy({}), objective=RouterObjective())
+
+    rows = builder.build(dataset)
+    assert [r.query_id for r in rows] == ids
+
+
+def test_concurrent_build_preserves_submission_order_not_completion_order():
+    """The regression this guards: ThreadPoolExecutor.map yields results in
+    input order regardless of which finishes first — verified, not assumed,
+    by making the FIRST query's rank() call the SLOWEST."""
+    ids = ["a", "b", "c", "d"]
+    delays = {"a": 0.05, "b": 0.0, "c": 0.0, "d": 0.0}
+    dataset = _StubDataset(ids)
+    builder = BaselineBuilder(_EchoStrategy(delays), objective=RouterObjective())
+
+    rows = builder.build(dataset, max_workers=4)
+    assert [r.query_id for r in rows] == ids
+    assert [r.qdrant_answer for r in rows] == [[f"doc-{q}"] for q in ids]
+
+
+def test_concurrent_scoring_does_not_crash_numbas_threading_layer():
+    """The regression this guards: ranx's ndcg is `@njit(parallel=True)`, and
+    numba's default workqueue layer aborts the WHOLE PROCESS ('Fatal Python
+    error: Aborted') the moment it's entered from more than one Python thread
+    at once — reproduced live, independent of JIT warm-up. GoldenRoutingBuilder
+    calls `objective.assess` three times per row (once per route), the highest-
+    contention real pattern; `Objective.ndcg`'s lock (objective.py) is what
+    must prevent this. A regression here does not fail cleanly — it aborts
+    the interpreter, which is itself the loudest possible signal."""
+    ids = [f"q{i}" for i in range(150)]
+    dataset = _StubDataset(ids)
+    builder = GoldenRoutingBuilder(
+        _EchoStrategy({}, StrategyName.DENSE_ONLY),
+        _EchoStrategy({}, StrategyName.PURE_RRF),
+        _EchoStrategy({}, StrategyName.SPARSE_ONLY),
+        objective=RouterObjective(),
+    )
+
+    rows = builder.build(dataset, max_workers=16)
+    assert [r.query_id for r in rows] == ids

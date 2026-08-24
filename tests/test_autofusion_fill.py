@@ -71,6 +71,18 @@ def test_no_cache_owes_every_row(tmp_path):
     assert len(_remaining(labels, tmp_path / "absent.parquet")) == len(labels)
 
 
+def test_nothing_left_to_score_keeps_its_columns(tmp_path):
+    """An empty mask list would select COLUMNS, handing the caller a frame with
+    no `dataset` to score by."""
+    cache = tmp_path / "cache.parquet"
+    frame([("gooaq", 1)]).assign(score=3).to_parquet(cache, index=False)
+
+    todo = _remaining(frame([]), cache)
+
+    assert todo.empty
+    assert "dataset" in todo.columns and "query_id" in todo.columns
+
+
 def test_permanent_only_for_4xx():
     assert _permanent(HTTPError(400))
     assert _permanent(HTTPError(422))
