@@ -102,6 +102,24 @@ class Availability(StrEnum):
     """Manual approval: email the authors, institutional agreement."""
 
 
+class QueryProvenance(StrEnum):
+    """Who wrote the source's queries — orthogonal to `llm_target`, which is
+    about the retrieval task's orientation and says nothing about authorship."""
+
+    HUMAN = "human"
+    """Real users, crowdworkers, forum posters."""
+
+    LLM = "llm"
+    """A model generated them, however heavily filtered afterwards."""
+
+    TEMPLATE = "template"
+    """Constructed programmatically from a schema, no author at all."""
+
+    UNKNOWN = "unknown"
+    """Not ratified yet. A state, never a default — the field has none, so a
+    new dataset cannot pass silently as human-written."""
+
+
 class SourceKind(StrEnum):
     IR_DATASETS = "ir_datasets"
     HUGGINGFACE = "huggingface"
@@ -123,6 +141,7 @@ class DatasetCard(BaseModel):
     source: SourceKind
     grounding: Grounding
     llm_target: bool
+    query_provenance: QueryProvenance
     scope: Scope
     non_trivial: bool
     multilingual: bool
