@@ -9,10 +9,22 @@ count as a hit and hand a perfect score to a route that answered nothing.
 
 from __future__ import annotations
 
+import threading
 from abc import ABCMeta, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field
 from ranx import Qrels, Run, evaluate
+
+_RANX_LOCK = threading.Lock()
+"""ranx's ndcg is `@njit(parallel=True)` (numba). Numba's default 'workqueue'
+threading layer crashes ('Fatal Python error: Aborted') the moment it's
+entered from more than one Python thread at once — measured, reproducible,
+independent of JIT warm-up. Every `Objective` subclass funnels through this
+one method, so one process-wide lock here — not per-instance, since the
+conflict is with numba's own global threading layer, not with any one
+objective — is what makes `FusionBuilder.build(max_workers>1)` safe. The
+locked section is pure CPU (no network), so serializing it barely dents the
+concurrency win it protects."""
 
 
 # metaclass=ABCMeta declares the abstractness explicitly without a second
@@ -87,13 +99,14 @@ class Objective(BaseModel, metaclass=ABCMeta):
         if not relevant or not ordered:
             return 0.0
         run = {doc: float(len(ordered) - i) for i, doc in enumerate(ordered)}
-        return float(
-            evaluate(
-                Qrels({"q": relevant}),
-                Run({"q": run}),
-                f"ndcg@{self.top_k}",
+        with _RANX_LOCK:
+            return float(
+                evaluate(
+                    Qrels({"q": relevant}),
+                    Run({"q": run}),
+                    f"ndcg@{self.top_k}",
+                )
             )
-        )
 
 
 class RouterObjective(Objective):

@@ -8,6 +8,7 @@ from typing import ClassVar
 from fastembed import SparseTextEmbedding, TextEmbedding
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
+    Document,
     Fusion,
     FusionQuery,
     Prefetch,
@@ -86,14 +87,27 @@ class FusionStrategy(ABC):
         self._dense_model: TextEmbedding | None = None
         self._sparse_model: SparseTextEmbedding | None = None
 
-    def _dense(self, text: str) -> list[float]:
+    def _dense(self, text: str) -> list[float] | Document:
+        # query-side role marker, paired with the indexer's doc_prompt; "" for
+        # bge/bm25, so leg-1 queries embed exactly as before
+        text = self.dense_cfg.query_prompt + text
+        if self.dense_cfg.cloud:  # no local ONNX build; Qdrant embeds server-side
+            return Document(
+                text=text, model=self.dense_cfg.model_id,
+                options=self.dense_cfg.provider_options,
+            )
         if self._dense_model is None:
             self._dense_model = TextEmbedding(
                 self.dense_cfg.model_id, providers=self.dense_cfg.providers
             )
         return next(iter(self._dense_model.embed([text]))).tolist()
 
-    def _sparse(self, text: str) -> SparseVector:
+    def _sparse(self, text: str) -> SparseVector | Document:
+        if self.sparse_cfg.cloud:
+            return Document(
+                text=text, model=self.sparse_cfg.model_id,
+                options=self.sparse_cfg.provider_options,
+            )
         if self._sparse_model is None:
             self._sparse_model = SparseTextEmbedding(
                 self.sparse_cfg.model_id, providers=self.sparse_cfg.providers

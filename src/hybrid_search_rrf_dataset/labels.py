@@ -11,11 +11,13 @@ trainable rows a 50K pool actually yields.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 from hybrid_search_rrf_dataset.fusion import (
     SERVING_COST,
@@ -50,7 +52,8 @@ ALL_ZERO = "all_zero"
 
 
 def oracle_dir(out_dir: Path, dataset: str) -> Path:
-    """Where a lane's oracle rows live, beside the labels they produced."""
+    """Where a lane's oracle rows live, beside the labels they produced —
+    the shape `rederive_labels` and `cell_divergence` already read."""
     return out_dir / f"{dataset}_oracle"
 
 
@@ -178,6 +181,7 @@ class RouteLabels:
         generation: Generation = "cell_based",
         include_gated: bool = False,
         chunk_size: int = 500,
+        max_workers: int = 1,
     ) -> pd.DataFrame:
         """Label this dataset's query_ids not already in the artifact, and
         append. Already-labelled query_ids (natural or augmented) are never
@@ -185,6 +189,9 @@ class RouteLabels:
         row. `dataset` names the selection's key for `source` when the two
         differ — the composition calls BEIR NFCorpus `beir-nfcorpus` while
         the retrieval class calls it `nfcorpus`.
+
+        `max_workers` overlaps one chunk's queries on a thread pool — see
+        `FusionBuilder.build`. Default 1 keeps every existing caller serial.
         """
         key = dataset or source.name
         wanted = self.rows_for(key)
@@ -260,9 +267,21 @@ class RouteLabels:
         # the artifact is rewritten per chunk, not per call: retrieval is the
         # expensive, crash-prone part, so a lane that dies at query 90,000
         # loses one chunk of work instead of all of it.
-        for start in range(0, len(queued), chunk_size):
+        total_chunks = -(-len(queued) // chunk_size)  # ceiling division
+        chunks = tqdm(
+            range(0, len(queued), chunk_size), total=total_chunks,
+            desc=f"label:{key}", unit="chunk",
+        )
+        # the three-way split available AT LABEL TIME — routes_differ is the
+        # only shape that teaches the router anything; the qrels-depth-aware
+        # kind taxonomy (decisive/undecisive/fake_tie/genuine_tie) needs the
+        # whole lane's qrels and is computed downstream, not per chunk here
+        shapes: Counter[str] = Counter()
+        for start in chunks:
             batch = queued[start : start + chunk_size]
-            oracle_rows = builder.build(_Chunk(eval_dataset, batch), qrels=eval_qrels)
+            oracle_rows = builder.build(
+                _Chunk(eval_dataset, batch), qrels=eval_qrels, max_workers=max_workers
+            )
             labelled = self._labelled(oracle_rows, key, carry)
             if labelled.empty:  # a chunk the qrels cover none of
                 continue
@@ -276,6 +295,12 @@ class RouteLabels:
             self.labels_path.parent.mkdir(parents=True, exist_ok=True)
             merged.to_parquet(self.labels_path, index=False)
             written.append(labelled)
+            shapes.update(labelled["shape"])
+            chunks.set_postfix(
+                labelled=sum(len(w) for w in written),
+                differ=shapes[ROUTES_DIFFER], tied=shapes[ALL_TIED],
+                zero=shapes[ALL_ZERO], refresh=False,
+            )
 
         if not written:
             raise ValueError(

@@ -4,6 +4,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -279,13 +280,27 @@ class FusionBuilder(ABC, Generic[T]):
         dataset: RetrievalDataset,
         start_id: int = 0,
         qrels: QrelStore | None = None,
+        *,
+        max_workers: int = 1,
     ) -> list[T]:
         """Score `dataset`'s queries. Pass `qrels` to judge against a store
-        other than the dataset's own — an LLM lane, or lanes merged."""
-        return [
-            self.build_row(ctx)
-            for ctx in self._iter_queries(dataset, start_id, qrels)
-        ]
+        other than the dataset's own — an LLM lane, or lanes merged.
+
+        `max_workers` > 1 overlaps queries on a thread pool — worth it once a
+        strategy's calls are network-bound (a cloud dense slot over
+        OpenRouter: httpx's client is safe for concurrent use, verified).
+        Pointless for local fastembed, which is CPU/GIL-bound and serializes
+        regardless. Default 1 keeps every existing caller's behaviour and
+        exact row order unchanged. Note: with workers>1 `_iter_queries`'s own
+        bar tracks queries SUBMITTED, not completed — `ThreadPoolExecutor.map`
+        drains the generator up front to schedule work, so it fills almost
+        immediately; the outer per-chunk bar (`RouteLabels.label`) is what
+        still reflects real completion."""
+        contexts = self._iter_queries(dataset, start_id, qrels)
+        if max_workers <= 1:
+            return [self.build_row(ctx) for ctx in contexts]
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(self.build_row, contexts))
 
     def save(self, rows: list[T], path: Path | str | None = None) -> Path:
         out = Path(path or self.default_dir)
