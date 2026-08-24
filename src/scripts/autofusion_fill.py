@@ -91,7 +91,8 @@ def _remaining(
         zip(cache["dataset"].astype(str), cache["query_id"].astype(str), strict=True)
     )
     keys = zip(labels["dataset"].astype(str), labels["query_id"].astype(str), strict=True)
-    return labels[[key not in done for key in keys]]
+    # .loc, not [], because an empty mask LIST selects columns rather than rows
+    return labels.loc[[key not in done for key in keys]]
 
 
 def _fill(

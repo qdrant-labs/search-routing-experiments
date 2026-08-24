@@ -395,8 +395,12 @@ class LaneOrder:
             lane: max(0, round(total) - (pending or {}).get(lane, 0))
             for lane, total in ordered.items()
         }
-        out = lanes.loc[sorted(owed, key=lambda k: -owed[k])].copy()
-        out = out[[owed[lane] > 0 for lane in out.index]]
+        # ranked and filtered in one index, because a boolean LIST that comes
+        # out empty selects columns rather than rows — a fully-paid residual
+        # then loses every yield column
+        out = lanes.loc[
+            [lane for lane in sorted(owed, key=lambda k: -owed[k]) if owed[lane] > 0]
+        ].copy()
         out["rows_to_mint"] = [owed[lane] for lane in out.index]
         for name in CLASSES:
             out[f"expected_{name}"] = (
