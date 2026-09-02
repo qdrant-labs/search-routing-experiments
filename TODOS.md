@@ -492,3 +492,45 @@ Surfaced by the showcase rewrite, not caused by it:
       (one ranked index instead of a mask) with a zero-residual case in
       `tests/test_lane_carrier.py`. Left here because the same shape may exist
       elsewhere: grep for `frame[[` over a comprehension.
+
+## v4 validation deferrals (2026-08-26, SPEC decision 66)
+
+Skeleton is Rung B only; Rung A is unimplemented. Layer 3 pilot is the real
+acceptance gate — none of the below are optional if v4 ships.
+
+- [ ] **B0: extend `catalog_v3` to cover unlabelled source queries** (plan §8).
+      Rung A cannot fire without it; the pre-label ordering (`G`, `N`, `Π`) is
+      inert until source queries are on the catalog. Prerequisite for
+      everything else in this block.
+- [ ] **Rung A `order()` implementation** (plan §2.6, SPEC d66(f, h)). Depends
+      on B0. Includes: lexicographic ranking on `(G, N, Π, −row_id)`, answer-
+      coverage rejection, novelty threshold with Δ relaxation (`θ₀ = 0.7`,
+      `Δ = 0.1`, `N1` invariant), and the per-candidate propensity index for
+      class-mass expectation.
+- [ ] **Rung A propensity index** (SPEC d66(h)). Character n-gram Jaccard kNN
+      over the labelled pool, `k = 20`, weighted vote, cold-start threshold
+      `max_sim < 0.15`. Build once as a persisted inverted index over 3–4-gram
+      signatures; refresh when the labelled pool grows past a threshold.
+- [ ] **`CompositionReport.class_ratios` + band-pass field** (SPEC d66(g)).
+      The composer already reports `class_shortfall`; add per-class actual
+      ratios and a boolean `pi_band_pass` computed against
+      `dense ∈ [.40, .50]`, `sparse ∈ [.40, .50]`, `hybrid ∈ [.07, .13]`.
+- [ ] **`tests/test_stability.py`** (SPEC d66(k)). Perturb `ρ ∈ {0.4, 0.6}`
+      and `κ ∈ {0.15, 0.25}` around the baseline `(ρ=0.5, κ=0.20)`; assert
+      mean Jaccard ≥ 0.80 and min ≥ 0.70. Runs on the same synthetic-pool
+      fixture the Layer 1 tests use.
+- [ ] **Layer 3 pilot infrastructure** (SPEC d66(a)). Three-arm design: null
+      constant-router + matched-random + v4. Lane-equal aggregation at
+      `n ≥ 100` per lane. Report per-lane deltas; aggregate = mean of
+      per-lane deltas. `n < 100` lanes fold into the report as "excluded on
+      power", not silently pooled.
+- [ ] **Pre-register δ test artifact** (SPEC d66(j)). Before the pilot runs,
+      write down the exact protocol: features `(G, N, Π)`, target
+      `1[m ≥ m*]`, held-out-by-lane, gate `AUC ≥ 0.60 in ≥ 25 of 39 lanes`.
+      Anything measured after the fact against a different definition is
+      base-rate hacking.
+- [ ] **Untracked v4 artifacts.** `notebooks/v4_substrate_replay.ipynb`,
+      `src/composition/composer_v4.py`, `tests/test_compose_v4.py` all sit
+      untracked. Decide whether to commit them (recommended) or move them
+      under an experiments/ directory before the next session — otherwise
+      a stray `git clean` deletes the validation harness.

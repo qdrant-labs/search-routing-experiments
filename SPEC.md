@@ -1163,3 +1163,80 @@ is at commit 26b9a93.
   the lane's min_relevance) and the ~5K-docs-per-lane sampling size —
   implementation defaults; revisit only if per-lane variance is large
   (d63b).
+
+66. **v4 composition validation: dials pinned against Layer 2 evidence, no
+    code-implementer handoff** (grill-me 2026-08-26). Resolves the eight
+    open dials of the v4 plan (`~/.claude/plans/i-feel-like-we-scalable-
+    phoenix.md` §9) using Layer 2 measured evidence
+    (`notebooks/v4_substrate_replay.ipynb`) against the shipped Rung B
+    skeleton (`src/composition/composer_v4.py`, `tests/test_compose_v4.py`,
+    13 passing property tests, 1 skipped for Rung A). No prior SPEC decision
+    superseded — each plan-local dial reinterpreted to remain compatible with
+    d48(e), d49(b), d49(c), d50(f). The plan itself explicitly rejects
+    code-implementer handoff; this entry records the dial resolution against
+    measured evidence, not a build-order.
+    (a) *Acceptance = paired Layer 3 pilot, §6 is a regression bar not a
+    verdict.* Lane-equal aggregation at n ≥ 100 per lane (per
+    `VERDICT.md:97`), three arms: constant-router null, matched-random draw,
+    v4 draw. Aggregate = mean of per-lane deltas. The §6 shortcut gate stays
+    as a build-to-build regression check between v4 iterations. The plan
+    itself retracted its "worse than random" claim after realizing §6 was
+    underpowered as a verdict.
+    (b) *N* is a label-spend ceiling, not a target (d49(b) preserved).*
+    Composition stops at the tighter of `{all cells filled, N* labels
+    spent}`. Working ceiling N* = 200,000; size |D| remains an output,
+    reported via `class_shortfall` and `waste_shortfall` on
+    `CompositionReport`.
+    (c) *κ is a global lane-share safety cap at 0.20 (d49(c) preserved).*
+    Must always be ≥ max(cell.max_lane_share); per-cell caps carry the load,
+    κ backstops.
+    (d) *π is a composition share, deliberately narrower than d50(f).*
+    Midpoint {dense: .45, sparse: .45, hybrid: .10} allocated by
+    `_largest_remainder`. The router training layer applies d50(f)'s
+    per-class floor separately — carve-out, not supersession.
+    (e) *ρ = 0.5 for large-|S_a| axes; flat f_s = 25 for axes with |S_a|
+    < 10.* Layer 2 measured: at ρ = 0.5, only 12 of 63 cells reach f_s =
+    1,587 → 81% generation debt. Consistent with d50(a): thin cells are
+    generation targets. The small-|S_a| fix is already in the skeleton.
+    (f) *θ₀ = 0.7, Δ = 0.1 (Rung A novelty, pre-registered).* Layer 2: 95%
+    stratum survival at θ = 0.7, Δ relaxation almost never fires. Rung B
+    skeleton does not use these — deferred activation until Rung A
+    `order()` ships.
+    (g) *π is a band, ±5pp uniformly, on the direct `route_class_any`.*
+    dense ∈ [40, 50], sparse ∈ [40, 50], hybrid ∈ [7, 13]. Band-pass status
+    reported in `CompositionReport`; the composer never sacrifices floors
+    to hit an exact share. Consistent with d50(f) — balance is corrected
+    at eval-time weighting.
+    (h) *Rung A class allocation via per-candidate propensity, not lane-
+    yield.* P̂(c|q) via character n-gram Jaccard kNN over the labelled pool
+    (k = 20, weighted vote, `max_sim < 0.15` = class-unknown, excluded from
+    E[n_c(B)] used for the (g) band check). Lane-yield ŷ_c(l) retires from
+    class allocation; lane budgets remain supply-driven. R0-compliant: the
+    candidate's own outcome is never referenced, only neighbors' frozen
+    labels — a finer-grained aggregate prior than lane-yield, same shape.
+    (i) *U_lo = 0.15, U_hi = 0.40 on U(D) = (1/|D|) Σ clip(m/m*, 0, 1).*
+    Symmetric protection: catches all-zero (U → 0) and cherry-pick (measured
+    U = .455 for high-margin policy) with equal ~6pp margin; realistic
+    policies (.217–.341, SD .048) sit safely in-band. U is a gate, not a
+    maximand — the composer never optimizes it.
+    (j) *δ = 0.10, 25 of 39 lanes clear AUC ≥ 0.60, held out by lane.* If
+    the `information_gain_proxy` (G, N, Π → 1[m ≥ m*]) fails the gate, kill
+    the term; Rung A falls back to §2.6 lexicographic order (already the
+    default, so failure is not catastrophic). Pre-registering δ prevents
+    base-rate hacking after the pilot lands.
+    (k) *Stability test on the Rung B skeleton: perturb ρ ∈ {0.3, 0.4}
+    (one-sided; 0.5 is the (e) ceiling, no symmetric upper perturbation
+    exists) and κ ∈ {0.15, 0.25} around the baseline (ρ=0.5, κ=0.20); pass
+    if mean Jaccard(D_baseline, D_perturbed) ≥ 0.80 AND min ≥ 0.70 across
+    the four perturbations.* Runs on an n=600 synthetic pool, not the n=240
+    Layer 1 fixture: at n=240 the κ=0.25 cascade drops Jaccard to 0.558 as
+    a small-pool artifact (cap changes shift a large fraction of a tiny
+    row set), whereas at n≥600 the numbers converge (κ=0.25 → 0.845 stable
+    through n=2400). θ perturbation deferred until Rung A ships. Lives in
+    `tests/test_stability.py`.
+    — *The plan is not a SPEC decision; it explicitly rejected
+    code-implementer handoff. Rung A `order()` implementation, catalog_v3
+    unlabelled-query extension (plan B0), Rung A propensity index, band
+    reporting on `CompositionReport`, stability test wiring, and the Layer
+    3 pilot are tracked in TODOS. Nothing here authorizes a build without
+    a further grill-me on the Rung A scope.*
