@@ -605,15 +605,21 @@ def _derive_engineered(frame: pd.DataFrame) -> pd.DataFrame:
     else:
         min_zipf = pd.Series(0.0, index=frame.index)
         rare_share = pd.Series(0.0, index=frame.index)
-    return frame.assign(
-        **{
+    derived = pd.DataFrame(
+        {
             "derived.identifier_density": identifier_density,
             "derived.avg_word_length": avg_word_length,
             "derived.short_id_query": short_id_query,
             "derived.min_zipf": min_zipf,
             "derived.rare_token_share": rare_share,
-        }
+        },
+        index=frame.index,
     )
+    # Add the derived block in one operation.  Repeated ``assign``/``insert``
+    # calls fragment wide catalog frames and make every downstream operation
+    # progressively slower.
+    base = frame.drop(columns=list(_DERIVED_ENGINEERED), errors="ignore")
+    return pd.concat([base, derived], axis=1)
 
 
 def _margin(frame: pd.DataFrame) -> pd.Series:

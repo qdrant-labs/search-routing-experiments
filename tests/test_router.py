@@ -1,8 +1,13 @@
 import pandas as pd
 import pytest
+import warnings
 
 from hybrid_search_rrf_dataset.fusion import StrategyName
-from hybrid_search_rrf_dataset.router import AcceptabilityRouter, Representation
+from hybrid_search_rrf_dataset.router import (
+    AcceptabilityRouter,
+    Representation,
+    _derive_engineered,
+)
 
 
 @pytest.fixture
@@ -54,3 +59,28 @@ def test_probabilities_shape(train_frame):
     probs = router.probabilities(train_frame.head(2))
     assert set(probs) == {"dense_only", "pure_rrf", "sparse_only"}
     assert all(len(p) == 2 for p in probs.values())
+
+
+def test_derived_features_do_not_fragment_wide_frames():
+    frame = pd.DataFrame(
+        {
+            "query": ["reset ERR_X"],
+            "length.length_words": [2.0],
+            "length.length_chars": [10.0],
+            "structured_identifiers.error_code": [1.0],
+            "derived.identifier_density": [99.0],
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
+        for i in range(120):
+            frame.insert(len(frame.columns), f"catalog_{i}", float(i))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = _derive_engineered(frame)
+
+    assert not any(isinstance(w.message, pd.errors.PerformanceWarning) for w in caught)
+    assert list(result.columns).count("derived.identifier_density") == 1
+    assert result.loc[0, "derived.identifier_density"] == 0.5
+    assert result.loc[0, "derived.short_id_query"] == 1.0
