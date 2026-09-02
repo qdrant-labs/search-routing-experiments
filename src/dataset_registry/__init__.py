@@ -20,11 +20,21 @@ from dataset_registry.irds import (
 )
 from dataset_registry.registry import DATASETS, DatasetRegistry
 from dataset_registry.url import Limit
+from dataset_registry.wave3 import (
+    AmazonEsci,
+    BeirTouche2020,
+    Finder,
+    TechQa,
+    TrecCast2020History,
+    Wands,
+)
 
 __all__ = [
     "DATASETS",
     "Availability",
+    "AmazonEsci",
     "BeirNFCorpus",
+    "BeirTouche2020",
     "BrightSplit",
     "CrumbTask",
     "DBPediaEntity",
@@ -32,6 +42,7 @@ __all__ = [
     "DatasetName",
     "DatasetRegistry",
     "Grounding",
+    "Finder",
     "IRDatasetsBacked",
     "Limit",
     "MSMarcoPassageDev",
@@ -44,5 +55,8 @@ __all__ = [
     "RegistryDataset",
     "Scope",
     "SourceKind",
+    "TechQa",
+    "TrecCast2020History",
     "TrecDL2022",
+    "Wands",
 ]

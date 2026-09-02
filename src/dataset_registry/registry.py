@@ -38,6 +38,14 @@ from dataset_registry.irds import (
     TrecDL2022,
 )
 from dataset_registry.url import Limit
+from dataset_registry.wave3 import (
+    AmazonEsci,
+    BeirTouche2020,
+    Finder,
+    TechQa,
+    TrecCast2020History,
+    Wands,
+)
 
 # Configured instances, not classes: parameterized datasets (MiraclDev per
 # language) register several entries from one class.
@@ -62,6 +70,12 @@ DATASETS: tuple[RegistryDataset, ...] = (
     ScirgenGeo(),
     Clerc(),
     Gooaq(),
+    AmazonEsci(),
+    Wands(),
+    Finder(),
+    TrecCast2020History(),
+    TechQa(),
+    BeirTouche2020(),
 )
 
 

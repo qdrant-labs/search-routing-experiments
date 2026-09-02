@@ -36,12 +36,21 @@ from hybrid_search_rrf_dataset.retrieval.irds import (
     OrcasLane,
     TrecDL2022,
 )
+from hybrid_search_rrf_dataset.retrieval.wave3 import (
+    AmazonEsciLane,
+    FinderLane,
+    TechQaLane,
+    Touche2020Lane,
+    TrecCast2020HistoryLane,
+    WandsLane,
+)
 
 __all__ = [
     "CORPUS_COLUMNS",
     "QREL_COLUMNS",
     "QUERY_COLUMNS",
     "AntiqueLane",
+    "AmazonEsciLane",
     "BeirDataset",
     "BrightLane",
     "ClercLane",
@@ -49,6 +58,7 @@ __all__ = [
     "CrumbLane",
     "DBPediaLane",
     "FreshStackLane",
+    "FinderLane",
     "GooaqLane",
     "IRDatasetsMaterialized",
     "LimitLane",
@@ -65,6 +75,10 @@ __all__ = [
     "RetrievalDataset",
     "ScirgenGeoLane",
     "SnapshotDataset",
+    "TechQaLane",
+    "Touche2020Lane",
+    "TrecCast2020HistoryLane",
     "TrecDL2022",
     "WebFaqLane",
+    "WandsLane",
 ]

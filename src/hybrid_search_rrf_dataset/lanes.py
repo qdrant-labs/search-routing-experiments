@@ -13,12 +13,14 @@ from dataset_registry.core import DatasetName
 
 from hybrid_search_rrf_dataset.retrieval import (
     AntiqueLane,
+    AmazonEsciLane,
     BrightLane,
     ClercLane,
     CrumbLane,
     DBPediaLane,
     LimitLane,
     FreshStackLane,
+    FinderLane,
     GooaqLane,
     LotteLane,
     MiraclLane,
@@ -29,8 +31,12 @@ from hybrid_search_rrf_dataset.retrieval import (
     RarbLane,
     RetrievalDataset,
     ScirgenGeoLane,
+    TechQaLane,
+    Touche2020Lane,
+    TrecCast2020HistoryLane,
     TrecDL2022,
     WebFaqLane,
+    WandsLane,
 )
 
 
@@ -105,6 +111,18 @@ LANES: dict[str, Lane] = {
     "scirgen-geo-en": Lane(ScirgenGeoLane()),
     "clerc": Lane(ClercLane()),
     "gooaq": Lane(GooaqLane()),
+    # wave 3: 394K relevant products across all hard queries exceed the recipe
+    # ceiling, so LaneCorpora narrows metadata to composition query ids first.
+    "amazon-esci-en-hard": Lane(AmazonEsciLane()),
+    # deep-judged calibration lane; retain all candidate products.
+    "wands": Lane(WandsLane(), corpus_target=42_994),
+    "finder": Lane(FinderLane()),
+    # conversational multi-turn: query = prior turns + [CURRENT] + utterance
+    "trec-cast-2020-history": Lane(TrecCast2020HistoryLane()),
+    # pilot substrate: rojagtap/tech-qa carries the 1,400 questions with
+    # their linked Technote text, not the full 802K Technote corpus
+    "techqa": Lane(TechQaLane()),
+    "beir-touche-2020": Lane(Touche2020Lane()),
 }
 
 LANELESS: frozenset[DatasetName] = frozenset()

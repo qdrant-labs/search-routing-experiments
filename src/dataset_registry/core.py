@@ -68,6 +68,13 @@ class DatasetName(StrEnum):
     SCIRGEN_GEO_EN = "scirgen-geo-en"
     CLERC = "clerc"
     GOOAQ = "gooaq"
+    # acquisition wave 3 — query-distribution expansion
+    AMAZON_ESCI_EN_HARD = "amazon-esci-en-hard"
+    WANDS = "wands"
+    FINDER = "finder"
+    TREC_CAST_2020_HISTORY = "trec-cast-2020-history"
+    TECHQA = "techqa"
+    BEIR_TOUCHE_2020 = "beir-touche-2020"
 
 
 class Grounding(StrEnum):
