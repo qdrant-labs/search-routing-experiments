@@ -8,6 +8,7 @@ import pytest
 
 from composition.objectives import UtilityObjective
 from composition.pool_v3 import (
+    SCORES,
     CLASSES,
     STRATA,
     UNKNOWN,
@@ -307,6 +308,42 @@ def test_eval_reserve_is_certified_only_stratified_and_disjoint():
         waste_cap=0.0,
     )
     assert not set(picked.index) & set(reserve.index)
+
+
+def test_v4_labels_never_reach_a_v3_pool(tmp_path):
+    """The v4 rung's labels are the v4 draw's supply alone; a v3 consumer that
+    read them would compose the next rung's material into v3."""
+    (tmp_path / "route_labels").mkdir()
+    (tmp_path / "v4").mkdir()
+    base = pd.DataFrame({
+        "dataset": ["laneA"], "query_id": ["1"], "checkable": [True],
+        "stage": ["candidate"], "min_relevance": [1],
+        **{score: [0.5] for score in SCORES},
+    })
+    base.to_parquet(tmp_path / "route_labels" / "labels.parquet", index=False)
+    base.assign(dataset="laneB", query_id="v4-1").to_parquet(
+        tmp_path / "v4" / "labels.parquet", index=False
+    )
+    v3_pool = LabelledPool(data_dir=tmp_path).labels()
+    v4_pool = LabelledPool(data_dir=tmp_path, native_only=False).labels()
+    assert list(v3_pool["query_id"]) == ["1"]
+    assert sorted(v4_pool["query_id"]) == ["1", "v4-1"]
+
+
+def test_native_only_false_reserves_and_supplies_v2_rows_too():
+    """The v4 draw composes every lane; a v2-origin row must be selectable and
+    must be reservable, or the eval set never sees the lanes it added."""
+    rows = [
+        {"query_id": f"a{i}", "dataset": "laneA", "route_class": "dense",
+         "cells": set(), "native": i < 10}
+        for i in range(20)
+    ]
+    pool = _pool(rows)
+    v3_only = LabelledPool(Recipe(eval_reserve_frac=0.2))
+    all_lanes = LabelledPool(Recipe(eval_reserve_frac=0.2), native_only=False)
+    assert v3_only.eval_reserve(pool)["native"].all()
+    assert not all_lanes.eval_reserve(pool)["native"].all()
+    assert len(all_lanes.eval_reserve(pool)) == 4  # 20% of 20, not of the 10 native
 
 
 def test_waste_default_is_five_percent():

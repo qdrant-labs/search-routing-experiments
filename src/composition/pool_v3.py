@@ -14,6 +14,7 @@ from composition.cells_v3 import CELLS_V3
 from composition.compose import DEFAULT_OUT_DIR
 from composition.floors import CORRUPTION_SPANS, read_catalog, with_derived
 from composition.recipe import Recipe
+from composition.strata import CORPUS_AXES, STRATA, UNKNOWN
 
 DATA = DEFAULT_OUT_DIR.parent
 
@@ -24,20 +25,6 @@ their decisive rate is conditioned on the outcome and estimates nothing."""
 SCORES = ["score_dense_only", "score_pure_rrf", "score_sparse_only"]
 ROUTE_TO_CLASS = {"dense_only": "dense", "sparse_only": "sparse", "pure_rrf": "hybrid"}
 CLASSES = ("dense", "sparse", "hybrid")
-CORPUS_AXES = ("corpus_idf", "corpus_oov", "corpus_pmi")
-"""Corpus-relative diversity, one MARGINAL axis each — never crossed with each
-other, with cell, or with lane."""
-UNKNOWN = "unknown"
-"""The join did not cover the row: a COVERAGE miss, never a band, so it is
-counted and reported but never floored."""
-STRATA = {
-    "corruption_degree": ("clean", "light", "heavy"),
-    "corpus_idf": ("low_idf", "mid_idf", "high_idf"),
-    "corpus_oov": ("in_vocab", "has_oov"),
-    "corpus_pmi": ("co_occurring", "never_co_occurs", "unmeasured"),
-}
-"""Every band the writers below emit, declared beside them so a band no row
-lands in is still a stratum the floors can fail."""
 CEILING = 0.999
 """Reporting bar only: splits each tie kind into at-ceiling (everyone found a
 judged doc at rank 1) vs all-routes-missed. Classification is depth-based."""
@@ -83,14 +70,25 @@ class LabelledPool:
     """Owns loading, classification, strata attachment, clustering and the
     eval reserve over the labelled rows; consumers read, never re-derive."""
 
-    def __init__(self, recipe: Recipe | None = None, data_dir=None) -> None:
+    def __init__(
+        self, recipe: Recipe | None = None, data_dir=None,
+        *, native_only: bool = True,
+    ) -> None:
         self._recipe = recipe if recipe is not None else Recipe()
         self._data = data_dir if data_dir is not None else DATA
+        self._native_only = native_only
         self._frame: pd.DataFrame | None = None
 
     @property
     def recipe(self) -> Recipe:
         return self._recipe
+
+    def supply_mask(self, pool: pd.DataFrame) -> pd.Series:
+        """Which rows this pool may draw from and reserve against: v3-native
+        only by default, every labelled row when `native_only=False`."""
+        if self._native_only:
+            return native_mask(pool)
+        return pd.Series(True, index=pool.index)
 
     @property
     def v3_catalog_path(self):
@@ -100,9 +98,11 @@ class LabelledPool:
     def labels(self) -> pd.DataFrame:
         """The re-derived pool (v2's labels rescored from the oracle caches at
         each lane's current min_relevance) PLUS the additive v3 labels PLUS the
-        synthetic and augmented rungs', aligned on the base's columns. New
-        (dataset, query_id) pairs are disjoint, so the dedup only guards a
-        re-label."""
+        synthetic and augmented rungs', aligned on the base's columns — plus
+        the v4 rung's (natural and augmented) when this pool is not
+        native_only. Every row carries `rung` (v2/v3/v4) and `native` so a
+        consumer can filter by acquisition wave. New (dataset, query_id) pairs
+        are disjoint, so the dedup only guards a re-label."""
         rederived = self._data / "v3" / "labels_rederived.parquet"
         base_path = (
             rederived if rederived.exists()
@@ -115,12 +115,19 @@ class LabelledPool:
         # measure yields and priors but are never v3 SUPPLY — the v3 dataset
         # is composed only from material its own pipeline acquired
         base["native"] = False
+        base["rung"] = "v2"
         frames = [base]
-        for path, scored_against in (
-            (self._data / "v3" / "labels.parquet", "natural"),
-            (self._data / "v3" / "synthetic" / "labels.parquet", "supplemented"),
-            (self._data / "v3" / "augmented" / "labels.parquet", "supplemented"),
-        ):
+        sources = [
+            (self._data / "v3" / "labels.parquet", "natural", "v3"),
+            (self._data / "v3" / "synthetic" / "labels.parquet", "supplemented", "v3"),
+            (self._data / "v3" / "augmented" / "labels.parquet", "supplemented", "v3"),
+        ]
+        # the v4 rung's labels are supply for the v4 draw ONLY: a v3 consumer
+        # that saw them would compose the next rung's material into v3
+        if not self._native_only:
+            sources.append((self._data / "v4" / "labels.parquet", "natural", "v4"))
+            sources.append((self._data / "v4" / "augmented" / "labels.parquet", "supplemented", "v4"))
+        for path, scored_against, rung in sources:
             if not path.exists():
                 continue
             extra = pd.read_parquet(path).astype({"query_id": str})
@@ -128,6 +135,7 @@ class LabelledPool:
                 extra["scored_against"] = scored_against
             extra = extra.reindex(columns=base.columns)
             extra["native"] = True
+            extra["rung"] = rung
             frames.append(extra)
         combined = pd.concat(frames, ignore_index=True)
         combined = combined.drop_duplicates(["dataset", "query_id"], keep="first")
@@ -284,10 +292,10 @@ class LabelledPool:
         absent = ~key.isin(qcs.index)
         # a join that reaches no SUPPLY row is a broken join, not knowledge:
         # every v3 corpus stratum would be dark while its floor read as met
-        supply = native_mask(pool).to_numpy()
+        supply = self.supply_mask(pool).to_numpy()
         if supply.any() and absent[supply].all():
             raise ValueError(
-                f"{qcs_path} covers 0 of the {int(supply.sum()):,} v3-native "
+                f"{qcs_path} covers 0 of the {int(supply.sum()):,} supply "
                 f"pool rows ({int((~absent).sum()):,} of {len(pool):,} rows "
                 "covered overall) — rebuild it over the v3 label files "
                 "(collection_features.py --per-query --v3) before composing."
@@ -337,11 +345,45 @@ class LabelledPool:
             index=pool.index,
         )
 
+    def family_ids(self, pool: pd.DataFrame, pool_path=None) -> pd.Series:
+        """Each row's generation family: a row and everything minted from it
+        share one key, so a split can group on it. `generated_from` is a BARE
+        parent query_id — unqualified, a child reads `123` while its parent
+        reads `quest:123` and the pair never matches."""
+        own = pool["dataset"].astype(str) + ":" + pool["query_id"].astype(str)
+        path = pool_path or self._data / "augmentation" / "pool.parquet"
+        if not path.exists():
+            return own
+        lineage = pd.read_parquet(
+            path,
+            columns=["query_id", "generated_from", "parent_dataset", "home_lane"],
+        ).astype({"query_id": str}).dropna(subset=["generated_from"])
+        lineage = lineage[lineage["generated_from"].astype(str).str.len() > 0]
+        # this key links ONE hop. Single-generation is enforced upstream by
+        # `first_generation_only` (core.py, the d43-review guard); if that is ever
+        # switched off a grandchild would cross the fence silently, so fail loudly
+        assert not lineage["generated_from"].astype(str).isin(
+            set(lineage["query_id"].astype(str))
+        ).any(), "multi-generation lineage: family_ids links one hop only"
+        # both sides keyed on (lane, query_id): pool identity is the pair, and a
+        # bare query_id would hand one lane's row another lane's parent
+        child = (
+            lineage["home_lane"].astype(str) + ":" + lineage["query_id"].astype(str)
+        )
+        parent = pd.Series(
+            (
+                lineage["parent_dataset"].astype(str) + ":"
+                + lineage["generated_from"].astype(str)
+            ).to_numpy(),
+            index=child.to_numpy(),
+        )
+        return own.map(parent[~parent.index.duplicated()]).fillna(own)
+
     def eval_reserve(self, pool: pd.DataFrame) -> pd.DataFrame:
         """The frozen ablation eval set, carved BEFORE any selection: a seeded
         stratified draw over (lane x certified route class), certified rows
         only because every proof runs on the certified tier."""
-        certified = pool[pool["certified"] & native_mask(pool)]
+        certified = pool[pool["certified"] & self.supply_mask(pool)]
         return certified.groupby(
             ["dataset", "route_class"], group_keys=False
         ).sample(
@@ -352,12 +394,18 @@ class LabelledPool:
         self, pool: pd.DataFrame, reserve: pd.DataFrame
     ) -> pd.Index:
         """Every row to exclude from selection: the reserve itself PLUS any
-        row — certified or not — sharing a near-dup cluster with a reserved
-        row; a cluster-mate left in the training pool is a train/eval leak
-        regardless of its own certification."""
+        row — certified or not — sharing a near-dup cluster OR a generation
+        family with a reserved row; either one left in the training pool is a
+        train/eval leak regardless of its own certification."""
+        # a reserve read back from disk, or rebuilt with merge(), carries a fresh
+        # RangeIndex — the lookups below would then fence the wrong rows silently
+        assert reserve.index.isin(pool.index).all(), "reserve must carry pool's index"
         cluster = self.cluster_ids(pool)
-        reserved_clusters = set(cluster.loc[reserve.index])
-        return pool.index[cluster.isin(reserved_clusters)]
+        family = self.family_ids(pool)
+        leaked = cluster.isin(set(cluster.loc[reserve.index])) | family.isin(
+            set(family.loc[reserve.index])
+        )
+        return pool.index[leaked]
 
     # ------------------------------------------------------------------ API ---
     def frame(self) -> pd.DataFrame:
@@ -379,4 +427,4 @@ class LabelledPool:
     def selectable(self) -> pd.DataFrame:
         pool = self.frame()
         kept = pool.drop(index=self.reserve_exclusion_keys(pool, self.reserve()))
-        return kept[native_mask(kept)]
+        return kept[self.supply_mask(kept)]

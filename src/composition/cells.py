@@ -180,6 +180,9 @@ _duplicated = len(_ALL) - len({cell.name for cell in _ALL})
 if _duplicated:
     raise ValueError(f"{_duplicated} cell name(s) shared between v2 and v3")
 
+DECLARED_CELLS: tuple[ArchetypeCell, ...] = _ALL
+"""The complete declared cell vocabulary for version-neutral consumers."""
+
 CELL_TO_PREDICATE: dict[str, list[str]] = {
     cell.name: [expr for band in cell.predicate for expr in band.expressions]
     for cell in CELLS
