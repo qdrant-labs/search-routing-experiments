@@ -112,7 +112,10 @@ class V3Composition:
         realism = self._bound.realism(selected)
 
         self._out.mkdir(parents=True, exist_ok=True)
-        flat = selected.assign(cells=selected["cells"].map(sorted))
+        flat = selected.assign(
+            cells=selected["cells"].map(sorted),
+            family_id=self._pool.family_ids(selected),
+        )
         flat.to_parquet(self.dataset_path, index=False)
         sheet.to_parquet(self.order_sheet_path, index=False)
         order.to_parquet(self.selection_order_path, index=False)
@@ -483,15 +486,20 @@ class V3Composition:
 
         data = self._pool.v3_catalog_path.parent.parent
         inputs = {}
+        # keyed by path RELATIVE to data, never `path.name`: three of the four
+        # label files are called labels.parquet, so a basename key kept whichever
+        # hashed last and dropped the 7.2MB primary for a 17KB sibling
         for path in (
             data / "v3" / "labels_rederived.parquet",
+            data / "route_labels" / "labels.parquet",
             data / "v3" / "labels.parquet",
             data / "v3" / "synthetic" / "labels.parquet",
+            data / "v3" / "augmented" / "labels.parquet",
             self._pool.v3_catalog_path,
             data / "route_labels" / "query_corpus_stats.parquet",
         ):
             if path.exists():
-                inputs[path.name] = hashlib.sha256(
+                inputs[path.relative_to(data).as_posix()] = hashlib.sha256(
                     path.read_bytes()
                 ).hexdigest()[:16]
         tiers = selected["certified"].value_counts().to_dict()
