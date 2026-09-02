@@ -98,6 +98,7 @@ def test_include_gated_is_the_deliberate_override(gated_pool):
 def admitted_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(v3, "V3_DIR", tmp_path)
     monkeypatch.setattr(v3, "AUGMENTED_DIR", tmp_path / "augmented")
+    monkeypatch.setattr(v3, "V4_DIR", tmp_path / "v4")
     monkeypatch.setattr(v3, "V2_LABELS", tmp_path / "v2_labels.parquet")
     pd.DataFrame({"dataset": ["lane-a"], "query_id": ["natural-1"]}).to_parquet(
         tmp_path / "v2_labels.parquet", index=False
@@ -105,7 +106,7 @@ def admitted_dirs(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_admitted_selection_drops_labelled_and_synthesized_rows(admitted_dirs):
+def test_picks_selection_drops_labelled_and_synthesized_rows(admitted_dirs):
     pd.DataFrame({
         "query_id": ["aug-1", "aug-2", "syn-1", "aug-1"],
         "query": ["q1", "q2", "q3", "q1"],
@@ -116,20 +117,20 @@ def test_admitted_selection_drops_labelled_and_synthesized_rows(admitted_dirs):
         admitted_dirs / "labels.parquet", index=False
     )
 
-    got = v3.admitted_selection()
+    got = v3.picks_selection(admitted_dirs / "admitted.parquet")
     assert list(got.columns) == ["dataset", "query_id", "query", "home_lane"]
     assert list(got["query_id"]) == ["aug-1"]  # aug-2 labelled, syn-1 isolated
     assert list(got["dataset"]) == ["lane-a"] == list(got["home_lane"])
 
 
-def test_admitted_selection_survives_a_missing_or_empty_file(admitted_dirs):
+def test_picks_selection_survives_a_missing_or_empty_file(admitted_dirs):
     columns = ["dataset", "query_id", "query", "home_lane"]
-    assert list(v3.admitted_selection().columns) == columns
-    assert v3.admitted_selection().empty
+    assert list(v3.picks_selection(admitted_dirs / "admitted.parquet").columns) == columns
+    assert v3.picks_selection(admitted_dirs / "admitted.parquet").empty
     pd.DataFrame(columns=["query_id", "query", "home_lane", "operator"]).to_parquet(
         admitted_dirs / "admitted.parquet", index=False
     )
-    assert v3.admitted_selection().empty
+    assert v3.picks_selection(admitted_dirs / "admitted.parquet").empty
 
 
 class _NoCorpora:

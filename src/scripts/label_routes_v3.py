@@ -12,6 +12,7 @@ actual index+label pass embeds corpora and needs `docker compose up -d`;
     poetry run python src/scripts/label_routes_v3.py --plan
     poetry run python src/scripts/label_routes_v3.py --only bright-leetcode
     poetry run python src/scripts/label_routes_v3.py --admitted
+    poetry run python src/scripts/label_routes_v3.py --v4
     poetry run python src/scripts/label_routes_v3.py
 """
 
@@ -56,6 +57,10 @@ from scripts.label_routes_synthetic import SYNTHETIC_OPERATOR
 
 V3_DIR = DATA_DIR / "v3"
 AUGMENTED_DIR = V3_DIR / "augmented"
+V4_DIR = DATA_DIR / "v4"
+V4_PICKS = V4_DIR / "rung_a_picks.parquet"
+V4_TARGETS = V4_DIR / "composition_targets_v4.parquet"
+V4_AUGMENTED_DIR = V4_DIR / "augmented"
 PER_DATASET = DATA_DIR / "v3" / "per_dataset.parquet"
 V2_LABELS = DATA_DIR / "route_labels" / "labels.parquet"
 DEFAULT_YIELD_FLOOR = 0.05  # keep the "need" size finite when yield is tiny
@@ -164,35 +169,75 @@ def class_supply_selection(spec: dict[str, int | None]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def admitted_selection() -> pd.DataFrame:
-    """The generated rows `composer.admit` credited, minus everything a label
-    file already covers; the synthesize rung is excluded because its answer
-    docs live only in the isolated collection label_routes_synthetic indexes."""
+def picks_selection(path: Path) -> pd.DataFrame:
+    """Queries a pick file names, minus everything a label file already covers;
+    the synthesize rung is excluded because its answer docs live only in the
+    isolated collection label_routes_synthetic indexes."""
     columns = ["dataset", "query_id", "query", "home_lane"]
-    path = V3_DIR / "admitted.parquet"
     if not path.exists():
-        print(f"no {path} — run the composer's admit door first")
+        print(f"no {path} — build the picks first")
         return pd.DataFrame(columns=columns)
     admitted = pd.read_parquet(path)
     if admitted.empty:
         return pd.DataFrame(columns=columns)
+    return _fresh_picks(admitted)
+
+
+def _fresh_picks(admitted: pd.DataFrame) -> pd.DataFrame:
+    """Pick rows minus everything a label file already covers, keyed on
+    (dataset, query_id); the synthesize rung is excluded (its answer docs live
+    only in the isolated synthetic collection). Existing labels save the work,
+    they never pick the rows — the caller already chose these."""
+    columns = ["dataset", "query_id", "query", "home_lane"]
+    if admitted.empty:
+        return pd.DataFrame(columns=columns)
     admitted = admitted.astype({"query_id": str})
-    done = [pd.read_parquet(V2_LABELS, columns=["query_id"])]
+    done = [pd.read_parquet(V2_LABELS, columns=["dataset", "query_id"])]
     for labels in (
         V3_DIR / "labels.parquet",
         V3_DIR / "synthetic" / "labels.parquet",
         AUGMENTED_DIR / "labels.parquet",
+        V4_DIR / "labels.parquet",
+        V4_AUGMENTED_DIR / "labels.parquet",
     ):
         if labels.exists():
-            done.append(pd.read_parquet(labels, columns=["query_id"]))
-    # a generated query_id is globally unique, so the lane is not part of the key
-    seen = set(pd.concat(done, ignore_index=True)["query_id"].astype(str))
-    fresh = admitted[
-        ~admitted["query_id"].isin(seen)
-        & (admitted["operator"] != SYNTHETIC_OPERATOR)
-    ].drop_duplicates("query_id")
-    lane = fresh["home_lane"].astype(str)
-    return fresh.assign(dataset=lane, home_lane=lane)[columns]
+            done.append(pd.read_parquet(labels, columns=["dataset", "query_id"]))
+    # Key on (dataset, query_id): natural query_ids are per-dataset locals,
+    # only augmented UUIDs are globally unique.
+    done_frame = pd.concat(done, ignore_index=True).astype(
+        {"dataset": str, "query_id": str}
+    )
+    seen = set(zip(done_frame["dataset"], done_frame["query_id"]))
+    admitted_lane = admitted["home_lane"].astype(str)
+    fresh = admitted.assign(dataset=admitted_lane, home_lane=admitted_lane)
+    keys = list(zip(fresh["dataset"].astype(str), fresh["query_id"].astype(str)))
+    is_fresh = pd.Series([key not in seen for key in keys], index=fresh.index)
+    fresh = fresh[
+        is_fresh & (fresh["operator"] != SYNTHETIC_OPERATOR)
+    ].drop_duplicates(["dataset", "query_id"])
+    return fresh[columns]
+
+
+def answer_covered(selection: pd.DataFrame) -> pd.DataFrame:
+    """The rows a lane's on-disk qrels answer at its own min_relevance. Runs
+    AFTER materialize_rung_a has landed tonight's qrels: retrieval on a query
+    with no judged doc is paid for and then dropped by `label`."""
+    kept = []
+    for lane, group in selection.groupby("dataset"):
+        spec = LANES.get(str(lane))
+        source = spec.source.name if spec is not None else str(lane)
+        min_rel = spec.min_relevance if spec is not None else 1
+        path = DATA_DIR / source / "qrels.parquet"
+        if not path.exists():
+            continue
+        qrels = pd.read_parquet(path, columns=["query_id", "relevance"])
+        judged = set(
+            qrels.loc[qrels["relevance"] >= min_rel, "query_id"].astype(str)
+        )
+        kept.append(group[group["query_id"].astype(str).isin(judged)])
+    return (
+        pd.concat(kept, ignore_index=True) if kept else selection.iloc[:0]
+    )
 
 
 def lane_minted_selection(audit_path: Path | None = None) -> pd.DataFrame:
@@ -254,10 +299,12 @@ class V3LabelSweep:
         selection: pd.DataFrame,
         *,
         augmented: bool = False,
+        out_dir: Path | None = None,
     ) -> None:
         self._client = client
         self._selection = selection
         self._augmented = augmented
+        self._out_dir = out_dir or (AUGMENTED_DIR if augmented else V3_DIR)
         self._dense = EmbeddingConfig(
             name="dense_base", model_id=DENSE_MODEL, kind="dense",
             size=DENSE_SIZE, distance=Distance.COSINE, parallel=4,
@@ -309,7 +356,7 @@ class V3LabelSweep:
             min_rel = LANES[key].min_relevance if key in LANES else 1
             labels = RouteLabels(
                 self._selection,
-                out_dir=AUGMENTED_DIR if self._augmented else V3_DIR,
+                out_dir=self._out_dir,
                 objective=RouterObjective(min_relevance=min_rel),
                 scored_against="supplemented" if self._augmented else "natural",
             )
@@ -331,6 +378,49 @@ class V3LabelSweep:
                 f"tied {shape.get('all_tied', 0):,} | zero {shape.get('all_zero', 0):,}"
             )
         return failed
+
+
+def _label_v4_targets(
+    *, plan: bool, force: bool, keys: tuple[str, ...] | None
+) -> None:
+    """Two sweeps over the v4 composition targets, split by provenance: natural
+    rows label against their lane corpus (answer-covered only); generated rows
+    use the supplemented/augmented regime. Synthetic rows are excluded by
+    `_fresh_picks` (their answer docs live in the isolated collection). Already
+    labelled targets fall out via the same dedup — reused, never relabelled."""
+    if not V4_TARGETS.exists():
+        print(f"no {V4_TARGETS} — run compose_v4.py first")
+        return
+    targets = pd.read_parquet(V4_TARGETS).astype({"dataset": str, "query_id": str})
+    is_natural = targets["provenance"].astype(str) == "natural"
+    natural = answer_covered(_fresh_picks(targets[is_natural]))
+    generated = _fresh_picks(targets[~is_natural])
+    print(
+        f"v4 targets: {len(targets):,} selected | to label: "
+        f"{len(natural):,} natural (answer-covered) + {len(generated):,} generated"
+    )
+
+    load_dotenv()
+    client = QdrantClient(
+        url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        api_key=os.getenv("QDRANT_API_KEY"), timeout=60,
+    )
+    for selection, augmented, out_dir in (
+        (natural, False, V4_DIR),
+        (generated, True, V4_AUGMENTED_DIR),
+    ):
+        if selection.empty:
+            continue
+        sweep = V3LabelSweep(client, selection, augmented=augmented, out_dir=out_dir)
+        label = "generated" if augmented else "natural"
+        if plan:
+            print(f"[{label} -> {out_dir}]")
+            print(sweep.plan(keys).to_string(index=False))
+            continue
+        failed = sweep.run(keys, force=force)
+        if failed:
+            print(f"[{label}] skipped (no judged queries): {failed}")
+        print(f"[{label}] labels -> {out_dir / 'labels.parquet'}")
 
 
 def main() -> None:
@@ -359,10 +449,37 @@ def main() -> None:
         help="label the generated rows the composer admitted "
         "(data/v3/admitted.parquet) into data/v3/augmented",
     )
+    parser.add_argument(
+        "--v4", action="store_true",
+        help="label the v4 rung's picks (data/v4/rung_a_picks.parquet) into "
+        "data/v4/labels.parquet — reads and writes nothing under data/v3",
+    )
+    parser.add_argument(
+        "--v4-targets", action="store_true", dest="v4_targets",
+        help="label the v4 COMPOSITION targets "
+        "(data/v4/composition_targets_v4.parquet): natural rows into "
+        "data/v4/labels.parquet, generated rows into data/v4/augmented — the "
+        "pre-label composition drives the selection, not a v3 order sheet",
+    )
     args = parser.parse_args()
 
-    if args.admitted:
-        selection = admitted_selection()
+    if args.v4_targets:
+        _label_v4_targets(
+            plan=args.plan,
+            force=args.force,
+            keys=tuple(args.only) if args.only else None,
+        )
+        return
+
+    if args.v4:
+        picks = picks_selection(V4_PICKS)
+        selection = answer_covered(picks)
+        print(
+            f"v4 picks: {len(picks):,} unlabelled, {len(selection):,} with a "
+            "judged doc"
+        )
+    elif args.admitted:
+        selection = picks_selection(V3_DIR / "admitted.parquet")
     elif args.order:
         selection = order_selection(cap=args.cap)
     elif args.supply:
@@ -385,7 +502,10 @@ def main() -> None:
         url=os.getenv("QDRANT_URL", "http://localhost:6333"),
         api_key=os.getenv("QDRANT_API_KEY"), timeout=60,
     )
-    sweep = V3LabelSweep(client, selection, augmented=args.admitted)
+    out_dir = V4_DIR if args.v4 else AUGMENTED_DIR if args.admitted else V3_DIR
+    sweep = V3LabelSweep(
+        client, selection, augmented=args.admitted, out_dir=out_dir
+    )
     keys = tuple(args.only) if args.only else None
     if args.plan:
         print(sweep.plan(keys).to_string(index=False))
@@ -393,8 +513,7 @@ def main() -> None:
     failed = sweep.run(keys, force=args.force)
     if failed:
         print(f"skipped (no judged queries): {failed}")
-    out_dir = AUGMENTED_DIR if args.admitted else V3_DIR
-    print(f"v3 labels -> {out_dir / 'labels.parquet'}")
+    print(f"labels -> {out_dir / 'labels.parquet'}")
 
 
 if __name__ == "__main__":
