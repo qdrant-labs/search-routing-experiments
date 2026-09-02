@@ -140,8 +140,8 @@ class LaneCV:
         train = (frame["dataset"] != lane).to_numpy()
         x = self._inputs(arm, frame, embeddings, train)
         route = self.table.route_targets().to_numpy(dtype=np.float32)
-        served, thresholds = self._served(arm, x, route, train, frame)
-        return self._readout(arm, lane, frame[~train], served, thresholds)
+        served, thresholds, fit_info = self._served(arm, x, route, train, frame)
+        return self._readout(arm, lane, frame[~train], served, thresholds, fit_info)
 
     def _inputs(
         self, arm: Arm, frame, embeddings: np.ndarray, train: np.ndarray
@@ -174,28 +174,36 @@ class LaneCV:
             features = self.table.feature_matrix
             feature = _zscore(features[train], features)
         if arm.shuffle_targets:
+            # permute ONLY among training rows: held-out-lane targets must not land in
+            # training positions (the caller fits on a subset of `train`).
             rng = np.random.default_rng(self.seed)
-            cell = None if cell is None else cell[rng.permutation(len(cell))]
-            corpus = (
-                None if corpus is None
-                else corpus[rng.permutation(len(corpus))]
-            )
-            feature = (
-                None if feature is None
-                else feature[rng.permutation(len(feature))]
-            )
+            idx = np.flatnonzero(train)
+            src = idx[rng.permutation(len(idx))]
+
+            def _shuf(a):
+                if a is None:
+                    return None
+                b = a.copy()
+                b[idx] = a[src]
+                return b
+
+            cell, corpus, feature = _shuf(cell), _shuf(corpus), _shuf(feature)
         return cell, corpus, feature
 
     def _served(
         self, arm, x, route, train, frame
-    ) -> tuple[list[str], np.ndarray]:
+    ) -> tuple[list[str], np.ndarray, dict[str, float]]:
         weights = np.where(
             frame["shape"].to_numpy() == "all_tied", self.tie_weight, 1.0
         ).astype(np.float32)
         probe = self._lgbm_probs if arm.learner == "lgbm" else self._mlp_probs
-        probs_train, probs_test = probe(arm, x, route, train, weights)
+        probs_train, probs_test, fit_info = probe(arm, x, route, train, weights)
         thresholds = tuned_thresholds(probs_train, frame[train])
-        return serve_from_probabilities(probs_test, thresholds), thresholds
+        return (
+            serve_from_probabilities(probs_test, thresholds),
+            thresholds,
+            fit_info,
+        )
 
     def _fit_val_split(
         self, train: np.ndarray
@@ -209,7 +217,7 @@ class LaneCV:
 
     def _mlp_probs(
         self, arm, x, route, train, weights
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
         from encoder_router.model import EncoderRouter
 
         cell, corpus, feature = self._targets(arm, train)
@@ -223,7 +231,15 @@ class LaneCV:
             x_val=x[val], val_route_targets=route[val],
             val_route_weights=weights[val],
         )
-        return router.probabilities(x[train]), router.probabilities(x[~train])
+        fit_info = {
+            "train_val_loss": float(router.best_val_loss),
+            "train_epochs": float(router.best_epoch + 1),
+        }
+        return (
+            router.probabilities(x[train]),
+            router.probabilities(x[~train]),
+            fit_info,
+        )
 
     def _lgbm_probs(
         self, arm, x, route, train, weights
@@ -253,6 +269,7 @@ class LaneCV:
         return (
             pd.DataFrame(probs["train"], columns=HEAD_ROUTES),
             pd.DataFrame(probs["test"], columns=HEAD_ROUTES),
+            {"train_val_loss": float("nan"), "train_epochs": float("nan")},
         )
 
     def _readout(
@@ -262,6 +279,7 @@ class LaneCV:
         test: pd.DataFrame,
         served: list[str],
         thresholds: np.ndarray,
+        fit_info: dict[str, float],
     ) -> dict[str, float | str]:
         """Agreements and scores over answerable rows only — an all-zero row
         has no right answer and must not count against anyone."""
@@ -300,6 +318,7 @@ class LaneCV:
             "const_dense": float(scores["dense_only"].mean()),
             "const_sparse": float(scores["sparse_only"].mean()),
             "const_rrf": float(scores["pure_rrf"].mean()),
+            **fit_info,
         }
 
 

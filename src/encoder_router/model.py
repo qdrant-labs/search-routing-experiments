@@ -165,7 +165,7 @@ class EncoderRouter:
         )
         pos_weight = _head_pos_weight(cell_targets)
         self._route_pos_weight = _head_pos_weight(route_targets)
-        best_state, best_val, stale = None, float("inf"), 0
+        best_state, best_val, best_epoch, stale = None, float("inf"), -1, 0
         self.history = []
         progress = tqdm(range(self.epochs), desc="fit", leave=False)
         for epoch in progress:
@@ -195,7 +195,7 @@ class EncoderRouter:
                     k: v.detach().clone()
                     for k, v in self.net.state_dict().items()
                 }
-                best_val, stale = score, 0
+                best_val, best_epoch, stale = score, epoch, 0
             else:
                 stale += 1
                 if stale >= self.patience:
@@ -203,6 +203,8 @@ class EncoderRouter:
         progress.close()
         if best_state is not None:
             self.net.load_state_dict(best_state)
+        self.best_val_loss = best_val if best_val < float("inf") else float("nan")
+        self.best_epoch = best_epoch
         return self
 
     def _tensors(
