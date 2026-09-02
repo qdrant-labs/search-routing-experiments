@@ -72,12 +72,12 @@ def _new_columns(labels: pd.DataFrame, absent_ids: list[str]) -> pd.DataFrame:
 
 
 def _pool_labels() -> pd.DataFrame:
-    """The selector's own union (re-derived v2 pool + additive v3 labels), so a
-    v3-labelled query gets catalog rows and therefore cell membership — the 342
-    in-loop rows previously fell through to zero cells silently."""
+    """Every rung's labels, so a labelled query gets catalog rows and therefore
+    cell membership — the 342 in-loop rows previously fell through to zero cells
+    silently, and a native-only pool would do the same to the v4 rung's."""
     from composition.pool_v3 import LabelledPool
 
-    return LabelledPool().labels()[["dataset", "query_id", "query"]]
+    return LabelledPool(native_only=False).labels()[["dataset", "query_id", "query"]]
 
 
 def build_v3_catalog(*, force: bool = False) -> pd.DataFrame:

@@ -167,11 +167,14 @@ def main() -> None:
     assert eval_frame["certified"].all(), "eval_reserve must be certified-only"
 
     key_to_cluster = dict(zip(_key(pool), labelled.cluster_ids(pool)))
-    reserve_clusters = {key_to_cluster[k] for k in _key(reserve) if k in key_to_cluster}
-    # excludes reserve's own cluster-mates too, certified or not — mirrors
-    # LabelledPool.reserve_exclusion_keys, restated by KEY here because this
-    # reserve is read back from disk with its own fresh index, not pool's
-    exclude_keys = {k for k, c in key_to_cluster.items() if c in reserve_clusters}
+    # the reserve fence is LabelledPool's alone — a restatement here silently
+    # went stale the day the pool's fence started grouping on family as well as
+    # near-dup cluster. A boolean mask keeps pool's own index, which is what
+    # reserve_exclusion_keys needs and what merge() would have thrown away.
+    in_reserve = pool[_key(pool).isin(set(_key(reserve)))]
+    exclude_keys = set(
+        _key(pool.loc[labelled.reserve_exclusion_keys(pool, in_reserve)])
+    )
     candidate = pool[pool["certified"] & ~_key(pool).isin(exclude_keys)]
 
     arm_a_keys = selected.loc[selected["certified"], ["dataset", "query_id"]]
