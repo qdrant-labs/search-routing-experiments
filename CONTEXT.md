@@ -301,6 +301,18 @@ parent, not a fresh one)
 
 ### Datasets
 
+**Query provenance**:
+Who wrote a registered source's queries — `DatasetCard.query_provenance`, one
+of `human` / `llm` / `template` / `unknown`. A source fact, never inferred from
+the rows and never from `llm_target`, which describes the retrieval task's
+orientation instead. The field has no default and `unknown` means *not
+ratified*, so an unchecked source reads as unchecked rather than as human. Say
+"published" for any registered source's own queries whatever their authorship,
+and "minted here" for rows this pipeline generated.
+_Avoid_: "natural" or "real user query" for published rows (ScIRGen-Geo is
+LLM-written, LIMIT is template-constructed), reading `llm_target` as
+provenance, defaulting an unknown source to `human`
+
 **Profiling**:
 Running feature extractors over a query sample from a registered dataset
 (`DatasetRegistry.profile`) to estimate its feature distribution.
@@ -534,6 +546,24 @@ Targets are quantities; measured features are spans + scalars. The
 verification loop checks measured-vs-target.
 
 ### Composition
+
+**Labelled supply**:
+Every query carrying a route measurement — the pool, inventory, uncurated. The
+v3 build's supply is v3-native rows only; the re-scored v2 rows sit in the same
+pool measuring yields and priors and never compose.
+_Avoid_: calling it the dataset, quoting its size as the artifact's size
+
+**Composed dataset**:
+What the composer drew from the labelled supply under a target split and the
+per-source cap — `data/v3/dataset_v3.parquet`, the deliverable. Its v2-era
+counterpart is `data/composition/cell_selection.parquet`.
+_Avoid_: comparing one generation's supply against the other's composed dataset
+
+**Certified row**:
+A composed-dataset row whose winning route beat the runner-up by at least
+`class_margin`. `RouterObjective.decisive_margin` (0.4) is the stricter
+hit-vs-miss boundary — reported beside it, never gated on.
+_Avoid_: gold (ambiguous with qrels), treating certification as a draw record
 
 **Feature table**:
 The materialized composition substrate: one parquet of (dataset, query_id,

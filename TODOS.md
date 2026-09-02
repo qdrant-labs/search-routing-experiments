@@ -463,3 +463,32 @@ Deferred by the grill — do not start (full text in SPEC "Deferred questions"):
 - Stale `cell` values on rows labelled under the old predicate (d62f). Scores
   are unaffected; any per-cell readout over existing labels reads the old
   partition until a rebuild.
+
+## Query provenance on the card (2026-08-24, SPEC decision 65)
+
+Field shipped, notebook consumes it, two ratifications evidenced
+(`scirgen-geo-en` → LLM, `limit` → TEMPLATE, both from `docs/datasets.md`).
+
+- [ ] Ratify the eight CRUMB lanes. They ship `UNKNOWN`, so any provenance
+      readout shows ~8,855 v3 rows as unratified. The `jfkback/crumb` card
+      documents the tasks, not who wrote the queries; `llm_target=True` on
+      that card is the task-orientation flag and says nothing. Offline read of
+      the upstream card only — never a smoke fetch.
+- [ ] `quest` is HUMAN on the strength of "3,357 natural queries"
+      (`docs/datasets.md:60`), but the same entry mentions augmented splits.
+      Confirm the augmented rows are not in our snapshot, or split the card.
+
+Surfaced by the showcase rewrite, not caused by it:
+
+- [ ] `min_zipf` / `mean_pmi` are NaN on ~698 rows (1.5%). NaN fails every
+      band silently, so the rarity and PMI strata under-count by that much.
+- [ ] Corruption is computed twice and the two disagree on ~3% of rows: the
+      catalog columns include the TOKENIZER engine, `attach_strata`'s
+      re-extraction does not. The showcase reads the catalog's derived total;
+      which pass is authoritative is undecided, and a corruption FLOOR must
+      not be enforced before it is.
+- [ ] `LaneOrder.build` returned a column-less frame when nothing was owed —
+      an empty boolean LIST selects columns, not rows. Fixed at the filter
+      (one ranked index instead of a mask) with a zero-residual case in
+      `tests/test_lane_carrier.py`. Left here because the same shape may exist
+      elsewhere: grep for `frame[[` over a comprehension.

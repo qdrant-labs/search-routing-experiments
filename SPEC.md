@@ -1037,6 +1037,26 @@ is at commit 26b9a93.
     designed next step; what was missing was a trustworthy measurement to
     arbitrate between them. One re-run buys arbitration for all three.*
 
+65. **Query authorship is a card fact, never inferred** (grill-me 2026-08-24).
+    The v3 showcase reported 71,966 rows as "natural (real user query)" when
+    52,343 of them are ScIRGen-Geo, whose own catalog entry calls it
+    synthetic-but-filtered LLM generation, and 723 are LIMIT, constructed from
+    a template. Nothing on `DatasetCard` recorded authorship, and `llm_target`
+    does not: it describes the retrieval task's orientation and is `True` for
+    CRUMB, whose queries no model wrote as far as anyone has checked.
+    `DatasetCard.query_provenance: QueryProvenance` now carries it —
+    `HUMAN | LLM | TEMPLATE | UNKNOWN`, **with no default**, so a new
+    registration cannot pass silently as human-written. `UNKNOWN` is a
+    ratification state in the sense of decision 7 (profiling proposes, a human
+    ratifies), not a fallback: the eight CRUMB lanes hold it until someone
+    reads the upstream card, and any consumer that groups by provenance shows
+    them as unratified rather than folding them into `HUMAN`. Two consequences
+    worth stating, because they are the reason the field earns its place:
+    the published half of v3's supply is ~74% machine-written, so v3's claim
+    was never "our queries are human" but "our minted queries are grounded in
+    a real corpus document and their route labels were earned by retrieval";
+    and a boolean would have been wrong, since LIMIT has no author at all.
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log
