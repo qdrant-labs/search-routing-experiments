@@ -1,6 +1,6 @@
 """Cost planner — partitions the frozen Rung A plan into cache hits and
 misses. Never mutates the plan: if misses exceed the paid-label budget the
-run fails BEFORE spending (spec:156-159). Changing the plan size or budget
+run fails BEFORE spending. Changing the plan size or budget
 is a new, explicitly fingerprinted run.
 """
 
@@ -47,7 +47,7 @@ class CostPlanner:
         budget: int,
     ) -> CostPartition:
         """`fingerprints[(dataset, query_id)] = (query_fp, corpus_fp, qrels_fp,
-        retrieval_stack_fp)`. Missing/blank fingerprints (spec:151-153) go to
+        retrieval_stack_fp)`. Missing/blank fingerprints go to
         misses."""
         hit_rows: list[int] = []
         miss_rows: list[int] = []

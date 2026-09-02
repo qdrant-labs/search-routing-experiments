@@ -37,7 +37,7 @@ def _floors_from_recipe(
     floors: dict[tuple[str, str], int] = {}
     cells = sorted({c for cs in catalog["cells"] for c in cs})
     for cell in cells:
-        # spec:180 — the exact scaled value stays configurable, not an
+        # the exact scaled value stays configurable, not an
         # implementation constant.
         scaled = max(stratum_floor, rho * len(catalog) / max(1, len(cells)))
         floors[("cell", cell)] = int(scaled)

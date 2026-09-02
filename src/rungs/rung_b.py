@@ -1,10 +1,10 @@
 """Rung B: reporting-only validation over the completed planned set.
 
-Membership is immutable — spec:302-305. Rung B may INSPECT post-label
+Membership is immutable once the plan freezes. Rung B may INSPECT post-label
 outcomes but never ranks, optimizes, substitutes, or removes rows. Its only
 failure modes are integrity conditions (missing rows, invalid fingerprints,
 duplicate identities, broken answer manifests); quality judgments belong to
-external acceptance (spec:319-322).
+external acceptance.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class RungBIntegrityError(RuntimeError):
 
 @dataclass(frozen=True)
 class RungBReport:
-    """Ten metrics per spec:306-316. Every count is a scalar or a small
+    """Ten metrics, every one a scalar or a small marginal. Every count is a scalar or a small
     marginal, so a report round-trips through JSON."""
 
     lane_representation: dict[str, int]

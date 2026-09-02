@@ -1,6 +1,6 @@
 """Cost planner CLI: partition a frozen Rung A plan into cache hits and
 misses under the full fingerprint key. Fails hard when misses exceed the
-paid-label budget (spec:156-159).
+paid-label budget.
 
     poetry run python src/scripts/plan_labels_v2.py \\
         --plan src/data/rungs/smoke/planned_set.parquet \\
@@ -29,8 +29,8 @@ def _load_fingerprints(path: Path) -> dict[tuple[str, str], tuple[str, str, str,
     missing = [c for c in FP_COLUMNS if c not in frame.columns]
     if missing:
         raise ValueError(
-            f"{path} missing fingerprint columns {missing}; per spec:151-153 "
-            "absent fingerprints are cache misses, so run with --strict to fail."
+            f"{path} missing fingerprint columns {missing}; absent "
+            "fingerprints are cache misses, so run with --strict to fail."
         )
     return {
         (row["dataset"], row["query_id"]): tuple(str(row[c]) for c in FP_COLUMNS)

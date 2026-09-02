@@ -3,7 +3,7 @@ candidate catalog.
 
 Reads only pre-label fields — never a route, margin, depth, or label
 provenance. Cache status is deliberately absent from the trace: an empty
-cache and a full cache must produce byte-identical artifacts (spec:274).
+cache and a full cache must produce byte-identical artifacts.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ _BAND_AXES: tuple[str, ...] = ("corruption_degree", *CORPUS_AXES)
 
 @dataclass(frozen=True)
 class RungAConfig:
-    """One run's dials. Every value is an explicit input — spec:180-183 forbids
-    the composer from carrying θ0/θ_step/ρ/κ as implementation constants."""
+    """One run's dials. Every value is an explicit input: the composer never
+    carries θ0/θ_step/ρ/κ as implementation constants."""
 
     planned_size_ceiling: int
     floors: dict[StratumKey, int]
@@ -82,7 +82,7 @@ class CoverageLine:
 @dataclass(frozen=True)
 class CoverageReport:
     """`pool -> achievable -> planned -> completed` for every stratum plus
-    build-level totals (spec:316)."""
+    build-level totals."""
 
     planned_size: int
     ceiling: int
@@ -94,7 +94,7 @@ class CoverageReport:
 
 @dataclass(frozen=True)
 class RungAArtifacts:
-    """The atomic output set (spec:264-271). `provenance` carries every fp the
+    """The atomic output set. `provenance` carries every fp the
     inputs stamp; `debt` is the generation queue the loop consumes next."""
 
     planned_set: pd.DataFrame
@@ -448,7 +448,7 @@ def _pick_for(
 def _structural_gain(
     row: pd.Series, chosen: pd.DataFrame | None, config: RungAConfig
 ) -> float:
-    """G(q|D) = max over stratum(q) of max(0, 1 - n_s(D)/f_s) (spec:206-208)."""
+    """G(q|D) = max over stratum(q) of max(0, 1 - n_s(D)/f_s)."""
     strata = row["_strata"]
     if not strata:
         return 0.0
@@ -511,7 +511,7 @@ def _novelty(row: pd.Series, candidates: pd.DataFrame, chosen_set: set[int]) -> 
 
 
 def _provenance_score(row: pd.Series, family_used: dict[str, int], total: int) -> float:
-    """Π(q|D) = 1 - count(fam(q), D) / max(1, |D|) (spec:233-235)."""
+    """Π(q|D) = 1 - count(fam(q), D) / max(1, |D|)."""
     return _provenance_score_for_family(str(row["family"]), family_used, total)
 
 
@@ -531,7 +531,7 @@ def _residual_fill(
     prov_used: dict[str, int],
 ) -> None:
     """Fill remaining capacity by novelty > underrepresented provenance > lane
-    need > row_id (spec:257-259). Uses no label-derived quantity."""
+    need > row_id. Uses no label-derived quantity."""
     chosen_set = set(chosen)
     remaining = [i for i in range(len(candidates)) if i not in chosen_set]
     for i in sorted(remaining, key=lambda k: state.row_ids[k]):

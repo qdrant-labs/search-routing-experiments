@@ -71,7 +71,7 @@ _IDENTIFIER_PREFIX = f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
 
 @dataclass(frozen=True)
 class CatalogConfig:
-    """Explicit acquisition policy (spec:97-102). Never inferred from historical
+    """Explicit acquisition policy. Never inferred from historical
     label membership: expanding a lane cannot require a composer change."""
 
     per_lane_cap: dict[str, int] = field(default_factory=dict)
@@ -127,7 +127,7 @@ class CandidateCatalog:
     def _natural(self) -> tuple[pd.DataFrame, pd.DataFrame, int]:
         """Registry cache filtered by the per-lane answer-coverage guarantee.
         Skips lanes whose local corpus/qrels are absent — those cannot promise
-        corpus inclusion at label time (spec:352)."""
+        corpus inclusion at label time."""
         frames: list[pd.DataFrame] = []
         manifest_frames: list[pd.DataFrame] = []
         dropped = 0
@@ -295,7 +295,7 @@ class CandidateCatalog:
     # ------------------------------------------------------------- strata ---
     def _attach_strata(self, rows: pd.DataFrame) -> pd.DataFrame:
         """Compute cells, corruption_degree, and the three corpus bands per
-        row. Bands the local join cannot resolve are `unknown` (spec:114-116)."""
+        row. Bands the local join cannot resolve are `unknown`."""
         if rows.empty:
             for col in ("cells", "corruption_degree", *CORPUS_AXES):
                 rows[col] = pd.Series(dtype=object)
@@ -363,7 +363,7 @@ def _identity_columns() -> tuple[str, ...]:
 
 
 def _admitted_augmentation(pool: pd.DataFrame, aug_dir: Path) -> pd.DataFrame:
-    """Filter pool to rows the shared coherence/credit policy passed (spec:123):
+    """Filter pool to rows the shared coherence/credit policy passed:
     ungated rows in, coherence-gated rows in iff the audit says True, and
     declaration-audited rows in iff their query_id was cleared."""
     gate = pool["credit_gate"].fillna("none").astype(str)
@@ -410,7 +410,7 @@ def _cells(features: pd.DataFrame) -> list[list[str]]:
 def _corpus_bands(rows: pd.DataFrame, data_dir: Path) -> dict[str, np.ndarray]:
     """The three marginal corpus bands from query_corpus_stats.parquet — an
     absent stats file leaves every row `unknown` (a coverage miss, never a
-    band; spec:114-116)."""
+    band)."""
     n = len(rows)
     unknown = np.full(n, UNKNOWN, dtype=object)
     qcs_path = data_dir / "route_labels" / "query_corpus_stats.parquet"

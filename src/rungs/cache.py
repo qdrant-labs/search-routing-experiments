@@ -1,10 +1,10 @@
 """Generic label cache — an infrastructure service, not a composition input.
 
-A reusable entry is keyed on the full fingerprint tuple in spec:143-148. An
+A reusable entry is keyed on the full fingerprint tuple. An
 identity-only match is a cache miss: changing the corpus or the retrieval
 stack changes the route outcome, and reusing a stale row would silently
 lie about what the label measures. Absent fingerprints on legacy label
-files are therefore misses too (spec:151-153).
+files are therefore misses too.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ FP_COLUMNS = ("query_fp", "corpus_fp", "qrels_fp", "retrieval_stack_fp")
 
 @dataclass(frozen=True)
 class CacheKey:
-    """Full-fingerprint identity of a labeled row (spec:143-148)."""
+    """Full-fingerprint identity of a labeled row."""
 
     dataset: str
     query_id: str
@@ -47,8 +47,9 @@ class CacheKey:
 
 class LabelCache:
     """Read-only view over label files that carry the four fingerprints. Rows
-    whose fingerprint columns are absent or blank are ignored — a strict
-    reading of spec:151-153. Writes belong to whichever process labels."""
+    whose fingerprint columns are absent or blank are ignored: a row that
+    cannot prove what it measured is not reusable. Writes belong to
+    whichever process labels."""
 
     def __init__(self, sources: Iterable[Path] | None = None) -> None:
         self._sources: list[Path] = list(sources) if sources is not None else []
@@ -69,7 +70,7 @@ class LabelCache:
             frame = pd.read_parquet(path)
             missing = [c for c in FP_COLUMNS if c not in frame.columns]
             if missing:
-                # a legacy label file without fingerprints is not reusable — spec:151-153
+                # a legacy label file without fingerprints is not reusable
                 continue
             frame = frame.astype({
                 "dataset": str, "query_id": str,
