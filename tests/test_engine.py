@@ -21,8 +21,22 @@ def _message(content: str | None = "ok", tool_calls=None):
 
 
 def _response(message, total_tokens: int | None = 42):
-    usage = None if total_tokens is None else SimpleNamespace(total_tokens=total_tokens)
+    """`total_tokens` split across prompt/completion, which is what the engine
+    reads now — output is priced 5x input, so one blended number cannot bill."""
+    usage = None if total_tokens is None else SimpleNamespace(
+        total_tokens=total_tokens,
+        prompt_tokens=total_tokens - 2,
+        completion_tokens=2,
+    )
     return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+
+def _uncapped() -> Augmenter:
+    """An engine with no budget and no tool/extractor build — `_completion` is
+    an instance method now, but these tests exercise only its accounting."""
+    engine = Augmenter.__new__(Augmenter)
+    engine._budget = None
+    return engine
 
 
 def test_completion_reports_elapsed_time_and_tokens(monkeypatch):
@@ -30,8 +44,8 @@ def test_completion_reports_elapsed_time_and_tokens(monkeypatch):
         "augmentation.engine.completion",
         lambda **kwargs: _response(_message()),
     )
-    _, elapsed, tokens = Augmenter._completion(model="x", messages=[])
-    assert tokens == 42
+    _, elapsed, prompt, answer = _uncapped()._completion(model="x", messages=[])
+    assert prompt + answer == 42
     assert elapsed >= 0.0
 
 
@@ -41,8 +55,8 @@ def test_completion_tolerates_a_response_with_no_usage(monkeypatch):
         "augmentation.engine.completion",
         lambda **kwargs: _response(_message(), total_tokens=None),
     )
-    _, _, tokens = Augmenter._completion(model="x", messages=[])
-    assert tokens == 0
+    _, _, prompt, answer = _uncapped()._completion(model="x", messages=[])
+    assert (prompt, answer) == (0, 0)
 
 
 def test_run_single_shot_costs_exactly_one_hop(monkeypatch):

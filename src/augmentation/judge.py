@@ -20,7 +20,7 @@ from tqdm.auto import tqdm
 from augmentation.config import AugmentationConfig
 from augmentation.constructed import ConstructedDocs
 from augmentation.core import CreditGate
-from augmentation.engine import Augmenter, Spend, windowed_map
+from augmentation.engine import Augmenter, Budget, Spend, windowed_map
 from augmentation.parents import ParentPool
 
 _COLUMNS: Final[tuple[str, ...]] = (
@@ -59,8 +59,10 @@ class CoherenceJudge:
         config: AugmentationConfig | None = None,
         docs: ConstructedDocs | None = None,
         parents: ParentPool | None = None,
+        budget: Budget | None = None,
     ) -> None:
         self.config = config or AugmentationConfig()
+        self._budget = budget
         self.docs = docs or ConstructedDocs(self.config.paths)
         self.parents = parents
         """Inject's evidence is a lane document, so a row grounded in one is
@@ -125,7 +127,7 @@ class CoherenceJudge:
             judged=0, passed=0, failed=0, unparsed=0, no_evidence=0,
         )
         engine = self._engine or Augmenter(
-            self.config.engine, seed=self.config.seed
+            self.config.engine, seed=self.config.seed, budget=self._budget
         )
         constructed = self.docs.load()
         spend = Spend()

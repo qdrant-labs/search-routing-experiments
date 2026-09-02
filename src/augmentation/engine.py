@@ -140,6 +140,58 @@ class AugmentationOutcome(BaseModel):
     """Wall-clock seconds spent inside `completion()` for this outcome."""
 
 
+class BudgetExceeded(RuntimeError):
+    """The run's dollar ceiling stopped a call."""
+
+
+class Budget:
+    """One RUN's dollar ceiling, priced from real prompt/completion counts
+    because output costs 5x input. Shared by every component that spends —
+    `Spend` cannot host this, it is rebuilt at five nested scopes."""
+
+    def __init__(
+        self,
+        max_usd: float,
+        *,
+        usd_per_mtok_in: float,
+        usd_per_mtok_out: float,
+    ) -> None:
+        self.max_usd = max_usd
+        self.spent_usd = 0.0
+        self.calls = 0
+        self._in = usd_per_mtok_in
+        self._out = usd_per_mtok_out
+
+    def _price(self, prompt_tokens: int, completion_tokens: int) -> float:
+        return (prompt_tokens * self._in + completion_tokens * self._out) / 1e6
+
+    def reserve(self, messages: object, max_tokens: int) -> None:
+        """Refuse a call the remaining budget cannot cover, BEFORE it runs —
+        the prompt estimate is deliberately generous (3 chars per token)."""
+        estimate = self._price(len(str(messages)) // 3, max_tokens)
+        if self.spent_usd + estimate > self.max_usd:
+            raise BudgetExceeded(
+                f"spent ${self.spent_usd:.4f} of ${self.max_usd:.2f} ceiling over "
+                f"{self.calls:,} calls; the next needs up to ${estimate:.4f} — "
+                "stopping before it runs"
+            )
+
+    def charge(self, prompt_tokens: int, completion_tokens: int) -> None:
+        """Bill a finished call at its exact cost, and hard-stop if `reserve`'s
+        estimate was too low — the ceiling holds even when the estimate does not."""
+        self.spent_usd += self._price(prompt_tokens, completion_tokens)
+        self.calls += 1
+        if self.spent_usd > self.max_usd:
+            raise BudgetExceeded(
+                f"spent ${self.spent_usd:.4f}, over the ${self.max_usd:.2f} ceiling"
+            )
+
+    def report(self) -> str:
+        return (
+            f"${self.spent_usd:.4f} of ${self.max_usd:.2f} over {self.calls:,} LLM calls"
+        )
+
+
 class Spend:
     """Cumulative cost: hops (`completion()` round-trips), tokens, LLM
     seconds, PLUS wall-clock time since construction. Every outcome adds in,
@@ -229,8 +281,14 @@ class Augmenter:
         *,
         seed: int = 0,
         extractor: FeatureExtractor | None = None,
+        budget: Budget | None = None,
     ) -> None:
         settings = settings or EngineSettings()
+        # None = uncapped, which is what every caller got before budgets
+        # existed. A run-scoped Budget must be passed IN, never defaulted here:
+        # the judge builds its own Augmenter, and two default budgets would be
+        # two ceilings instead of one.
+        self._budget = budget
         self.model = settings.model
         self.max_rounds = settings.max_rounds
         self.max_attempts = settings.max_attempts
@@ -343,25 +401,30 @@ class Augmenter:
             **spend.as_dict(),
         )
 
-    @staticmethod
-    def _completion(**kwargs) -> tuple[object, float, int]:
-        """One `completion()` round-trip, timed and measured — the one place
-        cost enters the system, so every hop above reads it from here rather
-        than each call site re-deriving it."""
+    def _completion(self, **kwargs) -> tuple[object, float, int, int]:
+        """One `completion()` round-trip, timed and priced — the one place cost
+        enters the system, so the budget gate lives here and nowhere else, and
+        every hop above reads its counts from here."""
+        if self._budget is not None:
+            self._budget.reserve(kwargs.get("messages"), kwargs.get("max_tokens", 0))
         start = time.monotonic()
         response = completion(**kwargs)
         elapsed = time.monotonic() - start
-        tokens = getattr(response, "usage", None)
-        return response, elapsed, getattr(tokens, "total_tokens", 0) or 0
+        usage = getattr(response, "usage", None)
+        prompt = getattr(usage, "prompt_tokens", 0) or 0
+        answer = getattr(usage, "completion_tokens", 0) or 0
+        if self._budget is not None:
+            self._budget.charge(prompt, answer)
+        return response, elapsed, prompt, answer
 
     def _single_shot(self, messages: list[dict]) -> tuple[str | None, Spend]:
-        response, elapsed, tokens = self._completion(
+        response, elapsed, prompt, answer = self._completion(
             model=self.model, messages=messages, max_tokens=1024
         )
         text = _clean(response.choices[0].message.content or "")
         messages.append({"role": "assistant", "content": text})
         spend = Spend()
-        spend.add_hop(elapsed, tokens)
+        spend.add_hop(elapsed, prompt + answer)
         return (text or None), spend
 
     def _tool_rounds(
@@ -374,14 +437,14 @@ class Augmenter:
         trace: list[str] = []
         spend = Spend()
         for _ in range(self.max_rounds):
-            response, elapsed, tokens = self._completion(
+            response, elapsed, prompt, answer = self._completion(
                 model=self.model,
                 messages=messages,
                 tools=self._tool_schemas,
                 tool_choice="auto",
                 max_tokens=1024,
             )
-            spend.add_hop(elapsed, tokens)
+            spend.add_hop(elapsed, prompt + answer)
             message = response.choices[0].message
             messages.append(message.model_dump())
             calls = getattr(message, "tool_calls", None)

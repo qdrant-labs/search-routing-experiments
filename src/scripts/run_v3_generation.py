@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 
 from augmentation.campaign import AugmentationCampaign, RowBudget
 from augmentation.config import AugmentationConfig
+from augmentation.engine import Budget
 from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
@@ -41,12 +42,15 @@ def stage(n: int | str, title: str) -> None:
     print(f"\n{'=' * 72}\n== STAGE {n}: {title}   [{now}  +{time.time() - _T0:,.0f}s]\n{'=' * 72}")
 
 
-def _loop(composer: V3Composition) -> AugmentationLoop:
+def _loop(composer: V3Composition, ceiling: Budget) -> AugmentationLoop:
     catalog = read_catalog(composer.catalog_path)
     selection = pd.read_parquet(composer.dataset_path).astype({"query_id": str})
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
     return AugmentationLoop(
-        selection, sheet_path=composer.order_sheet_path, parents=parents
+        selection,
+        sheet_path=composer.order_sheet_path,
+        parents=parents,
+        budget=ceiling,
     )
 
 
@@ -336,9 +340,9 @@ def label_admitted() -> None:
                 "(qdrant retrieval, no LLM); how corruption reaches the pool")
     from qdrant_client import QdrantClient
 
-    from scripts.label_routes_v3 import V3LabelSweep, admitted_selection
+    from scripts.label_routes_v3 import V3_DIR, V3LabelSweep, picks_selection
 
-    selection = admitted_selection()
+    selection = picks_selection(V3_DIR / "admitted.parquet")
     if selection.empty:
         print("no admitted operator rows awaiting labels")
         return
@@ -428,11 +432,17 @@ def main() -> None:
                              "pilot with e.g. 30)")
     parser.add_argument("--skip-lanes", action="store_true",
                         help="skip stages 5c/7b (the lane rung)")
+    parser.add_argument("--max-spend-usd", type=float, default=10.0,
+                        help="dollar ceiling for this run, shared by generation "
+                             "and the judge; a call that would breach it is "
+                             "refused before it is made (default: 10)")
     parser.add_argument("--fold-only", action="store_true",
                         help="produce nothing: skip every generating and "
                              "labelling-order stage, then admit, label and "
                              "fold what is already banked (stages 5b-9)")
     args = parser.parse_args()
+    if args.max_spend_usd <= 0:
+        parser.error("--max-spend-usd must be positive")
     if args.fold_only:
         # skip everything that PRODUCES; the labelling stages 7-7c still run
         args.skip_parents = args.skip_synthetic = True
@@ -447,7 +457,14 @@ def main() -> None:
     if not args.plan and not args.skip_labelling:
         label_targets(composer, args.label_cap)
     before = _tiers(composer)
-    loop = _loop(composer)
+    engine_rates = AugmentationConfig().engine
+    ceiling = Budget(
+        args.max_spend_usd,
+        usd_per_mtok_in=engine_rates.usd_per_mtok_in,
+        usd_per_mtok_out=engine_rates.usd_per_mtok_out,
+    )
+    loop = _loop(composer, ceiling)
+    # the judge reuses loop.engine, so it spends against the same ceiling
     judge = CoherenceJudge(
         loop.engine, config=loop.config, docs=loop.docs, parents=loop.parents
     ) if args.llm_coherence else None
@@ -476,7 +493,7 @@ def main() -> None:
     label_admitted()
     catalog_refresh()
     rebuild(composer, before)
-    print(f"\nDONE in {time.time() - _T0:,.0f}s")
+    print(f"\nDONE in {time.time() - _T0:,.0f}s  |  spend: {ceiling.report()}")
 
 
 if __name__ == "__main__":

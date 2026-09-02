@@ -204,6 +204,19 @@ class EngineSettings(BaseModel):
         default=6,
         description="Tool-call rounds per attempt (tool-loop mode only).",
     )
+    max_spend_usd: float = Field(
+        default=10.0,
+        description=(
+            "Dollar ceiling for one RUN, enforced before each call by "
+            "`engine.Budget`. Scripts expose it as --max-spend-usd."
+        ),
+    )
+    usd_per_mtok_in: float = Field(
+        default=1.0, description="Prompt price per million tokens (haiku-4-5)."
+    )
+    usd_per_mtok_out: float = Field(
+        default=5.0, description="Completion price per million tokens (haiku-4-5)."
+    )
 
 
 class AugmentationConfig(BaseModel):

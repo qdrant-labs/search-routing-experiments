@@ -17,7 +17,8 @@ import argparse
 import pandas as pd
 
 from augmentation.campaign import AugmentationCampaign
-from augmentation.config import AugmentationPaths
+from augmentation.config import AugmentationConfig, AugmentationPaths
+from augmentation.engine import Budget
 from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from augmentation.parents import ParentPool
@@ -27,7 +28,17 @@ from composition.floors import read_catalog
 from dataset_registry import DATASETS
 
 
-def _loop(v3: bool) -> AugmentationLoop:
+def _budget(max_spend_usd: float) -> Budget:
+    """One ceiling for the whole run, priced from the engine's own rates."""
+    engine = AugmentationConfig().engine
+    return Budget(
+        max_spend_usd,
+        usd_per_mtok_in=engine.usd_per_mtok_in,
+        usd_per_mtok_out=engine.usd_per_mtok_out,
+    )
+
+
+def _loop(v3: bool, budget: Budget) -> AugmentationLoop:
     if v3:
         composer = V3Composition()
         catalog_path = composer.catalog_path
@@ -40,7 +51,9 @@ def _loop(v3: bool) -> AugmentationLoop:
         sheet_path = fill.order_sheet_path
     catalog = read_catalog(catalog_path)
     parents = ParentPool(catalog, selection, {d.name: d for d in DATASETS})
-    return AugmentationLoop(selection, sheet_path=sheet_path, parents=parents)
+    return AugmentationLoop(
+        selection, sheet_path=sheet_path, parents=parents, budget=budget
+    )
 
 
 def main() -> None:
@@ -72,29 +85,43 @@ def main() -> None:
         "--v3", action="store_true",
         help="run against V3Composition's selection + order sheet instead of CellFill's",
     )
+    parser.add_argument(
+        "--max-spend-usd", type=float, default=10.0,
+        help="dollar ceiling for this run; a call that would breach it is "
+             "refused before it is made (default: 10)",
+    )
     args = parser.parse_args()
+    if args.max_spend_usd <= 0:
+        parser.error("--max-spend-usd must be positive")
 
     if args.n is not None and not args.floor:
         parser.error("--n only applies with --floor")
     if args.plan and args.floor:
         parser.error("--plan and --floor are mutually exclusive")
 
-    loop = _loop(args.v3)
+    budget = _budget(args.max_spend_usd)
+    loop = _loop(args.v3, budget)
 
     if args.floor:
         produced = loop.run(args.floor, n=args.n)
-        print(f"{len(produced)} rows -> {loop.pool.path}")
+        print(f"{len(produced)} rows -> {loop.pool.path}  [{budget.report()}]")
         return
 
     campaign = AugmentationCampaign(
         loop,
         pilot_n=args.pilot_n,
-        judge=CoherenceJudge(config=loop.config) if args.llm_coherence else None,
+        # the judge spends too, and on the SAME ceiling — it builds its own
+        # Augmenter, so without this it would be a second uncapped spender
+        judge=(
+            CoherenceJudge(config=loop.config, budget=budget)
+            if args.llm_coherence else None
+        ),
     )
     if args.plan:
         campaign.plan()
         return
     campaign.run()
+    print(f"spend: {budget.report()}")
 
 
 if __name__ == "__main__":

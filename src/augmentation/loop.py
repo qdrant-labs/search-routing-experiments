@@ -34,6 +34,7 @@ from augmentation.dispatch import (
 from augmentation.engine import (
     AugmentationOutcome,
     Augmenter,
+    Budget,
     ErrorCase,
     Spend,
     windowed_map,
@@ -111,6 +112,7 @@ class AugmentationLoop:
         qrels: AugmentationQrels | None = None,
         docs: ConstructedDocs | None = None,
         parents: ParentPool | None = None,
+        budget: Budget | None = None,
     ) -> None:
         self.selection = selection
         self.parents = parents
@@ -121,10 +123,13 @@ class AugmentationLoop:
         # nesting_depth), and a regex-only extractor reports those as
         # measured=None — a target the model can never satisfy, so it burns its
         # whole round budget chasing one. Same parity the cell fill keeps (d42g).
+        # an injected engine owns its own budget; only the one built here can
+        # be handed the run's ceiling
         self.engine = engine or Augmenter(
             self.config.engine,
             seed=self.config.seed,
             extractor=FeatureExtractor(engines=None),
+            budget=budget,
         )
         self.operators = (
             operators if operators is not None else default_operators(self.config)
