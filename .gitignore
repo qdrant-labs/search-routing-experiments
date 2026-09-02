@@ -12,3 +12,5 @@ docs/research
 docs/adr
 **/.logs/
 *.log
+.agents
+docs/superpowers
