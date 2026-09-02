@@ -115,8 +115,9 @@ tuned to one would bias the comparison against the other two."""
 def qwen_dense_cfg() -> EmbeddingConfig:
     """qwen/qwen3-embedding-8b via Qdrant Cloud Inference -> OpenRouter.
     Embeds server-side, so this has none of e5's local RAM/model-copy cost —
-    the reason to run this leg first. Sparse stays SPARSE_CFG (local, unpaid
-    round trip) — `cloud` is per-slot, so mixing is safe (see EmbeddingConfig).
+    the reason to run this leg first. Sparse defaults to SPARSE_CFG (local,
+    unpaid round trip) unless overridden via `LegBPilot(sparse_cfg=...)` —
+    `cloud` is per-slot, so mixing is safe (see EmbeddingConfig).
 
     Requires `OPEN_ROUTER_API_KEY` in the environment and the Qdrant client
     constructed with `cloud_inference=True`."""
@@ -135,6 +136,139 @@ def qwen_dense_cfg() -> EmbeddingConfig:
         cloud=True,
         provider_options={"openrouter-api-key": key, "dimensions": QWEN_DIM},
         query_prompt=QWEN_INSTRUCTION,
+    )
+
+
+def _hosted_dense_cfg(model_id: str, size: int, *, query_prompt: str = "",
+                      max_input_chars: int | None = None) -> EmbeddingConfig:
+    """A non-Qwen hosted dense leg via the same Qdrant Cloud Inference -> OpenRouter
+    path as `qwen_dense_cfg`. `model_id` MUST carry the `openrouter/` prefix (e.g.
+    `openrouter/openai/text-embedding-3-large`) so Qdrant routes to OpenRouter with the
+    `openrouter-api-key`; without it Qdrant treats it as a native provider and demands
+    that provider's own key. The underlying models were verified live on OpenRouter's
+    embeddings endpoint (dim 3072). No query instruction by default — neither exposes
+    asymmetric query/doc task-typing through this endpoint, so the dense bake-off stays
+    a clean one-variable comparison. `dimensions` mirrors the working Qwen shape; if a
+    model rejects it, drop it from provider_options and rely on `size` alone (test the
+    cheapest lane first, per `index_and_label`)."""
+    key = os.environ.get("OPEN_ROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("OPEN_ROUTER_API_KEY is not set — add it to .env")
+    return EmbeddingConfig(
+        name="dense_legb", model_id=model_id, kind="dense", size=size,
+        distance=Distance.COSINE, cloud=True,
+        provider_options={"openrouter-api-key": key, "dimensions": size},
+        query_prompt=query_prompt,
+        max_input_chars=max_input_chars,
+    )
+
+
+def openai3_dense_cfg() -> EmbeddingConfig:
+    """openai/text-embedding-3-large (dim 3072) — strong general hosted encoder, a
+    capacity step up from bge-small but not retrieval-specialized (symmetric, no
+    query/doc asymmetry). Non-Qwen dense candidate for the leg-2 bake-off."""
+    return _hosted_dense_cfg("openrouter/openai/text-embedding-3-large", 3072, max_input_chars=20000)
+
+
+def gemini_dense_cfg() -> EmbeddingConfig:
+    """google/gemini-embedding-001 (dim 3072) — recent strong general hosted encoder.
+    Non-Qwen dense candidate for the leg-2 bake-off."""
+    return _hosted_dense_cfg("openrouter/google/gemini-embedding-001", 3072, max_input_chars=20000)
+
+
+SPLADE_MODEL_ID = "prithivida/Splade_PP_en_v1"
+
+
+def splade_sparse_cfg() -> EmbeddingConfig:
+    """SPLADE++ (fastembed, local) — the A1 fix: `SPARSE_CFG` (BM25) is fixed
+    across every leg-2 run, so sparse carries zero variance and every
+    `stack_specific` flag actually means dense-specific (measured: at ceiling
+    the only movement is dense LOSING, 21 tied_backwards / 0 wins). Pair with
+    `qwen_dense_cfg()` via `LegBPilot(sparse_cfg=splade_sparse_cfg())` so both
+    routes move under a stack swap.
+
+    `modifier=None`, not the `EmbeddingConfig` default (`Modifier.IDF`): IDF
+    re-weights a raw bag-of-words vector at query time, which is what BM25
+    needs and SPLADE does not — SPLADE's weights are already learned, and
+    layering IDF on top double-counts term importance the model already
+    encoded. English-only (fastembed's own model card) — invalid on
+    `miracl-en-dev`'s non-English pairs or `webfaq`, same constraint the plan
+    already flags for English-only rerankers."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=SPLADE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+    )
+
+
+MINICOIL_MODEL_ID = "Qdrant/minicoil-v1"
+
+
+def minicoil_sparse_cfg(avg_len: float = 272.0) -> EmbeddingConfig:
+    """miniCOIL v1 (fastembed, local) — contextual sparse: per-token 4-dim
+    vectors that disambiguate the same surface term across senses ("river bank"
+    vs. "savings bank"), with no vocabulary expansion. Keeps the `EmbeddingConfig`
+    default `Modifier.IDF`, which Qdrant's miniCOIL guide requires. Fills the slot
+    between bm25 (IDF, no context) and SPLADE (learned, expanded), so
+    `bm25 → minicoil` isolates contextual weighting and `minicoil → splade`
+    isolates expansion.
+
+    `max_input_chars` is not optional here: miniCOIL truncates at 8192 tokens where
+    SPLADE truncates at 512, and pads each batch to its longest member, so one
+    66k-char legal doc measured 11.45GB alone and OOM-kills a batch of 64. 2000 chars
+    (~500 tokens) both survives and matches SPLADE's window, keeping the sparse
+    comparison one-variable. `avg_len` is miniCOIL's BM25 length normalizer and is
+    corpus-specific — 272 is crumb-legal-qa's mean word count AFTER that cap; pass
+    the measured value when running another lane (fastembed's 150 default assumes
+    much shorter documents)."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=MINICOIL_MODEL_ID,
+        kind="sparse",
+        max_input_chars=2000,
+        model_options={"avg_len": avg_len},
+    )
+
+
+OPENSEARCH_SPARSE_MODEL_ID = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte"
+
+
+def opensearch_sparse_cfg() -> EmbeddingConfig:
+    """OpenSearch neural-sparse doc-v3-gte via sentence-transformers `SparseEncoder`
+    (`engine="sentence_transformers"`) — a learned-sparse leg fastembed does not ship,
+    added so the sparse bake-off can measure its coverage against SPLADE/bm42/miniCOIL
+    (the number the colleague's +6.9-vs-BM25 didn't give). `modifier=None` like SPLADE
+    (learned weights, no IDF re-weight); the encoder handles doc/query asymmetry itself,
+    so no prompts. First use downloads + loads a full transformer — heavy, run under
+    memguard on a machine that can hold it."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=OPENSEARCH_SPARSE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+        engine="sentence_transformers",
+    )
+
+
+OPENSEARCH_DISTILL_SPARSE_MODEL_ID = (
+    "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill"
+)
+
+
+def opensearch_distill_sparse_cfg() -> EmbeddingConfig:
+    """OpenSearch neural-sparse doc-v3-distill — the document-only family's small
+    representative (67M distilbert vs gte's ~137M + custom code): doc-side expansion
+    with an inference-free query side (tokenizer + baked-in IDF lookup, no model
+    forward), so query weights already carry IDF and `modifier=None` is correct.
+    Same 512-token window as SPLADE, keeping the sparse comparison one-variable.
+    Heavy doc-side indexing only — run under memguard."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=OPENSEARCH_DISTILL_SPARSE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+        engine="sentence_transformers",
     )
 
 
@@ -168,9 +302,11 @@ class LegBPilot:
         sample: tuple[str, int] | None = None,
         natural_only: bool = True,
         band: Band = None,
+        sparse_cfg: EmbeddingConfig = SPARSE_CFG,
     ) -> None:
         self._client = client
         self._dense = dense_cfg
+        self._sparse = sparse_cfg
         self._lanes = lanes
         self._out_dir = out_dir
         self._supply = supply
@@ -224,8 +360,16 @@ class LegBPilot:
         creates when the collection is absent) and fail at upload with
         Qdrant's own "expected dim: 1024, got 4096" — silently, since nothing
         here diffed the live schema. A different model now gets a different,
-        untouched collection instead of colliding with the last one's."""
+        untouched collection instead of colliding with the last one's.
+
+        Sparse joins the slug too, once it can vary (A1): two sparse variants
+        on the SAME dense model (e.g. Qwen + BM25 vs Qwen + SPLADE) would
+        otherwise silently share one collection and corrupt each other's
+        `sparse_legb` vectors — the default BM25 keeps today's names
+        unchanged so existing collections stay valid."""
         slug = self._dense.model_id.rsplit("/", 1)[-1]
+        if self._sparse.model_id != SPARSE_CFG.model_id:
+            slug += f"_{self._sparse.model_id.rsplit('/', 1)[-1]}"
         name = f"{_source_name(lane)}_legb_{slug}_routes"
         assert name != _collection(lane), f"{lane}: would reuse the paid collection"
         return name
@@ -277,12 +421,26 @@ class LegBPilot:
 
     def _index(self, lane: str, corpus: pd.DataFrame) -> str:
         collection = self.collection(lane)
+        # A sibling collection with the SAME dense model (the default-sparse one,
+        # no sparse slug) already paid for these dense vectors — copy them by
+        # point id instead of re-embedding through the provider. uuid5 point ids
+        # are content-derived, so same lane + same docs => same ids there.
+        base = f"{_source_name(lane)}_legb_{self._dense.model_id.rsplit('/', 1)[-1]}_routes"
+        reuse = (
+            base
+            if self._dense.cloud and base != collection
+            and self._client.collection_exists(base)
+            else None
+        )
+        if reuse:
+            tqdm.write(f"[{lane}] dense vectors copied from {reuse} — no inference spend")
         indexer = CorpusIndexer(
             self._client, collection,
-            embeddings=[self._dense, SPARSE_CFG],
+            embeddings=[self._dense, self._sparse],
             # bge-small and e5 keep separate cache files (keyed by model_id), so
             # sharing the lane namespace is safe and reuses nothing wrongly
             cache=EmbeddingCache(namespace=_source_name(lane)),
+            reuse_cloud_from=reuse,
         )
         indexer.ensure_collection()
         if self._client.count(collection, exact=True).count < len(corpus):
@@ -320,7 +478,7 @@ class LegBPilot:
                 self._selection(lane_idx), out_dir=self._out_dir,
                 objective=RouterObjective(min_relevance=min_rel),
             )
-            args = (self._client, collection, self._dense, SPARSE_CFG)
+            args = (self._client, collection, self._dense, self._sparse)
             source = SnapshotDataset(_source_name(lane_idx), path=str(DATA_DIR))
             try:
                 out = labels.label(
