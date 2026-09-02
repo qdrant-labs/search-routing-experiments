@@ -16,7 +16,7 @@ from qdrant_client.models import (
     SparseVector,
 )
 
-from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
+from hybrid_search_rrf_dataset.indexer import EmbeddingConfig, st_sparse_vectors
 
 
 class StrategyName(StrEnum):
@@ -108,9 +108,12 @@ class FusionStrategy(ABC):
                 text=text, model=self.sparse_cfg.model_id,
                 options=self.sparse_cfg.provider_options,
             )
+        if self.sparse_cfg.engine == "sentence_transformers":  # learned-sparse query side
+            return st_sparse_vectors(self.sparse_cfg.model_id, [text], is_query=True)[0]
         if self._sparse_model is None:
             self._sparse_model = SparseTextEmbedding(
-                self.sparse_cfg.model_id, providers=self.sparse_cfg.providers
+                self.sparse_cfg.model_id, providers=self.sparse_cfg.providers,
+                **(self.sparse_cfg.model_options or {}),
             )
         s = next(iter(self._sparse_model.embed([text])))
         return SparseVector(indices=s.indices.tolist(), values=s.values.tolist())

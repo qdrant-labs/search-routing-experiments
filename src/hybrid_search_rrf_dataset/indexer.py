@@ -1,8 +1,10 @@
 import logging
 import pickle
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, TypeVar
 
@@ -10,6 +12,7 @@ import numpy as np
 from fastembed import SparseTextEmbedding, TextEmbedding
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     Document,
@@ -25,7 +28,21 @@ T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger(__name__)
 
-_CACHE_SAVE_EVERY = 2000
+_EMBED_CHECKPOINT_SIZE = 2000
+"""Missing texts are embedded and flushed to the on-disk cache in chunks of this
+size rather than all at once — a hard kill (memguard, OOM, a crashed kernel)
+loses at most one chunk instead of the whole call. A `finally` cannot save what
+a SIGKILL never let it reach; only a save that already ran on disk survives."""
+_UPSERT_MAX_ATTEMPTS = 4
+_UPSERT_BACKOFF_S = 5.0
+"""A cloud-inference vector slot embeds INSIDE the upsert call, so a transient
+30s Qdrant Cloud Inference timeout (or any other 4xx/5xx from the server)
+surfaces as `UnexpectedResponse` here, not as a network-layer error. Retries
+with doubling backoff (5s, 10s, 20s) rather than failing the whole batch."""
+_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+"""Only transient statuses are worth retrying. A 400/401/403 (bad request, auth,
+or an exhausted provider key — 'Key limit exceeded') will never recover in 20s, so
+fail fast and surface it instead of burning every attempt on a lost cause."""
 
 
 def _chunked(seq: list[Any], size: int) -> Iterator[list[Any]]:
@@ -132,6 +149,59 @@ class EmbeddingConfig(BaseModel):
     `{"openrouter-api-key": ...}`. Qdrant forwards it to the inference service
     as-is (Document.options docstring). Never log this config: it carries the
     API key in plain text."""
+    model_options: dict[str, Any] | None = None
+    """Constructor kwargs for the LOCAL fastembed model — corpus-dependent knobs the
+    model cannot infer. miniCOIL is built on BM25 and takes `avg_len` (its default 150
+    assumes short docs; crumb-legal-qa averages 272 words once capped), so leaving it
+    unset mis-weights length normalization on every document."""
+    engine: Literal["fastembed", "sentence_transformers"] = "fastembed"
+    """Which local runtime produces this slot's vectors (ignored when `cloud`).
+    `fastembed` is the default. `sentence_transformers` routes a SPARSE slot to a
+    `SparseEncoder` — for learned-sparse models fastembed does not ship (e.g.
+    `opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte`), whose
+    doc/query asymmetry the encoder handles itself, so leave `doc_prompt` empty."""
+    max_input_chars: int | None = None
+    """Truncate each text to this many chars before embedding — hosted models with a hard
+    context limit (openai/text-embedding-3-large caps at 8192 tokens, and a 66k-char legal
+    doc is ~16k tokens -> 400), and local models whose cost is quadratic in sequence length:
+    miniCOIL truncates at 8192 tokens (SPLADE at 512) and pads a batch to its longest member,
+    so one 66k-char doc measured 11.45GB alone and OOM-kills a batch of 64. None = no cap,
+    e.g. Qwen3's 32k context swallows the whole corpus. A conservative char cap avoids a
+    tokenizer dependency."""
+
+
+_ST_SPARSE_MODELS: dict[str, Any] = {}
+
+
+def st_sparse_vectors(model_id: str, texts: list[str], *, is_query: bool,
+                      max_seq_length: int = 512, batch_size: int = 16) -> list[SparseVector]:
+    """sentence-transformers `SparseEncoder` -> Qdrant `SparseVector`s, honouring the
+    doc/query asymmetry (`encode_query` vs `encode_document`) that learned-sparse models
+    fastembed does not ship carry. The model is a full transformer: the first call
+    downloads and loads it (real RAM/disk) — a heavy step, so run it under memguard / on
+    a machine that can hold it. Cached per `model_id`.
+
+    `max_seq_length` caps the tokens per text: a GTE backbone defaults to ~8k, and the
+    sparse head's `[batch, seq, vocab]` projection over long docs (legal corpora hit tens
+    of thousands of chars) blows to tens of GiB. 512 also matches fastembed SPLADE's
+    truncation, keeping the bake-off fair; raise it if you have the RAM."""
+    from sentence_transformers import SparseEncoder  # heavy; imported only when used
+
+    model = _ST_SPARSE_MODELS.get(model_id)
+    if model is None:
+        # trust_remote_code: GTE-backboned models (opensearch-...-gte -> Alibaba-NLP/new-impl)
+        # ship custom modeling code. This engine is opt-in per config, so `model_id` is a
+        # deliberate, trusted choice, not arbitrary input.
+        model = _ST_SPARSE_MODELS[model_id] = SparseEncoder(model_id, trust_remote_code=True)
+        model.max_seq_length = max_seq_length
+    encode = model.encode_query if is_query else model.encode_document
+    rows = encode(texts, batch_size=batch_size, convert_to_tensor=False,
+                  convert_to_sparse_tensor=True, show_progress_bar=False)
+    return [
+        SparseVector(indices=t.coalesce().indices()[0].tolist(),
+                     values=t.coalesce().values().tolist())
+        for t in rows
+    ]
 
 
 class BaseIndexer(ABC, Generic[T]):
@@ -150,6 +220,7 @@ class BaseIndexer(ABC, Generic[T]):
         collection_name: str,
         embeddings: list[EmbeddingConfig],
         cache: EmbeddingCache | None = None,
+        reuse_cloud_from: str | None = None,
     ) -> None:
         if not embeddings:
             raise ValueError("Indexer requires at least one EmbeddingConfig.")
@@ -157,6 +228,11 @@ class BaseIndexer(ABC, Generic[T]):
         self.collection_name = collection_name
         self.embeddings = embeddings
         self.cache = cache
+        self.reuse_cloud_from = reuse_cloud_from
+        """Collection to copy cloud-slot vectors from by point id instead of
+        re-paying server-side inference — same item => same uuid5 id, so a
+        sibling collection on the same corpus already holds identical floats.
+        Ids absent there fall back to the paid path."""
         self._dense_models: dict[str, TextEmbedding] = {}
         self._sparse_models: dict[str, SparseTextEmbedding] = {}
 
@@ -228,11 +304,15 @@ class BaseIndexer(ABC, Generic[T]):
         self,
         items: Sequence[T],
         batch_size: int = 64,
+        parallel: int = 1,
     ) -> None:
         """Embed `items` for every configured slot and upload as PointStructs.
 
         Raises TypeError if items aren't `item_type` — guards against using the
-        wrong indexer subclass for the data.
+        wrong indexer subclass for the data. `parallel` > 1 sends the per-batch
+        upserts through a thread pool: for a CLOUD slot the embedding runs
+        server-side inside each upsert, so N concurrent upserts give ~Nx
+        throughput on that I/O-bound step (sequential was ~8s/batch on gemini).
         """
         if not items:
             return
@@ -241,6 +321,19 @@ class BaseIndexer(ABC, Generic[T]):
                 f"{type(self).__name__} expects {self.item_type.__name__}, "
                 f"got {type(items[0]).__name__}"
             )
+
+        # An empty embed text is unembeddable and cloud encoders reject it with a
+        # 400 (Qdrant Cloud Inference -> gemini), so drop such items rather than
+        # fail the whole batch. Logged, not silent (some corpora carry blank docs).
+        kept = [i for i in items if self.item_text(i).strip()]
+        if len(kept) < len(items):
+            logger.warning(
+                "%s: skipped %d item(s) with empty embed text (unembeddable).",
+                self.collection_name, len(items) - len(kept),
+            )
+        items = kept
+        if not items:
+            return
 
         texts = [self.item_text(i) for i in items]
         ids = [self.item_id(i) for i in items]
@@ -259,16 +352,19 @@ class BaseIndexer(ABC, Generic[T]):
         # the provider per point), so this loop — not `_embed` — is where a
         # remote-encoder upload actually spends its time; local runs get the
         # same bar for a big corpus's upsert phase, cheaply.
-        total_chunks = -(-len(points) // batch_size)  # ceiling division
-        for chunk in tqdm(
-            _chunked(points, batch_size), total=total_chunks,
-            desc=f"upload:{self.collection_name}",
-        ):
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=chunk,
-                wait=True,
-            )
+        chunks = list(_chunked(points, batch_size))
+        bar = tqdm(total=len(chunks), desc=f"upload:{self.collection_name}")
+        if parallel > 1:
+            # map yields in submission order; the pool keeps `parallel` upserts
+            # in flight, so a cloud slot embeds `parallel` batches concurrently.
+            with ThreadPoolExecutor(max_workers=parallel) as pool:
+                for _ in pool.map(self._upsert_with_retry, chunks):
+                    bar.update(1)
+        else:
+            for chunk in chunks:
+                self._upsert_with_retry(chunk)
+                bar.update(1)
+        bar.close()
 
         # Duplicate ids collapse onto one point under upsert, so the
         # completeness check must count unique ids, not rows.
@@ -285,6 +381,29 @@ class BaseIndexer(ABC, Generic[T]):
                 f"Upload incomplete for {self.collection_name!r}: "
                 f"expected >={expected} points, got {actual}."
             )
+
+    def _upsert_with_retry(self, points: list[PointStruct]) -> None:
+        for attempt in range(_UPSERT_MAX_ATTEMPTS):
+            try:
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=points,
+                    wait=True,
+                )
+                return
+            except UnexpectedResponse as exc:
+                status = getattr(exc, "status_code", None)
+                # fail fast on non-transient errors (e.g. 403 exhausted key) — no
+                # backoff can fix them, and retrying floods 4x the wasted calls.
+                if status not in _RETRYABLE_STATUS or attempt == _UPSERT_MAX_ATTEMPTS - 1:
+                    raise
+                delay = _UPSERT_BACKOFF_S * (2**attempt)
+                tqdm.write(
+                    f"{self.collection_name}: upsert HTTP {status} "
+                    f"(attempt {attempt + 1}/{_UPSERT_MAX_ATTEMPTS}), "
+                    f"retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
 
     def upload_points_iter(
         self,
@@ -307,13 +426,15 @@ class BaseIndexer(ABC, Generic[T]):
         doesn't compose with the (id -> vector) cache. For repeated runs on
         the same items with local models, use `upload`.
         """
+        # No show_progress: qdrant-client 1.18's upload_points asserts no unknown
+        # kwargs. Progress isn't observable here anyway — for a cloud slot the work
+        # is server-side inside the parallel upserts, not in the point generator.
         self.client.upload_points(
             collection_name=self.collection_name,
             points=self._points_iter(items, batch_size),
             batch_size=batch_size,
             parallel=parallel,
             max_retries=max_retries,
-            show_progress=True,
         )
 
     def _points_iter(
@@ -338,7 +459,18 @@ class BaseIndexer(ABC, Generic[T]):
         batch: list[T],
         batch_size: int,
     ) -> Iterator[PointStruct]:
-        texts = [self.item_text(i) for i in batch]
+        # Same empty-embed-text guard as `upload` — the streaming/parallel path
+        # must drop unembeddable items too, or a cloud slot 400s on Document("").
+        pairs = [(i, t) for i in batch if (t := self.item_text(i)).strip()]
+        if len(pairs) < len(batch):
+            logger.warning(
+                "%s: skipped %d item(s) with empty embed text (unembeddable).",
+                self.collection_name, len(batch) - len(pairs),
+            )
+        if not pairs:
+            return
+        batch = [i for i, _ in pairs]
+        texts = [t for _, t in pairs]
         ids = [self.item_id(i) for i in batch]
         payloads = [self.item_payload(i) for i in batch]
         vectors: list[dict[str, Any]] = [{} for _ in batch]
@@ -356,6 +488,8 @@ class BaseIndexer(ABC, Generic[T]):
         batch_size: int,
     ) -> list[Any]:
         """Return vectors aligned with `ids`/`texts`, hitting cache where possible."""
+        if cfg.cloud and self.reuse_cloud_from:
+            return self._reused_vectors(cfg, ids, texts, batch_size)
         if self.cache is None or cfg.cloud:
             return self._embed(cfg, texts, batch_size)
 
@@ -363,19 +497,45 @@ class BaseIndexer(ABC, Generic[T]):
         cache = store.load(cfg.model_id, cfg.kind)
 
         missing_idx = [i for i, id_ in enumerate(ids) if str(id_) not in cache]
-        if missing_idx:
-            missing_texts = [texts[i] for i in missing_idx]
-            try:
-                new_vecs = self._embed(cfg, missing_texts, batch_size)
-                for pos, original_i in enumerate(missing_idx):
-                    cache[str(ids[original_i])] = new_vecs[pos]
-                    if (pos + 1) % _CACHE_SAVE_EVERY == 0:
-                        store.save(cfg.model_id, cfg.kind)
-            finally:
-                # flush whatever we got, even on Ctrl-C / OOM mid-embedding
-                store.save(cfg.model_id, cfg.kind)
+        for chunk in _chunked(missing_idx, _EMBED_CHECKPOINT_SIZE):
+            chunk_texts = [texts[i] for i in chunk]
+            new_vecs = self._embed(cfg, chunk_texts, batch_size)
+            for original_i, vec in zip(chunk, new_vecs, strict=True):
+                cache[str(ids[original_i])] = vec
+            store.save(cfg.model_id, cfg.kind)
 
         return [cache[str(id_)] for id_ in ids]
+
+    def _reused_vectors(
+        self,
+        cfg: EmbeddingConfig,
+        ids: list[int | str],
+        texts: list[str],
+        batch_size: int,
+    ) -> list[Any]:
+        """Copy this slot's vectors from `reuse_cloud_from` by point id; only ids
+        the source collection doesn't hold go through the paid `_embed` path."""
+        found: dict[str, Any] = {}
+        for chunk in _chunked(list(ids), 256):
+            for point in self.client.retrieve(
+                self.reuse_cloud_from, ids=list(chunk),
+                with_vectors=[cfg.name], with_payload=False,
+            ):
+                vec = point.vector
+                if isinstance(vec, dict):
+                    vec = vec.get(cfg.name)
+                if vec is not None:
+                    found[str(point.id)] = vec
+        missing = [i for i, id_ in enumerate(ids) if str(id_) not in found]
+        if missing:
+            logger.warning(
+                "%s: %d/%d ids absent from %s — embedding those via the paid path.",
+                self.collection_name, len(missing), len(ids), self.reuse_cloud_from,
+            )
+            embedded = self._embed(cfg, [texts[i] for i in missing], batch_size)
+            for i, vec in zip(missing, embedded, strict=True):
+                found[str(ids[i])] = vec
+        return [found[str(id_)] for id_ in ids]
 
     def _embed(
         self,
@@ -385,6 +545,8 @@ class BaseIndexer(ABC, Generic[T]):
     ) -> list[Any]:
         if cfg.doc_prompt:  # role marker for asymmetric dense models; "" for bm25/bge
             texts = [cfg.doc_prompt + t for t in texts]
+        if cfg.max_input_chars:  # cloud context limits AND local quadratic-cost blowups
+            texts = [t[: cfg.max_input_chars] for t in texts]
         if cfg.cloud:  # this slot only; a sibling local slot embeds unaffected
             return [
                 Document(text=text, model=cfg.model_id, options=cfg.provider_options)
@@ -400,6 +562,8 @@ class BaseIndexer(ABC, Generic[T]):
             )
             return [np.asarray(v, dtype=np.float32) for v in stream]
 
+        if cfg.engine == "sentence_transformers":  # learned-sparse via SparseEncoder (docs)
+            return st_sparse_vectors(cfg.model_id, texts, is_query=False)
         model = self._sparse(cfg)
         stream = tqdm(
             model.embed(texts, batch_size=batch_size, parallel=cfg.parallel),
@@ -422,11 +586,13 @@ class BaseIndexer(ABC, Generic[T]):
         return self._dense_models[cfg.model_id]
 
     def _sparse(self, cfg: EmbeddingConfig) -> SparseTextEmbedding:
-        if cfg.model_id not in self._sparse_models:
-            self._sparse_models[cfg.model_id] = SparseTextEmbedding(
-                cfg.model_id, providers=cfg.providers
+        options = cfg.model_options or {}
+        key = f"{cfg.model_id}:{sorted(options.items())}"  # options change the vectors
+        if key not in self._sparse_models:
+            self._sparse_models[key] = SparseTextEmbedding(
+                cfg.model_id, providers=cfg.providers, **options
             )
-        return self._sparse_models[cfg.model_id]
+        return self._sparse_models[key]
 
     @staticmethod
     def _dense_size(cfg: EmbeddingConfig) -> int:
