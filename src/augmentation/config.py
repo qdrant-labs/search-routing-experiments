@@ -26,6 +26,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hybrid_search_rrf_dataset.paths import LanePaths
+
 _DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 
 _DEFAULT_DECORATIONS = {
@@ -121,15 +123,9 @@ class StatDeclarations(BaseModel):
         return self.model_copy(update={"entries": (*self.entries, entry)})
 
 
-class AugmentationPaths(BaseModel):
-    """Every artifact the loop touches, derived from one root."""
-
-    model_config = ConfigDict(frozen=True)
-
-    data_dir: Path = Field(
-        default=_DATA_ROOT,
-        description="Data root holding the lane dirs, composition and pool.",
-    )
+class AugmentationPaths(LanePaths):
+    """Every artifact the loop touches, derived from one root — the lane layout
+    inherited, the loop's own artifacts added."""
 
     @property
     def augmentation_dir(self) -> Path:
@@ -177,14 +173,6 @@ class AugmentationPaths(BaseModel):
         over the lane rather than a hand-set number."""
         return self.data_dir / "corruption_census.parquet"
 
-    def lane_qrels(self, lane: str) -> Path:
-        return self.data_dir / lane / "qrels.parquet"
-
-    def lane_corpus(self, lane: str) -> Path:
-        return self.data_dir / lane / "corpus.parquet"
-
-    def lane_surfaces(self, lane: str) -> Path:
-        return self.data_dir / lane / "surfaces.parquet"
 
 
 class EngineSettings(BaseModel):

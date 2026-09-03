@@ -6,7 +6,9 @@ key is authoritative and its artifacts live under it.
 import pandas as pd
 
 from dataset_registry import DatasetName
+from hybrid_search_rrf_dataset.labels import oracle_dir
 from hybrid_search_rrf_dataset.lanes import LANELESS, LANES
+from hybrid_search_rrf_dataset.paths import LanePaths
 from hybrid_search_rrf_dataset.retrieval import QREL_COLUMNS, QUERY_COLUMNS
 
 
@@ -47,3 +49,42 @@ def test_restrict_narrows_queries_and_qrels_together():
     lane.restrict(["a"])
     assert lane.queries()["query_id"].tolist() == ["a"]
     assert lane.qrels()["doc_id"].tolist() == ["d1"]
+
+
+def test_every_lane_artifact_lives_under_the_lane_dir(tmp_path):
+    """`LanePaths` is the repo-wide owner of the layout — every artifact of a
+    lane sits in that lane's own directory, on whatever root it is given."""
+    paths = LanePaths(data_dir=tmp_path)
+    artifacts = [
+        paths.lane_queries("a"), paths.lane_qrels("a"), paths.lane_corpus("a"),
+        paths.lane_corpus_index("a"), paths.lane_surfaces("a"), paths.lane_excluded("a"),
+    ]
+    assert all(p.parent == paths.lane_dir("a") == tmp_path / "a" for p in artifacts)
+    assert len({p.name for p in artifacts}) == len(artifacts)   # no two share a file
+
+
+def test_lanes_with_reuses_the_artifact_filename(tmp_path):
+    """The listing and the path must agree by construction, not by a literal
+    repeated in two places."""
+    paths = LanePaths(data_dir=tmp_path)
+    for lane in ("b", "a"):
+        paths.lane_dir(lane).mkdir()
+        paths.lane_qrels(lane).write_bytes(b"")
+    paths.lane_dir("c").mkdir()                                  # no qrels
+    assert paths.lanes_with_qrels() == ["a", "b"]                # sorted, c absent
+    assert paths.lanes_with_corpus() == []
+
+
+def test_oracle_results_have_one_suffix_spelling(tmp_path):
+    """`labels.py` writes the oracle dirs and `LanePaths` reads them; a second
+    spelling of the suffix is how those two silently drift apart."""
+    paths = LanePaths(data_dir=tmp_path)
+    rung = tmp_path / "rungs" / "labeling"
+    assert oracle_dir(paths.oracle_root(), "a") == paths.oracle_lane_dir("a")
+    assert oracle_dir(rung, "a") == paths.oracle_lane_dir("a", under=rung)
+    assert paths.oracle_rows("a").parent == paths.oracle_lane_dir("a")
+
+    paths.oracle_lane_dir("a").mkdir(parents=True)
+    paths.oracle_rows("a").write_bytes(b"")
+    paths.oracle_lane_dir("b").mkdir()                            # dir, no rows
+    assert paths.oracle_lanes() == ["a"]

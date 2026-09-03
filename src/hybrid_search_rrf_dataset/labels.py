@@ -31,6 +31,7 @@ from hybrid_search_rrf_dataset.golden import (
     GoldenRoutingDataset,
 )
 from hybrid_search_rrf_dataset.lanes import LANES
+from hybrid_search_rrf_dataset.paths import LanePaths
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
 from hybrid_search_rrf_dataset.retrieval import (
@@ -54,7 +55,7 @@ ALL_ZERO = "all_zero"
 def oracle_dir(out_dir: Path, dataset: str) -> Path:
     """Where a lane's oracle rows live, beside the labels they produced —
     the shape `rederive_labels` and `cell_divergence` already read."""
-    return out_dir / f"{dataset}_oracle"
+    return LanePaths().oracle_lane_dir(dataset, under=out_dir)
 
 
 def outcome_shape(scores: dict[str, float], tolerance: float = TIE_TOLERANCE) -> str:
