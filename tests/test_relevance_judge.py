@@ -8,7 +8,8 @@ import pandas as pd
 from hybrid_search_rrf_dataset.qrels import QrelSource, QrelStore
 from relevance_judge.config import RelevanceJudgeConfig
 from relevance_judge.judge import _parse
-from relevance_judge.queue import JudgeQueue, regime
+from relevance_judge.residual import JudgeQueue, V2Labels, above_gold, regime
+from relevance_judge.validation import Confusion, Gate
 
 
 def test_parse_reads_yes_no_and_rejects_garbage():
@@ -48,7 +49,36 @@ def test_judged_qrels_artifact_is_separate_from_human_qrels():
     assert config.judged_qrels.name == "judged_qrels.parquet"
     assert config.judged_qrels.parent.name == "relevance_judge"
     # never a per-lane human qrels file
-    assert config.judged_qrels != config.data_dir / "clerc" / "qrels.parquet"
+    assert config.judged_qrels != config.lanes.lane_qrels("clerc")
+
+
+def test_every_path_derives_from_the_config_root(tmp_path):
+    """No module may build a path from a literal: re-rooting the config must
+    move EVERY read and write, inputs included."""
+    config = RelevanceJudgeConfig(data_dir=tmp_path)
+    paths = [
+        config.draw, config.depth_probe, config.manifest, config.labels,
+        config.artifacts, config.judged_qrels, config.validation_predictions,
+        config.lanes.lane_corpus("clerc"), config.lanes.lane_queries("clerc"),
+        config.lanes.lane_qrels("clerc"), *config.oracle_caches("clerc"),
+    ]
+    for path in paths:
+        assert path.is_relative_to(tmp_path), path
+
+
+def test_oracle_caches_reuse_the_rung_prefix(tmp_path):
+    """The rung is spelled once — `v2_100k` — so a rung bump cannot leave a
+    stale cache path behind."""
+    config = RelevanceJudgeConfig(data_dir=tmp_path)
+    rung = config.oracle_caches("clerc")[: len(config.oracle_stages)]
+    assert all(p.is_relative_to(config.v2_100k) for p in rung)
+    assert [p.parent.parent.name for p in rung] == list(config.oracle_stages)
+
+
+def test_above_gold_is_one_definition_for_live_and_persisted_orders():
+    assert above_gold({"r": ["a", "b", "g", "c"]}, {"g"}) == {"a", "b"}
+    assert above_gold({"r": ["f", "h"]}, {"g"}) == {"f", "h"}   # no gold -> all above
+    assert above_gold({"r": ["g", "a"]}, {"g"}) == set()        # gold at rank 1
 
 
 class _StubSources:
@@ -119,3 +149,70 @@ def test_judge_rows_banks_every_n_and_final_matches(tmp_path):
     assert len(preds) == 120
     on_disk = pd.read_parquet(config.validation_predictions)
     assert len(on_disk) == 120
+
+
+def test_population_is_an_input_not_a_hardcoded_file():
+    """The queue reads a score triple from whatever population it is handed —
+    the v2 stack classifies the same rows differently from l2, which is the
+    whole reason the source must be injectable."""
+
+    class _Stub:
+        def triples(self):
+            return pd.DataFrame([
+                {"dataset": "d", "query_id": "tied", "query": "q",
+                 "triple": {"dense_only": 0.5, "sparse_only": 0.5, "pure_rrf": 0.5}},
+                {"dataset": "d", "query_id": "one", "query": "q",
+                 "triple": {"dense_only": 1.0, "sparse_only": 1.0, "pure_rrf": 1.0}},
+                {"dataset": "d", "query_id": "clear", "query": "q",
+                 "triple": {"dense_only": 1.0, "sparse_only": 0.1, "pure_rrf": 0.1}},
+            ])
+
+        def absent(self):
+            return pd.DataFrame(columns=["dataset", "query_id", "query"])
+
+    queue = JudgeQueue.__new__(JudgeQueue)
+    queue.population = _Stub()
+    res = queue.residual()
+    assert set(res["query_id"]) == {"tied", "one"}          # decisive row excluded
+    assert res.set_index("query_id").loc["tied", "sub1"]    # ties below 1.0
+    assert not res.set_index("query_id").loc["one", "sub1"]
+
+
+def test_v2labels_reads_the_configured_labels_path(tmp_path):
+    config = RelevanceJudgeConfig(data_dir=tmp_path)
+    config.labels.parent.mkdir(parents=True)
+    pd.DataFrame([
+        {"dataset": "d", "query_id": "q1", "route": "dense_only", "query": "text",
+         "score_dense_only": 0.4, "score_sparse_only": 0.4, "score_pure_rrf": 0.4},
+        {"dataset": "d", "query_id": "q1", "route": "pure_rrf", "query": "text",
+         "score_dense_only": 0.4, "score_sparse_only": 0.4, "score_pure_rrf": 0.4},
+    ]).to_parquet(config.labels, index=False)
+
+    triples = V2Labels(config).triples()
+    assert len(triples) == 1                                    # one row per query
+    assert triples.iloc[0]["triple"] == {
+        "dense_only": 0.4, "sparse_only": 0.4, "pure_rrf": 0.4
+    }
+    assert V2Labels(config).absent().empty                      # no depth probe exists
+
+
+def test_gate_needs_negatives_and_refuses_a_degenerate_judge():
+    config = RelevanceJudgeConfig()
+    gate = Gate(config)
+    positives_only = Confusion(tp=10, fp=0, fn=0, tn=0)
+    assert not positives_only.has_negatives
+    assert not gate.passed(positives_only, Confusion(tp=8, fp=0, fn=2, tn=0))
+
+    always_no = Confusion(tp=0, fp=0, fn=10, tn=5)
+    assert not gate.passed(Confusion(tp=10, fp=0, fn=0, tn=5), always_no)
+
+    clean = Confusion(tp=10, fp=0, fn=0, tn=5)
+    assert gate.passed(clean, Confusion(tp=8, fp=0, fn=2, tn=0))
+
+
+def test_unmeasurable_rate_is_nan_not_a_passing_zero():
+    """A rate with no denominator must not read as 0.0 — that would let an
+    unmeasurable gate look merely failing rather than unmeasurable."""
+    empty = Confusion(tp=0, fp=0, fn=0, tn=0)
+    assert empty.precision != empty.precision   # nan
+    assert empty.recall != empty.recall

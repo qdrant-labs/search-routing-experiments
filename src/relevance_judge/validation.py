@@ -15,7 +15,9 @@ breakdown, rather than trusting one opaque call.
 from __future__ import annotations
 
 import json
+from math import isnan
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -25,6 +27,63 @@ from hybrid_search_rrf_dataset.lanes import LANES
 from relevance_judge.config import RelevanceJudgeConfig
 from relevance_judge.judge import JudgeRunLog, RelevanceJudge
 from relevance_judge.sources import Sources
+
+
+class Confusion(NamedTuple):
+    """One 2x2 table and the rates read off it — nan when a rate has no
+    denominator, so an unmeasurable metric never reads as a passing 0."""
+
+    tp: int
+    fp: int
+    fn: int
+    tn: int
+
+    @classmethod
+    def of(cls, preds: pd.DataFrame) -> Confusion:
+        pred, human = preds["pred_relevant"], preds["human_relevant"]
+        return cls(
+            tp=int((pred & human).sum()), fp=int((pred & ~human).sum()),
+            fn=int((~pred & human).sum()), tn=int((~pred & ~human).sum()),
+        )
+
+    @property
+    def precision(self) -> float:
+        return self.tp / (self.tp + self.fp) if (self.tp + self.fp) else float("nan")
+
+    @property
+    def recall(self) -> float:
+        return self.tp / (self.tp + self.fn) if (self.tp + self.fn) else float("nan")
+
+    @property
+    def agreement(self) -> float:
+        total = self.tp + self.fp + self.fn + self.tn
+        return (self.tp + self.tn) / total if total else float("nan")
+
+    @property
+    def has_negatives(self) -> bool:
+        """Whether a false positive was even possible — precision is
+        unmeasurable without a human-judged irrelevant doc."""
+        return (self.fp + self.tn) > 0
+
+
+class Gate:
+    """The pass decision: positive precision on the referees, plus a
+    non-degeneracy recall floor on the anchors. Nothing else is enforced."""
+
+    ENFORCED = ("has_negatives", "precision_relevant(neg-lanes)", "anchor_recall")
+
+    def __init__(self, config: RelevanceJudgeConfig) -> None:
+        self.config = config
+
+    def passed(self, referees: Confusion, anchors: Confusion) -> bool:
+        precision, recall = referees.precision, anchors.recall
+        return bool(
+            referees.has_negatives
+            and not isnan(precision)
+            and not isnan(recall)
+            and precision >= self.config.min_precision_relevant
+            and recall >= self.config.min_anchor_recall
+        )
 
 
 def _sample_lane(
@@ -174,67 +233,48 @@ class ValidationHarness:
         explicitly — they are the errors the precision gate exists to catch."""
         if preds.empty:
             return {"passed": False, "reason": "no readable predictions"}
-        pred_rel, human_rel = preds["pred_relevant"], preds["human_relevant"]
-        tp = int((pred_rel & human_rel).sum())
-        fp = int((pred_rel & ~human_rel).sum())
-        fn = int((~pred_rel & human_rel).sum())
-        tn = int((~pred_rel & ~human_rel).sum())
+        cfg = self.config
+        overall = Confusion.of(preds)
 
-        has_negatives = bool((fp + tn) > 0)
-        recall = tp / (tp + fn) if (tp + fn) else float("nan")
+        # Precision only where a false positive is POSSIBLE: negative-bearing
+        # lanes. Positive-only lanes cannot mis-fire, so pooling them inflates it.
+        by_lane_negatives = {
+            lane: bool((~group["human_relevant"]).any())
+            for lane, group in preds.groupby("dataset")
+        }
+        neg_lanes = [lane for lane, has_neg in by_lane_negatives.items() if has_neg]
+        referees = Confusion.of(preds[preds["dataset"].isin(neg_lanes)])
+
+        # Recall (non-degeneracy) only where the judge shares the dataset's
+        # definition: the answer-oriented anchor lanes.
+        anchor = preds[preds["dataset"].isin(cfg.anchor_lanes)]
+        anchors = Confusion.of(anchor)
+
         by_lane = {
             lane: float((group["pred_relevant"] == group["human_relevant"]).mean())
             for lane, group in preds.groupby("dataset")
         }
         hardest = min(by_lane.items(), key=lambda kv: kv[1]) if by_lane else (None, float("nan"))
-        cfg = self.config
 
-        # Precision only where a false positive is POSSIBLE: negative-bearing lanes.
-        # Positive-only lanes cannot mis-fire, so pooling them inflates precision.
-        neg_lanes = [
-            lane for lane, group in preds.groupby("dataset")
-            if bool((~group["human_relevant"]).any())
-        ]
-        neg = preds[preds["dataset"].isin(neg_lanes)]
-        ntp = int((neg["pred_relevant"] & neg["human_relevant"]).sum())
-        nfp = int((neg["pred_relevant"] & ~neg["human_relevant"]).sum())
-        precision = ntp / (ntp + nfp) if (ntp + nfp) else float("nan")
-
-        # Recall (non-degeneracy) only where the judge shares the dataset's
-        # definition: the answer-oriented anchor lanes.
-        anchor = preds[preds["dataset"].isin(cfg.anchor_lanes)]
-        atp = int((anchor["pred_relevant"] & anchor["human_relevant"]).sum())
-        afn = int((~anchor["pred_relevant"] & anchor["human_relevant"]).sum())
-        anchor_recall = atp / (atp + afn) if (atp + afn) else float("nan")
-
-        passed = bool(
-            has_negatives
-            and precision == precision
-            and anchor_recall == anchor_recall
-            and precision >= cfg.min_precision_relevant
-            and anchor_recall >= cfg.min_anchor_recall
-        )
         return {
-            "passed": passed,
-            "gate_enforced": ["has_negatives", "precision_relevant(neg-lanes)", "anchor_recall"],
-            "precision_relevant": precision,
-            "anchor_recall": anchor_recall,
+            "passed": Gate(cfg).passed(referees, anchors),
+            "gate_enforced": list(Gate.ENFORCED),
+            "precision_relevant": referees.precision,
+            "anchor_recall": anchors.recall,
             "anchor_lanes_present": sorted(set(anchor["dataset"].unique())),
-            "recall_relevant": recall,
-            "precision_pooled": tp / (tp + fp) if (tp + fp) else float("nan"),
-            "has_negatives": has_negatives,
-            "agreement_overall": (tp + tn) / (tp + fp + fn + tn),
-            "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
-            "false_positives": fp,
+            "recall_relevant": overall.recall,
+            "precision_pooled": overall.precision,
+            "has_negatives": referees.has_negatives,
+            "agreement_overall": overall.agreement,
+            "confusion": overall._asdict(),
+            "false_positives": overall.fp,
             "agreement_by_lane": by_lane,
             "hardest_lane": {"lane": hardest[0], "agreement": hardest[1]},
             "n_validation": int(len(preds)),
             "lanes_without_negatives": [
-                lane for lane in lanes
-                if lane in by_lane
-                and not bool((~preds[preds["dataset"] == lane]["human_relevant"]).any())
+                lane for lane in lanes if by_lane_negatives.get(lane) is False
             ],
-            "predictions_path": str(self.config.validation_predictions),
+            "predictions_path": str(cfg.validation_predictions),
             "thresholds": {
                 "min_precision_relevant": cfg.min_precision_relevant,
                 "min_anchor_recall": cfg.min_anchor_recall,

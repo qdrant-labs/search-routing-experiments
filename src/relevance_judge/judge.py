@@ -167,12 +167,13 @@ class RelevanceJudge:
         [dataset, query_id, doc_id, query, doc_text]; verdicts land in 100-row
         chunks (a crash re-pays <=100), stamped with `run_id`."""
         already = self.judged_keys()
-        todo = pairs[
-            ~pairs.apply(
-                lambda r: (str(r.dataset), str(r.query_id), str(r.doc_id)) in already,
-                axis=1,
+        if pairs.empty:
+            todo = pairs
+        else:
+            keys = pd.MultiIndex.from_frame(
+                pairs[["dataset", "query_id", "doc_id"]].astype(str)
             )
-        ] if not pairs.empty else pairs
+            todo = pairs[~keys.isin(already)]
         counts = dict(
             candidates=len(pairs), skipped=len(pairs) - len(todo),
             judged=0, relevant=0, unreadable=0,
@@ -229,6 +230,9 @@ class RelevanceJudge:
         return QrelStore(frame)
 
     def _append(self, atoms: list[dict[str, object]]) -> None:
+        # ponytail: read-modify-write of the whole file per flush, so total cost
+        # is quadratic in banked atoms. Fine to ~10K; above that write per-run
+        # part files and glob them in `load()`.
         fresh = pd.DataFrame(atoms, columns=ATOM_COLUMNS)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         pd.concat([self.load(), fresh], ignore_index=True).to_parquet(

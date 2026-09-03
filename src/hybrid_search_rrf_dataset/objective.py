@@ -67,6 +67,16 @@ class Objective(BaseModel, metaclass=ABCMeta):
     def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float:
         return self.assess(ranking, gold_qrel)[0]
 
+    def assess_order(
+        self, order: list[str], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        """`assess` for a persisted order instead of a score dict: the stored ids
+        handed back as descending synthetic scores, the device `ndcg` already
+        uses. The one adapter, so an order and a ranking cannot score apart."""
+        return self.assess(
+            {doc: float(len(order) - i) for i, doc in enumerate(order)}, gold_qrel
+        )
+
     def relevant(self, gold_qrel: dict[str, int]) -> dict[str, int]:
         return {d: r for d, r in gold_qrel.items() if r >= self.min_relevance}
 

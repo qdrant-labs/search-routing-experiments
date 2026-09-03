@@ -4,8 +4,9 @@ and the tie-conversion rate (§3a payoff #1).
 
 Merge is `QrelStore` precedence (human wins), exactly the rederive_labels path —
 route_rankings scored by the existing objective, no retrieval. The rankings are
-the persisted v2 stack; for l2-defined ties that is a stated approximation, not
-the gemini order the tie was measured on.
+the persisted v2 stack, so `tie_conversion_rate` is only meaningful for a
+v2-scored population (`V2Labels`); an l2-defined tie needs the l2 rankings,
+which were never persisted.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from hybrid_search_rrf_dataset.objective import RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
 from relevance_judge.config import RelevanceJudgeConfig
 from relevance_judge.judge import RelevanceJudge
-from relevance_judge.queue import regime
+from relevance_judge.residual import regime
 from relevance_judge.sources import ROUTES, Sources
 
 
@@ -33,20 +34,6 @@ class PilotScorer:
         self.sources = sources or Sources(self.config)
         self.judge = judge or RelevanceJudge(self.config)
         self.objective = RouterObjective(min_relevance=self.config.min_relevance)
-
-    def _score(self, order: list[str], gold: dict[str, int]) -> float:
-        """One route's score from its stored order — the rederive_labels trick:
-        stored order handed back as descending synthetic scores."""
-        ranking = {doc: float(len(order) - i) for i, doc in enumerate(order)}
-        return self.objective.assess(ranking, gold)[0]
-
-    def _human_store(self, datasets: list[str]) -> QrelStore:
-        manifest = self.sources._manifest
-        rows = manifest[
-            manifest["dataset"].isin(datasets)
-            & (manifest["relevance"] >= self.config.min_relevance)
-        ].assign(source="human")[QrelStore.COLUMNS]
-        return QrelStore(rows)
 
     def _discovered_per_route(self, atoms: pd.DataFrame) -> dict:
         """Share of each route's judged top-10 docs that turned out relevant —
@@ -81,7 +68,7 @@ class PilotScorer:
         atoms = atoms.astype({"query_id": str, "doc_id": str, "relevance": int})
         datasets = sorted(atoms["dataset"].unique())
 
-        human = self._human_store(datasets)
+        human = self.sources.human_store(datasets)
         merged = QrelStore.concat([human, self.judge.as_qrelstore()])
 
         moved = []
@@ -92,8 +79,9 @@ class PilotScorer:
                 order_map = ranks.get(query_id)
                 if not order_map:
                     continue
-                scores_before = {r: self._score(o, before.get(query_id, {})) for r, o in order_map.items()}
-                scores_after = {r: self._score(o, after.get(query_id, {})) for r, o in order_map.items()}
+                assess = self.objective.assess_order
+                scores_before = {r: assess(o, before.get(query_id, {}))[0] for r, o in order_map.items()}
+                scores_after = {r: assess(o, after.get(query_id, {}))[0] for r, o in order_map.items()}
                 reg_before, reg_after = regime(scores_before), regime(scores_after)
                 moved.append({
                     "dataset": dataset, "query_id": query_id,
@@ -120,14 +108,3 @@ class PilotScorer:
         }
 
 
-def _self_check() -> None:
-    scorer = PilotScorer.__new__(PilotScorer)
-    scorer.objective = RouterObjective(min_relevance=1)
-    assert scorer._score(["g", "x"], {"g": 1}) == 1.0  # gold at rank 1 -> hit
-    assert scorer._score(["x", "g"], {"g": 1}) < 1.0   # gold below rank 1
-    assert scorer._score(["x", "y"], {"g": 1}) == scorer.objective.ndcg_weight * 0.0
-    print("scoring self-check ok")
-
-
-if __name__ == "__main__":
-    _self_check()

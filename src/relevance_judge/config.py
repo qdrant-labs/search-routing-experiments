@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from augmentation.config import EngineSettings
+from hybrid_search_rrf_dataset.paths import LanePaths
 
 _DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -69,6 +70,54 @@ class RelevanceJudgeConfig(BaseModel):
     """§3a Phase-2 gate: minimum tie -> decisive/low-margin conversion before any
     dataset-wide spend."""
 
+    oracle_stages: tuple[str, ...] = ("natural", "supplemented")
+    """Labelling stages searched for a lane's persisted `route_rankings`,
+    precedence first — data, not a hardcoded candidate list."""
+
+    # ---- inputs the judge reads ----------------------------------------
+    @property
+    def lanes(self) -> LanePaths:
+        """The shared per-lane layout on this config's root — one `data_dir`, so
+        a `data_dir=tmp_path` config redirects lane reads too."""
+        return LanePaths(data_dir=self.data_dir)
+
+    @property
+    def arch5k(self) -> Path:
+        return self.data_dir / "legb_pilot" / "arch5k"
+
+    @property
+    def draw(self) -> Path:
+        """The row population and its l2 score triple — the only artifact that
+        carries l2, whose ranked lists were never persisted."""
+        return self.arch5k / "rows.json"
+
+    @property
+    def depth_probe(self) -> Path:
+        return self.arch5k / "depth_probe.parquet"
+
+    @property
+    def v2_100k(self) -> Path:
+        return self.data_dir / "rungs" / "100k-v2"
+
+    @property
+    def labels(self) -> Path:
+        return self.v2_100k / "labeling" / "labels.parquet"
+
+    @property
+    def manifest(self) -> Path:
+        return self.v2_100k / "candidate_manifests.parquet"
+
+    def oracle_caches(self, dataset: str) -> list[Path]:
+        """Caches that may hold a lane's persisted retrieval results, precedence
+        first: this rung's labelling stages, then the standing cache."""
+        lanes = self.lanes
+        rung = [
+            lanes.oracle_rows(dataset, under=self.v2_100k / "labeling" / stage)
+            for stage in self.oracle_stages
+        ]
+        return [*rung, lanes.oracle_rows(dataset)]
+
+    # ---- artifacts the judge writes ------------------------------------
     @property
     def artifacts(self) -> Path:
         return self.data_dir / "relevance_judge"
@@ -96,11 +145,3 @@ class RelevanceJudgeConfig(BaseModel):
     @property
     def sample_test_report(self) -> Path:
         return self.artifacts / "sample_test_report.json"
-
-    @property
-    def arch5k(self) -> Path:
-        return self.data_dir / "legb_pilot" / "arch5k"
-
-    @property
-    def v2_100k(self) -> Path:
-        return self.data_dir / "rungs" / "100k-v2"
