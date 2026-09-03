@@ -13,6 +13,7 @@ import pandas as pd
 from pathlib import Path
 
 from augmentation.config import AugmentationConfig
+from hybrid_search_rrf_dataset.paths import LanePaths
 from composition.cellfill import CELL_SLICE, EXHAUSTED
 from composition.pool_v3 import (
     CLASSES,
@@ -139,6 +140,12 @@ class SelectionOrder:
         self._cells = cells
         self._data = data_dir
 
+    @property
+    def _paths(self) -> LanePaths:
+        """Built on access, not in `__init__` — callers construct with
+        `data_dir=None` for the allocation-only path, which reads no lane file."""
+        return LanePaths(data_dir=self._data)
+
     @staticmethod
     def yields(pool: pd.DataFrame) -> pd.DataFrame:
         """Per-lane tier-0 class yields from BLIND rows only — reused rows
@@ -235,7 +242,7 @@ class SelectionOrder:
         frames = []
         for lane in allocation.index:
             need = int(allocation.at[lane, "labels_ordered"])
-            qpath = self._data / _source_name(str(lane)) / "queries.parquet"
+            qpath = self._paths.lane_queries(_source_name(str(lane)))
             if need <= 0 or not qpath.exists():
                 continue
             queries = pd.read_parquet(qpath, columns=["query_id"]).astype(

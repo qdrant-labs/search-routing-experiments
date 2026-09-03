@@ -53,7 +53,14 @@ from scripts.label_routes import (
     _corpus_rows,
     _source_name,
 )
+from hybrid_search_rrf_dataset.paths import LanePaths
 from scripts.label_routes_synthetic import SYNTHETIC_OPERATOR
+
+def _paths() -> LanePaths:
+    """Resolved per call, so redirecting this module's DATA_DIR redirects the
+    lane reads with it."""
+    return LanePaths(data_dir=DATA_DIR)
+
 
 V3_DIR = DATA_DIR / "v3"
 AUGMENTED_DIR = V3_DIR / "augmented"
@@ -82,7 +89,7 @@ def label_more_selection(oversample: float = 1.0) -> pd.DataFrame:
 
     frames: list[pd.DataFrame] = []
     for dataset, row in label_more.iterrows():
-        qpath = DATA_DIR / _source_name(str(dataset)) / "queries.parquet"
+        qpath = _paths().lane_queries(_source_name(str(dataset)))
         if not qpath.exists():
             continue
         queries = pd.read_parquet(qpath).astype({"query_id": str})
@@ -116,7 +123,7 @@ def order_selection(cap: int | None = None) -> pd.DataFrame:
 
     frames: list[pd.DataFrame] = []
     for dataset, lines in order.groupby("dataset"):
-        qpath = DATA_DIR / _source_name(str(dataset)) / "queries.parquet"
+        qpath = _paths().lane_queries(_source_name(str(dataset)))
         if not qpath.exists():
             continue
         queries = pd.read_parquet(qpath).astype({"query_id": str})
@@ -150,7 +157,7 @@ def class_supply_selection(spec: dict[str, int | None]) -> pd.DataFrame:
 
     frames: list[pd.DataFrame] = []
     for dataset, take_n in spec.items():
-        qpath = DATA_DIR / _source_name(dataset) / "queries.parquet"
+        qpath = _paths().lane_queries(_source_name(dataset))
         if not qpath.exists():
             print(f"[{dataset}] no queries.parquet — skipped")
             continue
@@ -227,7 +234,7 @@ def answer_covered(selection: pd.DataFrame) -> pd.DataFrame:
         spec = LANES.get(str(lane))
         source = spec.source.name if spec is not None else str(lane)
         min_rel = spec.min_relevance if spec is not None else 1
-        path = DATA_DIR / source / "qrels.parquet"
+        path = _paths().lane_qrels(source)
         if not path.exists():
             continue
         qrels = pd.read_parquet(path, columns=["query_id", "relevance"])

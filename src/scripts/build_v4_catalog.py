@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
+from hybrid_search_rrf_dataset.paths import LanePaths
 from composition.cells import CELLS, CELLS_V3
 from composition.floors import CORRUPTION_SPANS, read_catalog, with_derived
 from composition.mini_catalog import feature_columns
@@ -30,6 +31,11 @@ from query_taxonomy.features import FeatureExtractor
 from query_taxonomy.taxonomy import FeatureGroup
 
 DATA = Path(__file__).resolve().parent.parent / "data"
+
+
+def _paths() -> LanePaths:
+    """Resolved per call, so redirecting DATA redirects the lane reads."""
+    return LanePaths(data_dir=DATA)
 V2_CATALOG = DATA / "feature_table" / "catalog.parquet"
 QUERY_CORPUS_STATS = DATA / "route_labels" / "query_corpus_stats.parquet"
 POOL = DATA / "augmentation" / "pool.parquet"
@@ -53,9 +59,9 @@ CORPUS_STAT_COLS = {"corpus_idf": "avg_idf", "corpus_oov": "oov_share", "corpus_
 def _natural() -> pd.DataFrame:
     """Every materialized lane's queries — a lane is a dir holding queries.parquet."""
     frames = []
-    for path in sorted(DATA.glob("*/queries.parquet")):
-        lane = path.parent.name
-        q = pd.read_parquet(path).rename(columns={"text": "query"})
+    paths = _paths()
+    for lane in paths.lanes_with_queries():
+        q = pd.read_parquet(paths.lane_queries(lane)).rename(columns={"text": "query"})
         q = q.astype({"query_id": str}).assign(
             dataset=lane, provenance="natural", operator=None,
             family=None, home_lane=lane,

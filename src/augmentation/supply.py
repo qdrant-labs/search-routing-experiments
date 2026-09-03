@@ -58,9 +58,7 @@ class SupplyIndex:
         return self._paths.lane_surfaces(lane)
 
     def lanes_on_disk(self) -> list[str]:
-        return sorted(
-            p.parent.name for p in self._paths.data_dir.glob("*/corpus.parquet")
-        )
+        return self._paths.lanes_with_corpus()
 
     def build(self, lane: str, *, force: bool = False) -> pd.DataFrame:
         """Scan one lane corpus (full text, no truncation) and persist its

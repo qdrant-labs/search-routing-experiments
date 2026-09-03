@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from augmentation.config import AugmentationPaths
 from composition.cells import CELLS
 from composition.cells_v3 import CELLS_V3
 from composition.compose import DEFAULT_OUT_DIR
@@ -76,6 +77,7 @@ class LabelledPool:
     ) -> None:
         self._recipe = recipe if recipe is not None else Recipe()
         self._data = data_dir if data_dir is not None else DATA
+        self._paths = AugmentationPaths(data_dir=self._data)
         self._native_only = native_only
         self._frame: pd.DataFrame | None = None
 
@@ -162,7 +164,7 @@ class LabelledPool:
         augmentation qrels under the identical relevance filter."""
         out = []
         for dataset, grp in labels.groupby("dataset"):
-            qrels_path = self._data / str(dataset) / "qrels.parquet"
+            qrels_path = self._paths.lane_qrels(str(dataset))
             if not qrels_path.exists():
                 continue
             qrels = pd.read_parquet(qrels_path).astype({"query_id": str})
@@ -191,7 +193,7 @@ class LabelledPool:
     def _augmentation_depth(self, want: pd.DataFrame) -> np.ndarray:
         """Depth from `data/augmentation/qrels.parquet` for rows outside every
         lane file — query_id is globally unique there, so no dataset key."""
-        path = self._data / "augmentation" / "qrels.parquet"
+        path = self._paths.qrels
         if not path.exists():
             return np.full(len(want), np.nan)
         qrels = pd.read_parquet(path).astype({"query_id": str})

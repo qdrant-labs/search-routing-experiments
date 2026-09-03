@@ -123,7 +123,7 @@ class CollectionIndexStore:
         self.tokenizer = tokenizer or Bm25Tokenizer()
 
     def path(self, lane: str) -> Path:
-        return self._paths.data_dir / lane / "corpus_index.parquet"
+        return self._paths.lane_corpus_index(lane)
 
     def indexable(self) -> dict[str, str]:
         """Lane key -> on-disk dir, for lanes whose corpus is materialized.

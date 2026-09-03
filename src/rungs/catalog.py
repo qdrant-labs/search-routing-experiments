@@ -19,6 +19,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from augmentation.core import CreditGate
+from hybrid_search_rrf_dataset.paths import LanePaths
 from composition.cells import DECLARED_CELLS
 from composition.floors import CORRUPTION_SPANS, read_catalog, with_derived
 from composition.mini_catalog import feature_columns
@@ -93,6 +94,7 @@ class CandidateCatalog:
     ) -> None:
         self._config = config
         self._data = data_dir
+        self._paths = LanePaths(data_dir=data_dir)
         self._datasets = list(datasets)
 
     def build(self) -> tuple[pd.DataFrame, pd.DataFrame, str]:
@@ -271,7 +273,7 @@ class CandidateCatalog:
         lane_series = graded["query_id"].map(lane_of)
         corpus_by_lane: dict[str, set[str]] = {}
         for lane in lane_series.dropna().unique():
-            corpus_path = self._data / lane / "corpus.parquet"
+            corpus_path = self._paths.lane_corpus(lane)
             if not corpus_path.exists():
                 corpus_by_lane[lane] = set()
                 continue

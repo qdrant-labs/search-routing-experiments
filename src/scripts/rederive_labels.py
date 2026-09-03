@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
+from hybrid_search_rrf_dataset.paths import LanePaths
 from hybrid_search_rrf_dataset.labels import outcome_shape, route_label
 from hybrid_search_rrf_dataset.lanes import LANES
 from hybrid_search_rrf_dataset.objective import RouterObjective
@@ -33,7 +34,7 @@ CARRIED = ["query", "checkable", "cell", "stage", "route_selected"]
 
 
 def _cache_path(lane: str) -> Path:
-    return DATA / "route_labels" / f"{lane}_oracle" / "rows.parquet"
+    return LanePaths(data_dir=DATA).oracle_rows(lane)
 
 
 def _qrels(lane: str) -> dict[str, dict[str, int]]:

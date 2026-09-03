@@ -29,6 +29,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance
 from tqdm.auto import tqdm
 
+from hybrid_search_rrf_dataset.paths import LanePaths
 from composition import CellFill
 from hybrid_search_rrf_dataset.fusion import (
     DenseOnlyStrategy,
@@ -63,12 +64,18 @@ def _source_name(key: str) -> str:
     return LANES[key].source.name if key in LANES else key
 
 
+
+def _paths() -> LanePaths:
+    """Resolved per call, so redirecting this module's DATA_DIR redirects the
+    lane reads with it."""
+    return LanePaths(data_dir=DATA_DIR)
+
 def _collection(key: str) -> str:
     return COLLECTION_OVERRIDE.get(key, f"{_source_name(key)}_routes")
 
 
 def _corpus_rows(key: str) -> int | None:
-    path = DATA_DIR / _source_name(key) / "corpus.parquet"
+    path = _paths().lane_corpus(_source_name(key))
     return ParquetFile(path).metadata.num_rows if path.exists() else None
 
 

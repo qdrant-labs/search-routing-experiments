@@ -19,12 +19,13 @@ from typing import NamedTuple
 
 import pandas as pd
 
+from hybrid_search_rrf_dataset.paths import LanePaths
 from composition.cellfill import DENSE, SPARSE
 from composition.compose import DEFAULT_OUT_DIR
 
 CELL_SELECTION = DEFAULT_OUT_DIR / "cell_selection.parquet"
-ROUTE_LABELS = DEFAULT_OUT_DIR.parent / "route_labels"
-ORACLE_GLOB = "*_oracle"
+PATHS = LanePaths(data_dir=DEFAULT_OUT_DIR.parent)
+ROUTE_LABELS = PATHS.oracle_dir()
 TOP_K = 10
 
 
@@ -51,11 +52,8 @@ def load_rankings(root: Path = ROUTE_LABELS) -> pd.DataFrame:
     """Concatenate every `<dataset>_oracle` directory's per-route doc lists,
     keyed by the composition dataset name the directory encodes."""
     frames = []
-    for oracle_dir in sorted(root.glob(ORACLE_GLOB)):
-        rows = oracle_dir / "rows.parquet"
-        if not rows.exists():
-            continue
-        dataset = oracle_dir.name.removesuffix("_oracle")
+    for dataset in PATHS.oracle_lanes(under=root):
+        rows = PATHS.oracle_rows(dataset, under=root)
         df = pd.read_parquet(rows, columns=["query_id", "route_rankings"])
         df = df.assign(dataset=dataset, query_id=df["query_id"].astype(str))
         frames.append(df)
