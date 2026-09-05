@@ -534,3 +534,160 @@ acceptance gate — none of the below are optional if v4 ships.
       untracked. Decide whether to commit them (recommended) or move them
       under an experiments/ directory before the next session — otherwise
       a stray `git clean` deletes the validation harness.
+
+## Tie-breaking judge work-list (2026-09-03, SPEC decision 67)
+
+Design closed via grill-me. `tie_pairs()` replaces `sub1_pairs()`: all tail
+docs (15.8/row measured), one function for all 1,917 ties, static ranked
+list, ~$11.50 for the draw — over the $10 `max_spend_usd` guard, so shard
+with `--limit` or raise it. Framed as qrels DEPTH — a broken perfect tie reaches margin
+~0.116, below the router's 0.4 bar, so it adds zero decisive training rows.
+Vocabulary in CONTEXT.md (Tail doc); full rationale in SPEC d67.
+
+- [x] **Implement `tie_pairs()`** — DONE 2026-09-03: `tail_docs()` +
+      `JudgeQueue.tie_pairs()` in `relevance_judge/residual.py`, globally
+      ordered by rank_spread desc with identity tiebreak. `sub1_pairs()` and
+      the then-dead `_above_gold()` method deleted; module `above_gold()`
+      kept (pilot notebook uses it) with its "the only docs" overclaim
+      fixed. CLI flag renamed `--pilot-sub1` -> `--judge-ties`; pilot
+      notebook cell repointed. 4 new tests (perfect tie served, same-rank
+      dropped, differing-rank-in-all kept, missing rankings None).
+      Verified live: 200 rows -> 3,164 pairs (15.8/row), 0 dropped.
+- [x] **Spend guard vs full pass** — MOOT 2026-09-03 (d68d): the engine rates
+      were 2x too high. At the published $0.20/$1.20 the full 1,917-row run is
+      ~$7.00, inside the existing $10 guard. (Build time is still ~5 min —
+      `corpus_text` does one filtered parquet read per row.)
+- [ ] **Step 2 — measure what depth unlocked** (blocks d67f and the tier-2
+      certificate). After a judged run: with |gold| >= 2, what is the margin
+      distribution? Does anything reach 0.4 (a second gold doc CAN flip
+      rank-1 ordering, unlike the NDCG-only path)? How many all_tied rows
+      leave the bucket, and into which one?
+- [ ] **Tier-2 "rank-win" certificate** (d67f) — separate a rank-1 flip
+      (margin >= 0.4) from a ranking-quality win (margin in (0, 0.3], all
+      routes hit@1) so the latter becomes expressible instead of discarded.
+      Threshold must be DERIVED from step-2 data (smallest NDCG gap a single
+      rank swap produces at the window), never typed. Then a separate
+      question: does the router want tier 2 (own head / down-weighted
+      samples / ignore)?
+- [ ] **Resolve the 0.1-vs-0.4 threshold mismatch.** `residual.regime()`
+      calls margin 0.116 `decisive_strong` on a hand-typed 0.1 bar;
+      `RouterObjective.decisive_margin` is 0.4 and `router.py:304` excludes
+      the same row. Decide whether regime()'s 0.1 is a deliberately different
+      classifier (then rename its output) or a stale constant (then derive
+      it). Until resolved, any "resolved into decisive" count from the queue
+      must not be read as router gain.
+- [ ] **Graded atoms via a binary ladder** (d67e) — only if step 2 shows
+      grades matter. Rung 1 is the existing "relevant at all?" question, so
+      no re-judging; rung 2 "does it fully answer?" yields 0/1/2. Needs a
+      new per-grade precision gate (the 0.955 gate is binary-only).
+- [ ] **Scaling beyond the draw** — full v2-100K is 393,540 judgments/$148
+      (bottom of d60 Option A's $140-700). Not authorized by d67; wants
+      step-2 conversion rates first.
+- [ ] d60 **Option A** is now half-resolved: this closes its work-list half.
+      Its PPI-rectifier half is stale (arch5k §10 killed preference judging)
+      — decide whether to strike it or restate it for atoms.
+
+## Judge run hardening + tie-depth pilot (2026-09-03, SPEC decision 68)
+
+First paid tie run landed: 5,133 atoms, 354 rows, **71 of 260 tied rows broke
+(27.3%) and NONE reached decisive** — d67(d) confirmed, the program is qrels
+depth only. Precision reached **0.988** at ~1.2s/call after the reasoning fix
+plus a prompt rewrite. Four paid-path defects fixed, each with a regression test.
+Full rationale in SPEC d68.
+
+- [ ] **No working per-call timeout (KNOWN-UNFIXED, d68 footnote).** Neither
+      litellm's `timeout=` kwarg nor module-level `litellm.request_timeout`
+      bounds a call on the OpenRouter path — measured: a `timeout=30` call
+      completed at 60.9s, and a probe with the global at 90 ran past 120s. One
+      stalled request parks a worker indefinitely. Low impact at ~1.2s typical,
+      but the `request_timeout_s` config knob is currently a LIE — either make it
+      bind (httpx client timeout, or a thread/future wrapper with hard cancel) or
+      delete it and say so. Do not report it as working again without observing
+      a call actually cut off.
+- [ ] **Deploy lanes have no human negatives** (d68f). Precision 0.988 is a
+      transfer estimate: the 12 referee lanes and the 6 deploy lanes are
+      disjoint, and the deploy lanes ship positive-only qrels. The pseudo-negative
+      check bounds gross over-calling only — the near-miss boundary, where a
+      relevance judge actually fails, is unmeasured where it runs. Cheapest real
+      fix: a few dozen human-labelled negatives on one or two deploy lanes
+      (`clerc` or `rarb-math`), purely to check the referee transfers.
+- [ ] **`score()`'s transfer flag reads False when it should read unknown.**
+      `precision_is_transfer_estimate` is `bool(deploy_lanes) and not
+      refereed_deploy`, so a caller that omits `deploy_lanes` (the `--rescore`
+      path, and the notebook stages) gets `False` — indistinguishable from
+      "deploy lanes are properly refereed". Should be tri-state / None.
+- [ ] **Atom provenance spans two judge configurations.** 371 atoms carry the
+      09-01 run (0.955, verdict-first prompt, full reasoning); 4,762 carry the
+      09-03 run (0.988, rewritten prompt, reasoning suppressed). Both gates
+      passed so both are legitimate, but an audit by run must not treat the
+      ledger as one instrument. Consider stamping the prompt hash on the run row.
+- [x] **Where do decisive rows come from** — ANSWERED 2026-09-04 (d68a2): the
+      above-gold lever, on sub-1.0 ties only. True-l2 run over all 85 sub-1.0
+      ties: 18 of 80 broke, **2 reached decisive**. Perfect ties (95.6% of the
+      tie mass) yield 0, exactly as the 0.3-vs-0.4 ceiling predicts. Aggregate
+      router yield 2/1,917 = 0.1% (~26 rows at v2-100K scale) — negligible,
+      the depth-only verdict stands.
+- [ ] **Perfect ties were never measured on l2 rankings.** The 27.3%/0-decisive
+      figure rescores v2 rankings because l2's ranked lists were never
+      persisted; only the 85 sub-1.0 ties have live l2 numbers. Re-retrieving
+      the 1,832 perfect ties on l2 would cost a fresh Qdrant pass (~$2 of query
+      embedding) and is the only way to confirm 0-decisive on the stack that
+      actually defines the population. Low priority: the ceiling argument is
+      stack-independent (HitRate@1 is maxed in any stack where the tie is 1.0).
+- [ ] **Step 2 — does enriched gold change the router's decisive population?**
+      (carried from d67, still the gate on downstream work). The tie-conversion
+      question is now answered; this one is not. With |gold| >= 2, re-derive the
+      router's decisive training set and check whether the 35.6% qrels-hole
+      correction moves any held-out headroom.
+- [ ] **`reasoning_effort` middle is untested.** 'none' = 1.2s/0.988 (with the
+      new prompt); None = full reasoning, ~60s/0.955 (with the old prompt). The
+      two were never compared under the SAME prompt, so "suppression costs
+      precision" is confounded with "the old prompt was worse". A `low` run
+      under the current prompt would separate them; ~2 min, ~$0.66.
+- [ ] **Empty-document guard is ineffective** (cosmetic). `bool(float('nan'))`
+      is True, so `sample()`'s `.astype(bool)` filter cannot drop a NaN doc, and
+      `"nan".strip()` is truthy so `judge_one`'s empty-doc guard cannot either.
+      Measured impact: 639 replies called the document blank and 638 correctly
+      said no, so 1 bad verdict — not worth fixing on its own, but note that
+      17.8% of the validation sample has empty document text, which dilutes the
+      sample.
+- [ ] **`:batch` variant rejected, revisit only at scale** (d68d). Halves cost
+      ($0.10/$0.60) but needs an async submit/poll path; at 19 min and $7 for the
+      full run it cannot repay that. Reconsider if the population grows ~10x.
+
+## Per-lane judge context (2026-09-05, SPEC decision 69)
+
+Lane cards shipped: deploy recall **0.292 -> 0.427 (+46% rel)**, precision
+0.9683 (gate 0.95), all 8 false positives in uncarded `freshstack` lanes.
+`relevance_judge/lane_context.py` holds the cards; full rationale in SPEC d69.
+
+- [x] **Lane cards + the ASKED/MISSING disjunction fix** — DONE 2026-09-05,
+      measured on a full n=3,600 sample. clerc +0.325, quest +0.300.
+- [x] **Transport-fault retry** — DONE: `connect_retries=3`, linear backoff,
+      message-matched (litellm erases the socket error's type). Request
+      rejections are not retried.
+- [ ] **Recall is still the ceiling — iterate on the GATE, not on gold.**
+      Deploy recall is 0.427; clerc 0.590 and quest 0.465 mean roughly half
+      their true positives are still missed. `judge_rows` is the cheap loop for
+      this (~6 min, ~$0.70, human labels present, no gold written) and it must
+      stay the loop: never tune recall by running `judge_pairs` and inspecting
+      atoms, because those atoms become permanent gold and there is nothing to
+      check them against on positive-only lanes.
+- [ ] **`crumb-legal-qa` gold needs auditing before the lane is judged.**
+      Recall 0.075 and deliberately uncarded. Sample ~20 of its 189 false
+      negatives against the statutes cited; if the pairing is jurisdiction- or
+      topic-matched rather than answer-verified, the lane should be dropped from
+      the residual (it carries 557 of v2-100K's tied rows) rather than judged.
+- [ ] **The cards' precision effect is unmeasured, not zero.** All 12
+      negative-bearing referee lanes are uncarded, so a card cannot be caught
+      over-calling. Cheapest check: card ONE referee lane (`wands` or
+      `dbpedia-entity`) whose task is describable, and watch its precision.
+- [ ] **Referee lanes have no cards and may deserve them.** `freshstack-*` sits
+      at 0.02-0.05 recall and produces every false positive; its queries are bug
+      reports where gold is the specific fix. A card there would test whether
+      the same treatment helps a lane where precision IS measurable — the only
+      place the trade-off can be seen directly.
+- [ ] **Re-check `llm_workers`.** Dropped 32 -> 12 while diagnosing the refused
+      connections, which turned out to be transport faults now retried. If
+      `drop=` stays near zero at 12, raise it back toward 32 — the full tie run
+      is ~10h at 12 workers versus ~4h at 32.

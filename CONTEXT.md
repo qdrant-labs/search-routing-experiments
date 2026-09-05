@@ -846,3 +846,15 @@ One model serves both regimes, so results must be dropped out during training
 or the results-free call is out of distribution.
 _Avoid_: a second classifier (one model, two call sites), CAN_PRESEARCH as a
 separate component
+
+**Tail doc**:
+A document in some route's retrieved window for a query that is not gold —
+the judgeable candidate whose relevance, once judged, shifts the NDCG term
+and can break a tie. Distinct from an *above-gold doc*, which outranks the
+first gold doc and moves HitRate@1; the tail set is the larger one and is
+what breaks perfect (1.0/1.0/1.0) ties. Docs at the identical rank in every
+route are excluded: they add the same DCG and IDCG to each route, so a tie
+stays a tie.
+_Avoid_: "unjudged doc" (says nothing about position or usefulness),
+"above-gold doc" (a strict subset, different lever), "distractor" (implies
+known-irrelevant, which is the judgment we haven't made yet)
