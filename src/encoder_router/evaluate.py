@@ -20,13 +20,13 @@ from encoder_router.table import (
     HEDGE,
     PRIORITY,
     ROUTES,
+    LexicalShape,
     NgramSvd,
-    QueryEmbeddings,
-    TrainingTable,
     ZipfStats,
     serve_from_probabilities,
     serve_indices,
 )
+from encoder_router.training import QueryEmbeddings, TrainingTable
 from encoder_router.targets import OUT_DIR
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
@@ -40,10 +40,13 @@ at exactly that much score. Removing it is triple-measured: the tuner then
 converges to whichever constant the serving rule leaves reachable."""
 
 
-def tuned_thresholds(probs: pd.DataFrame, frame: pd.DataFrame) -> np.ndarray:
+def tuned_thresholds(
+    probs: pd.DataFrame, frame: pd.DataFrame, cost_step: float = COST_STEP
+) -> np.ndarray:
     """Head thresholds (sparse, dense), coordinate-ascended on routes_differ
     rows to maximize cost-adjusted captured score — the objective whose
-    argmax reproduces the serve oracle on 100% of differ rows."""
+    argmax reproduces the serve oracle on 100% of differ rows. `cost_step=0`
+    prices every route equally: a cost-free quality-only tuning."""
     differ = (
         (frame["shape"] == "routes_differ") & frame["serve"].notna()
     ).to_numpy()
@@ -54,7 +57,7 @@ def tuned_thresholds(probs: pd.DataFrame, frame: pd.DataFrame) -> np.ndarray:
     ordered = probs[list(HEAD_ROUTES)].to_numpy()[differ]
     rewards = (
         frame[[f"score_{r}" for r in choices]].to_numpy()[differ]
-        - COST_STEP * np.array([PRIORITY.index(r) for r in choices])
+        - cost_step * np.array([PRIORITY.index(r) for r in choices])
     )
     rows = np.arange(len(ordered))
     best = -np.inf
@@ -79,6 +82,8 @@ class Arm:
     name: str
     feature_inputs: bool = False
     zipf_inputs: bool = False
+    shape_inputs: bool = False
+    svd_inputs: bool = True
     cell_branch: bool = True
     corpus_branch: bool = True
     feature_branch: bool = False
@@ -99,6 +104,10 @@ ARMS: tuple[Arm, ...] = (
     # third privileged branch's TARGETS — the serve-safe form of
     # features_as_input, which needs the extractor at inference.
     Arm("zipf_channel", zipf_inputs=True),
+    Arm("zipf_input_nocorpus", zipf_inputs=True,
+        cell_branch=False, corpus_branch=False),
+    Arm("zipf_shape_nocorpus", zipf_inputs=True, shape_inputs=True,
+        cell_branch=False, corpus_branch=False),
     Arm("feature_branch", feature_branch=True),
 )
 
@@ -146,14 +155,19 @@ class LaneCV:
     def _inputs(
         self, arm: Arm, frame, embeddings: np.ndarray, train: np.ndarray
     ) -> np.ndarray:
-        svd = NgramSvd(seed=self.seed).fit(frame.loc[train, "query"])
-        blocks = [embeddings, svd.transform(frame["query"])]
+        blocks = [embeddings]
+        if arm.svd_inputs:
+            svd = NgramSvd(seed=self.seed).fit(frame.loc[train, "query"])
+            blocks.append(svd.transform(frame["query"]))
         if arm.feature_inputs:
             features = self.table.feature_matrix
             blocks.append(_zscore(features[train], features))
         if arm.zipf_inputs:
             zipf = ZipfStats().frame(frame["query"])
             blocks.append(_zscore(zipf[train], zipf))
+        if arm.shape_inputs:
+            shape = LexicalShape().frame(frame["query"])
+            blocks.append(_zscore(shape[train], shape))
         return np.concatenate(blocks, axis=1)
 
     def _targets(self, arm: Arm, train: np.ndarray):
