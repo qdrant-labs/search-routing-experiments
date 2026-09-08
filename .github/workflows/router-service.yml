@@ -112,6 +112,10 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           npm install -g @railway/cli
+          # A 404 on upload means the token can't resolve the target project/service —
+          # print what it DOES resolve to before deploying (|| true: never mask `up`).
+          railway whoami || true
+          railway status || true
           railway up --service "${{ vars.RAILWAY_SERVICE }}"
       - name: Smoke the live deployment
         if: vars.ROUTER_URL != ''
