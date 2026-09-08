@@ -44,10 +44,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # not recursive: query-taxonomy carries a nested .claude/skills gitlink with no
-          # .gitmodules entry, which aborts a recursive checkout — and we don't need it.
-          submodules: true
           token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+      # actions/checkout persists submodule creds with `git submodule foreach --recursive`,
+      # which aborts on query-taxonomy's nested .claude/skills gitlink (no .gitmodules entry).
+      # So don't let the action touch submodules — init only query-taxonomy, non-recursively.
+      - name: Check out query-taxonomy (non-recursive)
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+        run: |
+          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init src/query-taxonomy
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
