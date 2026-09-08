@@ -1,8 +1,7 @@
 name: router-service
 
-# Secrets: SUBMODULE_TOKEN (read on qdrant-labs/query-taxonomy; the test job only —
-#   serving neither imports nor installs it), GCP_SA_KEY (read on
-#   gs://qdrant-hybrid-search-rrf), RAILWAY_TOKEN (a Railway project token).
+# Secrets: GCP_SA_KEY (read on gs://qdrant-hybrid-search-rrf), RAILWAY_TOKEN (a Railway
+#   project token). query-taxonomy is public, so the test job fetches it without a token.
 # Variables: RAILWAY_SERVICE, ROUTER_ARM (default no_branches), ROUTER_URL (optional smoke).
 
 on:
@@ -43,17 +42,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       # actions/checkout persists submodule creds with `git submodule foreach --recursive`,
       # which aborts on query-taxonomy's nested .claude/skills gitlink (no .gitmodules entry).
-      # So don't let the action touch submodules — init only query-taxonomy, non-recursively.
+      # So init only query-taxonomy, non-recursively. query-taxonomy is public, so no token —
+      # just rewrite its SSH url to HTTPS (the runner has no SSH key) for this one command.
       - name: Check out query-taxonomy (non-recursive)
-        env:
-          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_TOKEN || github.token }}
         run: |
-          git config --global url."https://x-access-token:${SUBMODULE_TOKEN}@github.com/".insteadOf "https://github.com/"
-          git submodule update --init src/query-taxonomy
+          git -c 'url.https://github.com/.insteadOf=git@github.com:' \
+            submodule update --init src/query-taxonomy
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
