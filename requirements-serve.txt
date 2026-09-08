@@ -1,0 +1,17 @@
+# What serving a saved arm actually reaches: 9 of the project's 22 dependencies.
+# Bounds mirror pyproject.toml; torch is installed separately from the CPU index.
+# The `serve-deps` CI job installs this file and imports the app, so an import
+# this list cannot satisfy fails CI rather than the deploy.
+fastapi>=0.141.1,<0.142.0
+uvicorn[standard]>=0.52.4,<0.53.0
+pydantic>=2.13.4,<3.0.0
+pandas>=3.0.3,<4.0.0
+scikit-learn>=1.9.0,<2.0.0
+sentence-transformers>=5.6.1,<6.0.0
+# sentence-transformers 5.x imports `datasets` in its __init__ but declares it only
+# under its train/dev extras, so a plain install cannot import it. Pin it here.
+datasets>=4.0.0
+# not reached by an MLP arm, but ROUTER_ARM selects the arm at runtime:
+# lightgbm for `learner: lgbm` arms, wordfreq for `zipf_inputs` arms.
+lightgbm>=4.5.0,<5.0.0
+wordfreq>=3.1.1,<4.0.0

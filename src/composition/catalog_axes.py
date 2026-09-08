@@ -1,9 +1,9 @@
 """Canonical axes over the d29 feature-table catalog — shared knowledge,
-housed with the composition floors that select against it. The coverage charts (SPEC d31) and the composition
-floors (SPEC d33b) both read their band definitions from here, so the
-coordinate system a human sees in a chart and the one the fill selects
-against can never drift apart. Bands are RAW scalar units by decision
-d33b: stable, generation-targetable, unmoved by catalog growth.
+housed with the composition floors that select against it. The cells and the
+composition floors (SPEC d33b) both read their band definitions from here, so
+the coordinate system a human reads and the one the fill selects against can
+never drift apart. Bands are RAW scalar units by decision d33b: stable,
+generation-targetable, unmoved by catalog growth.
 
 NOTE: the production router's classify() score 0..9 is a sparse-vs-dense
 GRADE, not a word count — never draw length bands as router bands."""

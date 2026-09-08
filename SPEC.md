@@ -15,223 +15,12 @@ breadth; strategy labeling is explicitly a later stage.
 
 ## Decisions
 
-1. **Next extractor wave = REGEX + query-only ALGO features** (negation,
-   operator syntax, stopword/function-word ratio, interjections, comparatives,
-   politeness, greetings, artifacts, length, PMI, morphology, char-level
-   typos). MODEL-tier and corpus-relative features are deferred, not dropped.
-   — *Most Classification power per unit of new machinery; every extractor
-   stays deterministic and bank-style testable.*
-
-2. **Measured features are spans-based structs; targets are quantities.**
-   `features` = `QueryIdentifiers`-style pydantic model (spans section +
-   scalars section), always re-measured on final text — never trusted from a
-   generator. `feature_targets` = per-feature counts/ratios/ranges.
-   — *Spans exist only after generation; targets can only prescribe
-   quantities. The verification loop checks measured-vs-target.*
-
-3. **Diversified dataset row schema** (`queries.parquet`): `query_id`
-   (namespaced), `text`, `provenance` (`natural | doc_grounded | synthetic`),
-   `source_dataset` (None only for synthetic), `doc_ids`, `features`,
-   `feature_targets` (None for natural), `strategy_label` (nullable,
-   reserved). — *Targets-vs-measured is the generation audit trail; the
-   nullable label means the labeling stage extends the table, not rebuilds it.*
-
-4. **Synthetic documents live in a sibling `documents.parquet`** inside the
-   artifact; `doc_grounded` rows reference their source corpus by
-   `(source_dataset, doc_id)`, no copying. The registry stays an
-   acquisition-only, queries-only catalog. — *Pipeline outputs don't belong in
-   the acquisition registry.*
-
-5. **Grounding: doc_grounded wherever a real corpus supports the target
-   feature; synthetic query+doc pairs for the residue; never free-floating
-   generation.** The verification loop guarantees feature fidelity;
-   answerability is guaranteed by construction. — *Free-floating queries are
-   permanently unlabelable; grounding is cheapest at generation time.*
-
-6. **Composition = recipe + two steps.** The recipe (global quotas over
-   features, within-feature strata, provenance mix with a minimum natural
-   share) is a hand-owned, reviewable artifact. Step A builds the natural
-   core from harvest-target-driven scan-and-filter over cached parquets;
-   Step B diffs the core against the recipe and hands the deficit to
-   Generation as the order sheet. Greedy quota-fill (one query may satisfy
-   several quotas); ILP escalation only if quotas demonstrably conflict.
-   — *All demo claims are marginal claims; greedy is auditable and a day of
-   work.*
-
-7. **Harvest targets are ranked, profiling-proposed, human-ratified.**
-   Top-N features by prevalence relative to the cross-dataset average;
-   ratification doubles as the extractor FP audit on fresh text; the result
-   is committed as a declared code object (banks-style). Datasets rich in
-   nothing serve the background stratum. — *Fully automatic comparative
-   advantage would mine false positives at volume.*
-
-8. **Within-feature strata are computed views over spans** — density,
-   surface diversity, repetition, clustering — not separate extractors.
-
-9. **Estimation and composition stay separate methods.** Uniform seeded
-   sampling only for profiling (unbiased estimates); composition is
-   constrained selection over full scans — rare strata are scanned-and-
-   filtered, never sampled-and-hoped.
-
-10. **Verification tooling is library-first**: `verify(text, targets)` over
-    the banks/extractors, driving a scripted Claude-API generation loop
-    (generate → verify → PASS/FAIL → retry). MCP server is a thin later
-    wrapper if interactive generation is wanted. — *The order-sheet workflow
-    is batch; library→MCP is the cheap migration direction.*
-
-11. **Demo ladder**: (a) feature-coverage figures + (b) strategy-disagreement
-    measurement (dense vs sparse vs RRF ranking divergence; needs corpora +
-    Qdrant, needs no qrels) first; then (c) an LLM-router class inside
-    `src/hybrid_search_rrf_dataset` whose prompt carries the taxonomy labels
-    + examples, evaluated on NDCG against baselines — with the production
-    hard classifier (0–2 dense / 3–6 RRF / 7–9 BM25) as a first-class
-    baseline. — *(b) is the weakest claim that still justifies the project
-    and is measurable without labels.*
-
-12. **Taxonomy scoping**: taxonomy labels may serve as *prompt context* in
-    the demo router (to prove the labels carry routing signal); they remain
-    off-limits as learned/engineered features of a production router.
-    — *Scopes the 2026-07-13 "not router features" rule.*
-
-13. **MODEL-tier v0 = GLiNER2, named entities only, gated on a smoke eval**
-    (2026-07-15; adopted label-scoped 2026-07-16 after a hand-audited
-    200-query smoke eval; **dropped 2026-07-21**, same push as the d26
-    prune: `entities/` deleted, `Engine` = regex | spacy only — GLiNER ran
-    ~600× slower than regex and its entity spans answered no router
-    question; profiles, demo, and benchmarks regenerated without it).
-    What survives: the smoke-eval method (stratified sample, hand-audited
-    precision, lowercase parity, offset integrity) remains the gate for
-    any future MODEL-tier engine; closed-list markers scored 0 zero-shot —
-    banks own them, now with data. Eval details (per-label thresholds,
-    acronym rejection, the schema-composition determinism pin) live in
-    this entry's git history.
-
-14. **POS profile = ALGO feature via pinned spaCy tagger** (grill-me
-    2026-07-16). Shipped as the tagger behind what d26 renamed
-    `natural_language_share`; the 17-tag histogram and its derived views
-    were retired by d26 (recompute from the shared spaCy doc if ever
-    needed). Still live: stopword/function-word ratio is the REGEX
-    fallback of `natural_language_share` (non-English, minimal installs;
-    recipe quotas reference the spaCy scalar only); POS fields nullable
-    per-row (English-only); and the domain-shift guardrail (taggers
-    degrade on keyword telegrams) — bank-style fixed cases + a one-off
-    `natural_language_share`↔stopword-ratio correlation diagnostic over
-    the cached datasets (investigate if r < 0.8), still an open TODO gate.
-
-15. **Unified bank family + FeatureExtractor** (grill-me 2026-07-16). One
-    generic family `GeneralBank[EngineT, OutT]` with `OutT` constrained to
-    exactly `FeatureSpan | FeatureStat` (`RegexBank`/`StatBank`/`Gliner2Bank`
-    as engine bases). Registry `FEATURE_BANKS: dict[FeatureGroup,
-    tuple[type[GeneralBank], ...]]` is group-partitioned; `FeatureExtractor`
-    runs one pass per text with within-group claim resolution, exposing
-    `resolve(text, *, groups=...)` and `extract(queries, *, groups=...)`.
-    Output: `QueryFeatures` (spans + stats sections nested by group),
-    aggregated into `CorpusFeatures` with per-group `summary()`.
-
-16. **Extractor fan-out wave + engine doctrine** (grill-me 2026-07-16).
-    Three engines: RegexBank (edify — closed shapes/lists, precision-first),
-    SpacyBank (grammatical signal), Gliner2Bank (context entities, audited
-    labels only, pinned schema per d13). **A Query Feature may need more
-    than one signal**: multiple banks may share one feature name — the
-    within-group claim registry plus AmbiguityTier ordering arbitrate
-    (deterministic engine claims first, model engine backstops at AMBIGUOUS).
-    First layered feature: `LogicalStructure.TEMPORAL` — relative-vocab
-    regex bank + GLiNER2 date backstop (threshold 0.58). Language policy:
-    English-v0 everywhere; word lists are versioned code; coverage gaps are
-    handled by process (ratification audits, model-vs-bank disagreement
-    mining), not speculative engines; multilingual is one phase-2 sweep.
-
-17. **Engine as a first-class bank attribute; one unified registry**
-    (grill-me 2026-07-17). `Engine` StrEnum (`regex | gliner_model |
-    spacy_model`) as a `ClassVar` on every bank — engine bases fix it, so
-    `FeatureExtractor(engines=[Engine.REGEX])` filters **before
-    instantiation** and never imports torch/spaCy. Default is
-    `(Engine.REGEX,)` (deterministic, dependency-light); `None` selects
-    every engine (requires the `model` group + downloaded spaCy model).
-    Layering composes: dropping GLINER removes the temporal backstop, keeps
-    the regex layer. Case-enforcement invariant scopes to engine == REGEX
-    span banks; model banks get live tests. Stage-1 CSV gap close-out
-    shipped Morphology + Syntactic Depth as spaCy stat banks over ONE
-    shared cached pipeline; PMI, char-typos, multilingual,
-    corruption-degree, and the five corpus-relative features tracked in
-    TODOS.
-
-18. **Multilingual strategy + language engine** (grill-me 2026-07-17).
-    Three-axis design: (a) **invariant banks** — 79 identifier banks are
-    mostly language-invariant already (UUIDs, IBANs, CVEs are international
-    standards); a small audit flags the English-gated exceptions;
-    (b) **UD-routed grammatical banks** — spaCy POS/morphology/depth banks
-    route to per-language pipelines (`de_core_news_sm`, etc.) via the
-    `languages` parameter, zero architecture change; (c) **language-identity
-    features** (`LANGUAGE_SET` + `CODE_SWITCHING`) join the **SEMANTICAL**
-    group as stat banks. Engine: **lingua-py** (Apache 2.0, 75 languages,
-    Rust-backed v2, `compute_language_confidence_values()` returns ranked
-    multi-language scores — the only candidate with multi-label output,
-    which is the hard requirement for code-switching detection; spacy-fastlang
-    disqualified: exposes only `doc._.language` single string, no multi-label
-    API). fastText direct is the fallback if the 4 missing MIRACL languages
-    (Yoruba, Telugu, Swahili, Farsi) become blocking. Memory guardrail: scope
-    `LanguageDetectorBuilder.from_languages([...])` to the MIRACL 14 actually
-    covered, not all 75. Missing languages return nullable per-row (same
-    precedent as English-only spaCy banks). `LLMBank` reserved as last-resort
-    engine — explicitly deferred, not this stage. Language parameter:
-    `resolve(text, *, languages=["en"])` — caller-declares, not detected;
-    banks declare `supported_languages: ClassVar[frozenset[str] | None]`.
-    Routing architecture for per-language spaCy pipelines: see decision 19.
-
-19. **Per-language pipeline routing** (grill-me 2026-07-17). The shared
-    spaCy caches become language-keyed: `_pipeline(lang)` loads the pinned
-    per-language model (`en_core_web_sm`, `de_core_news_sm`, ...);
-    `_doc(text, lang)` caches by both. Banks declare
-    `supported_languages: ClassVar[frozenset[str] | None]` (None =
-    language-invariant); the extractor skips non-supporting banks for the
-    requested `languages` and runs supporting banks once per requested
-    language, merging results. Missing pipeline downloads **fail loudly**
-    with the download command in the error — no silent fallback to the
-    weaker `xx` multilingual model (silent degradation would corrupt
-    profiles exactly where multilingual data is the point).
-    `spacy.util.get_installed_models()` lets the extractor warn at init
-    about unservable languages. Multilingual monolingual models rejected
-    as primary (option b) on accuracy; silent fallback rejected (option c)
-    on integrity.
-
-20. **Logical group expansion + coordination metric** (grill-me 2026-07-20).
-    OPERATOR_SYNTAX stays narrow: uppercase word operators (AND/OR/NOT)
-    only. Research grounding: boolean operators appear in ≤10% of web
-    queries (Spink et al. 2002; ~1% for advanced syntax, White & Morris
-    2007) with 50% of AND uses erroneous (Jansen et al. 2000), but usage is
-    markedly higher among specialized/developer audiences (Jones et al.
-    2000 CSTR; DIALOG 36%) — exactly Qdrant's population. Rare-but-real:
-    the recipe quotas it. Symbolic forms (`!=`, `<>`, `!x`) are NOT
-    attested search dialect — in a real query they are evidence of
-    **embedded formal content**, two new LogicalStructure members:
-    CODE_FRAGMENT (programming-language grammar: compound symbolic
-    operators `!=`/`<>`/`=>`/`->`/`::`/`&&`/`||`/`===`, call syntax
-    `identifier(`, keyword-gated bigrams like `SELECT … FROM`) and
-    MATH_EXPRESSION (equation grammar: operand-operator-operand runs,
-    `=` flanked by expressions). "Formula" dissolves: spreadsheet → code,
-    physics → math, chemical ids → ChemicalIdBank, bare chemical formulas
-    (H2SO4) deliberately excluded (letter-digit shapes collide with
-    SKUs/tickers; rationale in the enum docstring). The SMILES precedent
-    ("a grammar, not a token format") now has a home: grammars go to
-    logical, token formats to identifiers. **Cue-claiming doctrine**: the
-    regex banks (both MODERATE) claim high-precision evidence tokens, not
-    fragment boundaries — full-fragment segmentation is out of scope by
-    design; bare single-char `=`/`+`/`-`/`<`/`>` are never claimed.
-    Precision-first is structurally correct here: recipe harvesting is
-    precision-sensitive (FPs poison strata) and recall-tolerant (the order
-    sheet fills deficits via generation); recall arrives later as a model
-    layer (TEMPORAL precedent). Lowercase and/or/comma coordination is NOT
-    a span feature — new `StatisticalMetric.COORDINATION`, a SpacyBank
-    beside SyntacticDepthBank (shared cached pipeline) emitting
-    coordination_count, max_conjunct_width, clausal_coordination_count,
-    nominal_coordination_count (the parser separates the two "and"s:
-    conj arcs between verbs = clausal, between nouns = enumeration;
-    comma-coordination comes free). Not folded into SYNTACTIC_DEPTH: depth
-    = nesting (subordination), coordination = breadth (parataxis) —
-    orthogonal axes, separately quotable strata. Wave scope: 2 enum
-    members + 1 metric member, 2 CSV rows + 1, three banks, registry
-    entries, 2-pos/2-neg cases each (value assertions for the stat bank).
+The decisions below keep their original numbers; gaps are removals, not
+renumberings. Removed 2026-08-17 as superseded — d1–d20, d22–d34 (extractor
+waves and the slice composition, retired by d48/d49), d40, d42–d43, d51–d59
+(the generation campaign), d45–d47 (the logistic-regression router, NO-GO in
+VERDICT.md). A surviving decision may still cite a removed one; the full list
+is at commit 26b9a93.
 
 21. **Dataset acquisition catalog + wave-1 implementation** (2026-07-20).
     The candidate catalog lives in `docs/datasets.md`: card tuples along the
@@ -262,438 +51,6 @@ breadth; strategy labeling is explicitly a later stage.
     queries, already registered). Open ratifications: MIRACL
     `llm_target`/`non_trivial` card vs the candidate-list coding;
     DBPedia scope G-vs-S.
-
-22. **`-Like` suffix on non-RIGID span banks** (grill-me 2026-07-20,
-    triggered by first-profile results). Rename every non-RIGID span bank
-    with a `-Like` suffix — 7 regex banks (AMBIGUOUS: `StockTickerBank`,
-    `BookingReferenceBank`; MODERATE: `DerivativesSymbolBank`, `TicketBank`,
-    `GameNotationBank`, `AircraftVesselRegBank`, `ErrorCodeBank`) and 4
-    MODEL banks (`PersonBank`, `LocationBank`, `ProperNounBank`,
-    `Gliner2TemporalBank`). Cascade: class name → enum member in
-    `StructuralIdentifier` / `LogicalStructure` / entity enum → emitted
-    string in `SpanProfile`. RIGID regex banks and the regex `TemporalBank`
-    unchanged. Motivation: profile results on scientific corpora — scifact
-    fires `stock_ticker` on 29% of queries (DNA/TCR/PPAR — 100% gene names);
-    MODERATE banks misfire at the same rate under domain shift; GLiNER
-    audited precisions of 0.84–0.87 don't hold on real corpora (lowercased
-    web queries, short medical titles). Combined with the taxonomy CSV's
-    stated purpose for Structured Identifiers ("Helps to determine
-    sparseness"), the non-RIGID banks are shape-guessers, not class-claimers
-    — the emitted identifier should say so. Behavioral change: none (same
-    regex, same claim range, same tier); test surface survives
-    parametrization. Consumers filter by suffix or by tier to reject
-    shape-guessed evidence when they need certified matches only.
-
-23. **Profiling decouples from grounded snapshots** (grill-me 2026-07-20).
-    `src/profile_datasets.py` reads full source query sets directly —
-    `dataset._test_ds.queries_iter()` for TrecDL2022; existing
-    `dataset.queries()` for NFCorpus/SciFact — no snapshot materialization
-    before profiling. Motivation: the previous coupling cost 424/500 queries
-    on TREC-DL 2022 (materialize streams the 138M-passage MSMARCO v2 corpus,
-    keeps the first 30 000 judged docs by iteration order, drops queries
-    whose qrels lose all supporting docs). Two-mode split: **mining** wants
-    the full source distribution (this decision); **labeling** wants the
-    grounded snapshot for per-query NDCG correlation (deferred). Snapshot
-    machinery is unchanged for retrieval eval. Docstring in
-    `profile_datasets.py` updated: profiles now characterize the SOURCE,
-    not the labeling snapshot.
-
-24. **POS profile schema legibility** (grill-me 2026-07-20). Surviving
-    piece: `LengthBank` emits `length_words` (regex `\w+` tokenization,
-    not spaCy's; differs by ~7% on nfcorpus — the name says so). Parts (a)
-    and (c) were retired with the POS histogram by d26. The Stat suffix
-    convention (CONTEXT.md) stands.
-
-25. **Cross-group co-firing is by design** (grill-me 2026-07-20). Same-token
-    spans emitted by banks in *different* FeatureGroups — e.g. `acronym`
-    from sentence_markers and `stock_ticker_like` from structured_identifiers
-    both claiming `DNA` on scifact — are parallel independent layers per
-    d15/d16, not double-counting bugs. Downstream reads them as evidence
-    about the same token from two axes; the d22 `-Like` rename makes
-    interpretation self-honest at the emit boundary (RIGID acronym +
-    assumptive stock-ticker-like ≠ two independent facts). Documentation
-    change only: CONTEXT.md's Layered banks entry updated to note that
-    cross-group co-fires are expected. No code change.
-
-26. **Metrics prune to the four router signals** (2026-07-21). The
-    statistical-metrics group emits exactly the scalars that answer a
-    question the router cares about — four signals, seven scalars:
-    NL-shape (`natural_language_signal.natural_language_share`; REGEX
-    fallback `stopword_ratio.stopword_ratio`), word variation
-    (`morphology.word_variation_share`), structure
-    (`syntactic_depth.nesting_depth` + `statement_count`), size
-    (`length.length_words` + `length_chars`). Dropped: the 17
-    `pos_count_*` histogram stats, `open_class_share`, `residual_share`,
-    `noun_share`, `verb_presence`, `propn_share`, `inflected_count`,
-    `stopword_count` — none answered a router question (`propn_share`
-    duplicated the proper-noun span axis; counts are share × length).
-    `StatisticalMetric.POS_PROFILE` renamed `NATURAL_LANGUAGE_SIGNAL`
-    (single-stat bank; "profile" over-promised). Amends d14: the histogram
-    and derived views are no longer stored — recompute from the shared
-    spaCy doc if a corpus study ever needs them. Retires d24(a)/(c): the
-    residual invariant and `pos_count_` renames existed to make the
-    histogram legible, moot once it's gone (d24(b) `length_words` stands).
-    Doctrine shipped with the prune: **signals are coordinates and
-    acceptance filters, never label sources** — strata are boxes in signal
-    space, synthetic queries are rejection-sampled against target
-    signatures, and strategy labels always come from retrieval outcomes
-    (labeling by signal would teach the router our heuristic back, and it
-    could then never beat the production hard classifier). Joint-reading
-    caveat: the parser hallucinates structure on non-sentences (the CVE
-    telegram out-depths the cats question), so `nesting_depth` is
-    meaningful only conditional on `natural_language_share` indicating
-    natural language — the signals are one panel, not four independent
-    columns.
-    sanity-check 2026-07-21: stat names de-jargoned to meaning-first
-    (`closed_class_share` → `natural_language_share`, `inflected_share` →
-    `word_variation_share`, `parse_depth` → `nesting_depth`,
-    `clause_count` → `statement_count`); scale-suffix convention kept, the
-    computing mechanism lives in bank docstrings and `metrics/config.py`
-    comments. Revisit if dataset columns must match an external
-    NLP-standard vocabulary.
-    Amendment (2026-07-21, d20 reconciliation): d20's COORDINATION ships
-    as the FIFTH signal, pruned to ONE scalar by this decision's own
-    doctrine — `widest_list_size` (de-jargoned from d20's
-    `max_conjunct_width`): how many equal parts the longest and/or/comma
-    chain strings together, via conj-arc chains. It answers a router
-    question the four signals cannot: wide-but-flat enumerations are
-    structure `nesting_depth` does not see, and enumeration-heavy strata
-    are separately quotable (d20). d20's `coordination_count` (a raw
-    count — share × length) and the clausal/nominal split (a second
-    scalar per question) are not emitted. Five signals, eight scalars;
-    the joint-reading caveat applies (parser output, condition on
-    `natural_language_share`).
-
-27. **Presentation layer: `CorpusReport` + domain rollup** (grill-me
-    2026-07-21). New `reporting.py` in query_taxonomy: `CorpusReport`
-    consumes `CorpusFeatures` and owns `.text()` (human-readable rewrite)
-    plus chart-ready rollup data — stdlib only; matplotlib drawing lives
-    with the consumer (parent repo, which already carries it).
-    `CorpusFeatures.summary()` and its `__str__` are deleted, not wrapped.
-    Headline chart: two-ring donut — inner ring the 8 `Domain`s sized by
-    span mass (disjoint after claim resolution → honest parts-of-whole;
-    `general` exploded into its member banks, a grab-bag slice explains
-    nothing), outer ring each domain split certified vs `-like` so the
-    Assumptive-bank doctrine survives into the viz. Query-share appears as
-    a companion bar where router framing needs it (it does not sum to 100%,
-    so it never gets a circle). Rollup is presentation-only: profiles JSON
-    and audit surfaces stay bank-level (d7 ratification needs per-bank FP
-    checks). — *82 banks as a list is unreadable; 8 domains with honesty
-    stripes is one glance.*
-    arch-validator 2026-07-21: matplotlib KEEP (HIGH) — GitHub's ipynb
-    viewer strips JS, so plotly/altair would render blank in demo.ipynb;
-    spider = ~30 lines of polar-projection DIY, no new dep. Revisit if the
-    demo moves to a hosted page wanting interactivity.
-    arch-validator 2026-07-21 (design): donut KEEP (MEDIUM) with a binding
-    slice budget — total ≤10 slices; `general` explodes into top-3 banks +
-    one `general·other`, never more (perception research holds pies to
-    5–10 slices; part-whole estimation is where pies match bars). Fallback
-    per chart instance: sorted stacked bars (certified/-like segments) if
-    the story hides inside `general·other`.
-
-28. **Dataset fingerprints: heatmap catalog view + spider comparison view**
-    (grill-me 2026-07-21). Both are views over the existing
-    `data/profiles/*.json` (d9 seeded sampling already gives unbiased
-    shape — no new sampling design). Catalog view: one heatmap, rows =
-    datasets, columns = 8 domain query-shares + 7 stat means, color
-    normalized per column, raw value printed in each cell — scales to the
-    full docs/datasets.md catalog. Comparison view: spider overlay for 2–4
-    hand-picked datasets in the demo, the only regime where radar is
-    readable (axis order is arbitrary and enclosed area exaggerates —
-    never overlay the catalog). — *One matrix answers "which dataset is
-    rich in what"; the spider keeps the storytelling moment.*
-    arch-validator 2026-07-21 (design): KEEP (HIGH) — matches published
-    radar guidance (5–8 axes, ≤4 overlays, shape-as-story; heatmap for
-    many×many). Spider axis order must be a fixed global constant —
-    reordering spokes changes the perceived shape.
-
-29. **Composition mechanics: feature table + capped harvest-priority fill**
-    (grill-me 2026-07-21). Confirms d6's greedy quota-fill; the per-dataset
-    "optimization cycle until best subset" idea stays rejected (d6/d7 —
-    ILP remains the escalation path, not the default). Greedy runs on a
-    materialized feature table: one parquet of (dataset, query_id,
-    per-bank span counts, stat scalars) from a single full extraction pass
-    per dataset; selection reads the table, so nothing unneeded is ever
-    taken (no prune phase) and recipe tweaks re-run selection without
-    re-paying extraction (~2h spaCy for ORCAS-scale). The table doubles as
-    the labeling-stage substrate and the audit trail. Fill order: each
-    quota fills from its d7 harvest-target ranking with a per-quota
-    per-dataset cap (default ≤50%, spill to next-ranked; waived when only
-    one source carries the feature) so no quota becomes a single-dataset
-    monoculture the router could learn as a register proxy. Cap value is a
-    recipe value (deferred with the rest). — *Extraction is the expensive
-    leg; selection must stay cheap to re-run.*
-    arch-validator 2026-07-21: pyarrow+pandas KEEP (HIGH) — extraction
-    (spaCy ~2h) dominates; selection at 10M rows is seconds in pandas and
-    parquet keeps an engine swap free. Revisit (duckdb over the same
-    files) if the concatenated catalog passes ~50M rows or fill logic
-    turns relational.
-    arch-validator 2026-07-21 (design): global greedy KEEP (HIGH) — quota
-    coverage Σ min(count, quota) is monotone submodular, so greedy carries
-    the classic Nemhauser (1−1/e) guarantee (caps: since quota sets
-    overlap, per-quota source caps form an *intersection* of partition
-    matroids — greedy's constant relaxes to ~1/(p+1); the monotone +
-    diminishing-returns structure is unaffected); per-dataset
-    optimization cycles score structurally worse (blind
-    subproblems + a reconciliation pass that reinvents global greedy).
-    ILP escalation trigger stays: greedy terminating with unfilled quotas
-    despite available rows.
-
-30. **Composition doctrine: floors, weakest-first fill, checkability,
-    dark matter** (grill-me 2026-07-21). Amends d29's fill mechanics; the
-    feature table, source caps, and harvest priority stand.
-    (a) *Recipe numbers are amounts, not proportions.* Quotas become
-    per-cell floors ("≥ T_c rows"), sized by the precision rule (cell
-    score trustworthy to ~±1/√n: 400 rows ≈ ±5 points; labeling budget ≈
-    cells × floor, so cells stay coarse). Representativeness is an
-    eval-time weighting: score cells separately, weight by a workload's
-    proportions — a real log's cell histogram when available (page-search
-    logs are the acquisition to chase), several hypothesized mixes or the
-    worst cell otherwise. Selection never claims to match real traffic:
-    that claim is untestable in-house (the ORCAS-anchor trap) and stays a
-    swappable input. Per-cell facts ("sparse wins UUID cells") are
-    workload-invariant; only the headline aggregate needs proportions.
-    (b) *Weakest-first (maximin) fill.* Each round feeds the cell with
-    the lowest fill/floor ratio: removes quota-order dependence, balanced
-    coverage at any budget cut, starved cell = exact per-cell conflict
-    signal feeding the order sheet. Feasible case terminates identically
-    to d29 greedy. The plain loop is a heuristic (min of submodular isn't
-    submodular); SATURATE is the named fallback, as ILP is for quotas.
-    Pilot: A/B both fill orders over the same feature table.
-    (c) *Checkable-first.* A row counts toward a floor only if gradeable:
-    ≥1 judged doc, or doc_grounded/synthetic (answerable by construction,
-    d5). Ungradeable rows bounce back for replacement; exhausted cells go
-    to the order sheet. Replacement may filter on "can't check", never on
-    "didn't like the grade": ties and all-fail rows stay, flagged as
-    their own stratum — "no strategy works" is routing information (d26
-    doctrine, feedback-loop edition).
-    (d) *Dark matter (of data).* Checkable-natural rows are visible
-    matter — curated, well-formed, judged-by-pooling. Two blind spots:
-    unjudged queries (the messy tail never enters graded benchmarks) and
-    qrel holes inside judged rows (a strategy retrieving a relevant-but-
-    unjudged doc scores zero, biasing labels toward pool-contributor-era
-    systems). Counterweights: generation doubles as the dark-matter probe
-    (grounded rows carry complete answer sheets and can target exactly
-    the ugly signatures no benchmark judges); the minimum natural share
-    keeps real texture; the two provenances' biases point in opposite
-    directions by design. Cells where strategies retrieve many unjudged
-    docs get a low-trust flag; LLM-as-judge over unjudged retrievals is
-    the deferred mitigation (MEMERAG's lane). — *No source is
-    representative and none can be; every bias gets named and paired
-    against an opposite one.*
-    Register/box definitions (coarse workload cells for eval weighting)
-    deferred until a real log can inform them.
-    arch-validator 2026-07-21 (assumption audit): stack KEEP (MEDIUM until
-    the hole pilot); labeling stage gains three gates before labels are
-    trusted. R1 — qrel-hole asymmetry is documented, not hypothetical
-    (BEIR Hole@10: BM25 ≈6.4% vs dense 14.4–31.8%; post-hoc judging lifts
-    dense nDCG most), so the d30d low-trust flag becomes a quantitative
-    gate: per-strategy Hole@10 per cell, gap over threshold blocks labels
-    until post-hoc judging (LLM-as-judge, MEMERAG-calibrated). R2 —
-    labels are stack-relative: pin the label schema tuple (dense_model,
-    sparse_model, fusion, k, depth) in the artifact; explicit tie margin
-    ε; two-dense-model kappa pilot on ~500 rows. R3 — cell scores are not
-    corpus-invariant: corpus id is a labeling covariate (not leakage —
-    the runtime router knows its corpus); high cross-corpus cell variance
-    un-defers corpus-relative features. R4 — floor sizing gets a design-
-    effect correction from cluster-robust SEs in the pilot. R5 — dark-
-    matter generation imposes mess programmatically (corruption operators
-    post-generation + d26 rejection sampling), never by prompting for
-    messiness.
-
-31. **First profile-at-scale readout: bimodal sources, equal-weight
-    percentile scale, harvest priorities** (grill-me 2026-07-22, over the
-    21-dataset catalog, 225K rows). The fingerprint run shows bimodal
-    sources: register-realistic but feature-poor (msmarco/orcas/trec-dl/
-    dbpedia/limit: 3–7 words, near-zero identifier rates) vs feature-rich
-    but register-alien (BRIGHT/CRUMB/RAR-b: 26–253-word problem
-    statements, entirely outside the production router's 0–9-token rule
-    band). Read as CONFIRMATION of d30d ("no source is representative"),
-    NOT as a source ranking — dropping either cluster re-creates the
-    ORCAS-anchor trap from one side or the other. Rates are not counts:
-    orcas at 0.05 identifier share × 10.4M ≈ 500K natural feature-bearing
-    rows, more than all specialized sources combined (~15K queries) —
-    ORCAS-tail harvest is the named top source for short × feature-rich
-    cells. That region is EMPTY in every public source; the coverage
-    chart's empty cells are the generation lane's first concrete order
-    sheet. Cluster-B strategy labels lean on R3's corpus covariate
-    (register far outside production traffic) — recorded, no new
-    machinery. Presentation scale: cross-dataset comparisons use the
-    **equal-weight percentile scale** (see CONTEXT.md): reference
-    distribution weights every dataset equally (raw catalog pools are
-    ~90% msmarco+orcas), dataset value = median percentile — fixes both
-    outlier squash (one 252-word source flattening the length axis) and
-    pool dominance. New *coverage view* (third fingerprint chart):
-    per-query cell counts over the d29 catalog (length × NL-share bins,
-    equal-weight), dominant dataset annotated per cell. Legal-domain
-    finding: zero legal-bank fires across all 225K rows — legal REGISTER
-    (crumb-legal-qa, NL-share 0.48) carries no citation-shaped
-    identifiers; all-zero domain columns must render as honest zeros, not
-    NaN stripes (chart guard, not data fix). Whether composition cell
-    boundaries live on the percentile scale or raw scalars is deferred
-    with the recipe values.
-
-32. **Target composition: 50K, macro-split 60/20/20, audit lenses**
-    (dataset-audit session 2026-07-22, ratified over
-    `src/dataset_audit.ipynb`). Sets the deferred macro recipe values;
-    per-cell floor sizes stay deferred (d30a precision rule).
-    (a) *The split.* 50K total. 60% (30K) span-evidence rows — queries
-    carrying ≥1 span of ANY group (identifiers, markers, logical).
-    Inside that slice, 80/20: 80% (24K) allocated against span-type
-    targets (per certified identifier domain, per marker type, per
-    logical type — the audit's floor-supply columns); 20% (6K)
-    entity-carrying rows drawn with NO preference (no mass bias, no type
-    targeting) so natural single-span queries keep their share against
-    archetypes. 20% (10K) statistical strata: zero-span rows spread over
-    the scalar-signal bands (length, NL-share, nesting depth — the
-    coverage-grid x-axes), extremes included. 20% (10K) dark forest:
-    feature-BLIND uniform draws from ≥3 generalist champions, no
-    champion >50% of the slice (candidates: orcas, msmarco, one long-NL
-    source) — insurance against the taxonomy's own blind spots,
-    deliberately not conditioned on any extractor output.
-    (b) *Feasibility facts (audit 2026-07-22).* The catalog holds ~32K
-    span-carrying rows against the 30K entity slice — no selection
-    slack: the slice REQUIRES the ORCAS full-cache regex harvest
-    (~16 min at regex rates; observed supply scales ×104, d31) plus the
-    generation order sheet for thin cells. The statistical slice is thin
-    at the extremes (60+ words × 0 spans = 288 rows catalog-wide).
-    (c) *Certified-only domain floors; shape-guesses pool.* Span-type
-    targets count certified banks only. `*_like` spans are wrong about
-    the domain, right about identifier-ness (the SciFact gene-symbol
-    audit) → they pool into one domain-agnostic shape_guess target that
-    supplies sparse-affinity needs but never domain floors. Weighting
-    them down was rejected: the error is in the label, not the
-    magnitude.
-    (d) *Mass ≠ supply.* Floors count queries (≥1 qualifying span),
-    never span mass — 115 of crumb-stack-exchange's 117 datetime spans
-    sit in ONE query. Mass preference inside the entity slice is
-    explicitly rejected: span-dense rows are the easy, low-information
-    case for the router (obvious BM25).
-    (e) *Dataset value is target-relative; three lenses.* Winner-take-all
-    equal-weight dominance (d31 coverage cells) structurally zeroes
-    generalists — msmarco dominates 0 cells yet is runner-up supply
-    nearly everywhere and the conversational-marker champion (politeness
-    933). Keep/leave verdicts (recorded in the audit notebook,
-    notebook-only for now) read three lenses: contribution to the 50K
-    fill, sole-supplier criticality, span-type supply. Narrow ≠ leave;
-    redundant across all three lenses = leave.
-    — *Size against the target, not the catalog: debias by dataset size
-    when characterizing, allocate by the 50K when selecting.*
-
-33. **Fill recipe: evidence floors, raw bands, B-first order** (grill-me
-    2026-07-22, over the d32 fill plan; d29/d30 greedy mechanics and their
-    arch-validator verdicts stand unchanged).
-    (a) *Floors are evidence amounts in weight currency.* A selected row
-    credits a span-type floor at the ambiguity discount of its most-rigid
-    qualifying bank (RIGID 1.0, MODERATE 0.75, AMBIGUOUS/shape-guess 0.5 —
-    provisional recipe values) while still costing 1 row of budget.
-    Floors are sized BELOW budget (19 floors × 1,000 weight under the
-    24K-row slice) so discount inflation is absorbed by slack — an
-    order-sheet shortfall therefore always means supply ran out (reason:
-    exhausted vs capped), never that the arithmetic was infeasible.
-    Effective-sample-size logic: guesses are worth less evidence per row.
-    (b) *Composition cells live on raw scalar bands.* Resolves d31's
-    deferred question: floor boundaries are raw units (3-6 words,
-    NL-share 0.4+, nesting 2-3 — the coverage-grid bands) because
-    composition needs stable, generation-targetable coordinates that do
-    not move when the catalog grows. The equal-weight percentile scale
-    stays presentation-only.
-    (c) *Fill order B → A → C → D.* The no-preference sub-slice draws
-    FIRST (one seeded uniform sample over the whole span pool): drawn
-    after A it degenerates into orcas leftovers (A's qrels lane consumes
-    all ~19.3K checkable span rows), defeating d32(a)'s "natural queries
-    keep their share" rationale. A fills its floors from the remainder;
-    C (zero-span pool at 6× its budget) and D (feature-blind) are
-    order-insensitive and run last with global dedup.
-    (d) *Two-tier label lanes.* Every slice fills checkable rows first;
-    QC rows top up flagged `label_lane="deferred"` (clicks / LLM-as-judge
-    later) vs `"qrels"`. Dark-forest champions: orcas/msmarco/
-    crumb-legal-qa ≈ 50/30/20 within the ≤50% cap. `checkable` stays the
-    card-level proxy until d30's per-row column lands.
-    Artifact: `src/composition/` package (recipe / floors / fill /
-    slices / compose) + `src/data/composition/{selection,order_sheet}`
-    parquets + summary; selection schema (dataset, query_id, query,
-    slice, floors, checkable, label_lane) feeds the labeling stage's
-    FusionRow builders. — *The order sheet is a purchase order, not an
-    error log.*
-
-34. **taxonomy-generators: the generation twin package** (grill-me
-    2026-07-23). New package `taxonomy-generators` (module
-    `taxonomy_generators`, starts as `src/taxonomy_generators/`, extracted
-    to a sibling repo when stable — the query-taxonomy precedent). Both
-    packages implement the same taxonomy: query-taxonomy detects,
-    taxonomy-generators produces.
-    (a) *Boundary: dumb surfaces + verify + tool layer; no orchestrator.*
-    The package emits grounding-blind feature surfaces (a valid UUID, a
-    politeness phrase), wraps the extractor as `verify(text, targets)`
-    (d10's library-first verb), and exposes both to LLMs; the calling
-    LLM's own agentic loop does the enrichment (weaving surfaces into
-    queries). d5's free-floating ban is enforced upstream in the parent
-    repo's generation lane, never in this API; doc consistency for
-    augmented rows is a separate deferred layer.
-    (b) *Mechanism: auto-sample bank patterns; overrides for realism.*
-    Default generator per regex span bank = reverse-regex sampling over
-    the bank's guard-stripped compiled pattern, so ~90 features get
-    generators for free and a bank pattern change flows into its
-    generator automatically. Hand-written override classes shadow the
-    default under the same feature name where gibberish hurts (ticket
-    prefixes, plausible years). Lock-step is enforced by the round-trip
-    test: every registered generator, sampled seeded N times, must have
-    each surface claimed by its twin bank under the same emitted name.
-    (c) *Dependency direction.* taxonomy-generators depends on
-    query-taxonomy (versioned dependency); detection stays unaware
-    generation exists; no taxonomy-core third package — one taxonomy.py.
-    (d) *Coverage.* All regex span banks: certified identifiers, -Like
-    banks (shape-guess surfaces supply d32c's shape_guess pool), markers
-    (closed phrase lists), logical cue tokens. The five signals are
-    verify-only acceptance filters (d26 doctrine) — never generated.
-    Corruption operators deferred.
-    (e) *Tool surface: parameterized trio.* `list_features()` /
-    `generate_surface(feature, n)` / `verify(text, targets)` as a
-    framework-agnostic registry (name + description + JSON schema +
-    callable) plus an MCP server entry point behind an optional
-    dependency group — closes d10's deferred MCP wrapper. One tool per
-    feature (~90) rejected: blows agent tool budgets; the catalog lives
-    in `list_features()`.
-    (f) *Shape.* `SurfaceGenerator` ABC mirroring the bank family
-    (feature name, group, `sample(rng, n)`); `PatternGenerator` defaults
-    auto-built by iterating FEATURE_BANKS at import; group-keyed registry
-    like FEATURE_BANKS; seeded `random.Random` injection end-to-end.
-    — *Same taxonomy, two directions: detection certifies what text is;
-    generation supplies text that detection will certify.*
-    arch-validator 2026-07-23: rstr KEEP (HIGH) — BSD, stdlib-only,
-    injectable seeded Random, walks the same `re._parser` tree the banks
-    compile to; exrex disqualified outright (AGPL); hypothesis is a test
-    framework misused at runtime; DIY re-implements rstr. Revisit if
-    bank patterns outgrow rstr's construct support (its crude
-    \b/lookaround handling is absorbed by guard-stripping + the
-    round-trip test).
-    sanity-check 2026-07-23: KEEP — the only custom machinery
-    (auto-registry + round-trip test) is exactly what the lock-step and
-    tool-surface requirements demand; sampling is delegated to rstr,
-    verification to query-taxonomy. Flips if interactive LLM enrichment
-    is abandoned for a one-off batch script.
-
-35. **R1 reframed: LLM-judge calibration pilot** (grill-me 2026-07-27,
-    supersedes d30's R1 hole-diagnostic framing). **SUPERSEDED by d37,
-    2026-07-28 — full record in docs/adr/0001.** 4-level TREC-DL grading
-    (500 stratified pairs, Haiku 4.5 vs Sonnet 4.5) against a kappa ≥ 0.6
-    + per-level-accuracy ≥ 70% gate: failed on measured evidence (kappa
-    0.120–0.139, bootstrap CI upper bound 0.181 — out of reach at any
-    sample size). Load-bearing premise error: orcas was called "no
-    qrels", but ORCAS ships 18.8M click pairs mapped onto msmarco-document
-    doc_ids — positive-only qrels, not unlabelable. `judge.py` and the
-    pilot notebook deleted (cae28fc); `data/r1_pilot/` is the audit trail.
-
-36. **R1 prompt-iteration escalation: hand-crafted few-shot** (grill-me
-    2026-07-27, follows d35's escalation clause). **SUPERSEDED by d37,
-    2026-07-28 — full record in docs/adr/0001.** Ran at n=500: 12
-    hand-crafted exemplars (3 source-style queries × 4 grades) moved
-    kappa by ±0.02 with fully overlapping bootstrap CIs (Haiku 0.348 →
-    0.328, Sonnet 0.320 → 0.340 at grade≥2), so exemplar quality was
-    never the binding constraint — the defect was measuring per-document
-    grade agreement when the pipeline consumes a per-query route
-    decision. The real-exemplar ablation is dropped, not deferred.
 
 37. **Golden set: route labels from retrieval outcomes, not from an LLM's
     opinion** (grill-me 2026-07-28, supersedes d35 and d36; amends d30's
@@ -794,7 +151,7 @@ breadth; strategy labeling is explicitly a later stage.
 38. **msmarco-passage-dev anchor: the composition's largest lane gets
     labelled on a realistic index** (grill-me 2026-07-28, executes d37j/g
     for the 31% lane; nfcorpus anchor measured same day).
-    (a) *Queries are the composition's, full stop.* `TargetComposition().
+    (a) *Queries are the composition's, full stop.* `CellFill().
     build()` → `RouteLabels.rows_for("msmarco-passage-dev")` — 15,678
     rows. Local dev qrels (`~/.ir_datasets/msmarco-passage/dev/qrels`,
     59,273 judgments) cover 7,697 of them (49.1%); those get labelled,
@@ -920,83 +277,6 @@ breadth; strategy labeling is explicitly a later stage.
     — *The registry catalogs queries; lanes own their judgments. The
     distribution question is answered when the technical lanes land.*
 
-40. **Generated and augmented rows: golden only with an answer key valid
-    by construction** (grill-me 2026-07-29; resolves the golden-set half
-    of d34a; gates the generation lane before its first row exists —
-    measured: the current 50K is 100% natural, label_lane
-    {qrels: 34,256, deferred: 15,744 = ORCAS}).
-    (a) *The admission rule.* A row enters `labels.parquet` only when
-    its answer key follows from how the query was made: natural →
-    source qrels/clicks; doc_grounded → the grounding doc (a 1-known-
-    answer key — msmarco's regime, holes acknowledged per d37k);
-    augmented → only meaning-preserving operators (parent qrels
-    inherit) or doc-consistent injection (surface copied from the
-    parent's gold doc) that also passes the row-level coherence test;
-    synthetic → own closed-world lane with generator-emitted complete
-    qrels (LIMIT is the shipped precedent — 46 invented docs, 1,000
-    queries, enumerated key). Everything else is **feature-stock**:
-    composition-diversity value, never argmax-labelled. Fabricating a
-    label was rejected for the same reason `unlabelled` exists.
-    (b) *`constructed` is a first-class judgment source.*
-    QrelStore.source grows to {human, constructed, click, llm},
-    priority in that order — construction is definitional, clicks are
-    noisy behavior, the llm lane is unvalidated (ADR 0001). Filed
-    under llm it could never be filtered apart again.
-    (c) *Creation-time metadata contract.* Every non-natural row is
-    born carrying (provenance, home lane, grounding doc_id, parent
-    query_id where applicable); its qrels are minted mechanically from
-    that. A row without the metadata has nothing to mint from —
-    feature-stock by definition, no post-hoc debates.
-    (d) *Operators declare meaning preservation.* Every augmentation
-    operator states explicitly whether it preserves the original
-    sentence meaning (typos/case/word-order/politeness: yes;
-    identifier/date/constraint injection: no — those need (a)'s
-    doc-consistent path). Undeclared operator ⇒ its rows are
-    feature-stock. Default-deny, auditable in code review — same
-    spirit as the banks' ambiguity tiers.
-    (e) *Coherence test for injected rows, mechanism deferred to a
-    pilot.* Doc-sourced surfaces keep the answer valid but not the
-    query readable; user requirement: semantic sense must be tested,
-    not assumed. An LLM meaning-gate is d37(f)-compatible here — need-
-    identity between parent and augmented query is a function of the
-    two texts, no information gap — but ships only after validation
-    against a human-audited sample (d34b audit pattern). Until then,
-    injected rows stay feature-stock.
-    (f) *Label validity ≠ query realism.* Routes score the (query,
-    corpus, index) triple regardless of who wrote the query; what
-    generation risks is distributional realism, which is d34(b)'s
-    concern, not the label's.
-    (g) *Construction-order rule: if the sentence must adapt to the
-    surface, invert — the surface's document becomes the grounding doc
-    and the row is doc_grounded.* Injection is only safe when the
-    surface comes from the parent's own gold doc, because a document's
-    vocabulary fits its own topic (a MAC address from a networking doc
-    reads naturally in the networking query it grounds); a foreign
-    surface (a DrugBank id into an internet sentence) is simply
-    unavailable to inject, and "adapting the sentence until it fits"
-    is generation wearing augmentation's clothes — parent qrels void.
-    Splice-then-adapt is banned. Grounding docs are drawn **from the
-    existing lane corpora** (`<lane>_routes`), so the generated row's
-    answer sits among its natural distractors, pre-indexed and
-    pre-embedded, and the row declares that `home_lane` per (c). For
-    logical-structure features, prefer harvesting natural supply first
-    (quest, crumb-set-op own those cells); generate only for cells no
-    dataset fills.
-    (h) *Construction success is read from retrieval outcomes, never
-    from an embedding metric.* Cosine similarity as a (query, doc)
-    validity check is rejected twice over: circular (the dense encoder
-    validating data that will judge the dense route) and directionally
-    biased (it would pre-filter the dataset toward dense-friendly
-    rows). The non-assumptive gauge already exists: run the three
-    routes and read the shape — a mis-constructed row comes back
-    `all_zero`, which d37(i) already declares label-less, and
-    rejection by all_zero is symmetric across routes (a row no route
-    can answer carries no routing signal). The per-batch `all_zero`
-    rate is the generation lane's construction-quality metric, free
-    and model-free.
-    — *No answer key by construction, no route label. The golden set
-    stays a measurement, not a guess.*
-
 41. **Label form: the score vector is the record; the route column is a
     derived serving decision** (grill-me 2026-07-29; resolves d37i's
     tie-break + all_zero halves and d38's label-form deferral. Measured
@@ -1047,199 +327,6 @@ breadth; strategy labeling is explicitly a later stage.
     on tied rows (sparse inherits the all_tied mass by design).
     — *The scores are the measurement; the route is a decision computed
     from them. Nothing in the golden set is a coin flip anymore.*
-
-42. **The augmentation loop: order-sheet floors filled by declared
-    operators over the composition's own rows** (grill-me 2026-07-29;
-    opens the d40-gated generation lane; resolves d34a's generation half
-    and d34d; makes d33's minimum-natural-share binding. Canonical term:
-    augmentation — enrichment stays an Avoid word; Enricher → Augmenter,
-    enrichment_supply.ipynb → augmentation_supply.ipynb).
-    (a) *One loop, one demand source.* While the order sheet has missing
-    credit: take the hungriest floor (stat bands drawn with probability
-    ∝ missing), dispatch to its operator, produce → verify → write.
-    Demand is never re-estimated from a fitted distribution — the
-    sheet's floors and bands (floors.py) are the computed truth.
-    (b) *Operator registry in a new `src/augmentation` package.*
-    Operators are grounding-aware (they mint qrels and read the order
-    sheet), so they cannot live in grounding-blind taxonomy_generators
-    (d34a); that package stays surfaces + verify. Corrupt operators
-    live in this registry too — d34d resolved. Sanity note: the new
-    machinery is flat — the registry is small classes; the supply index
-    is one parquet per lane plus a join; the mini-fill is one mode on
-    the existing fill.
-    (c) *Declaration schema, default-deny (d40d extended).* Every
-    operator declares: floors served, selection rule, grounding
-    requirement, answer-key path, meaning preservation, and
-    verifiable-by-what. Undeclared or unverifiable ⇒ feature-stock —
-    enforced for free by credit accounting, since floor credit is
-    computed from re-measured features only.
-    (d) *The families.* **Decorate** (markers; any parent; inherits
-    parent qrels). **OperatorSyntaxRewrite** — meaning-preserving
-    RESTRICTED: may restructure existing conjuncts and drop function
-    words, may not add content words; verify = operator span present +
-    content tokens unchanged; inherits. **StatRewrite(axis, band)** —
-    one generic operator for every stat floor, any axis, any direction;
-    near-parents preferred (smallest move = least meaning risk,
-    computed from the stats table); a per-(axis, direction) declaration
-    TABLE, each entry human-audit-piloted before earning credit — today
-    only (length, up) has demand; (length, down) or (nl_shape, down)
-    become declaration rows + pilots the day a band demands them, zero
-    new code (Compress is not a concept). **Inject** (identifiers; pair
-    from the supply index where the parent's gold doc contains the
-    surface; ONE surface per row; answer minted from the grounding doc,
-    source='constructed'). **Corrupt** (programmatic damage, no LLM —
-    R5).
-    (e) *Selection is deterministic — tables, never an LLM.* Span side:
-    the **supply index**, a one-time bank profile of each lane corpus
-    (doc_id, floor key, surface span), floor keys via the
-    composition/floors.py mapping so demand and supply share units.
-    Stat side: the feature table's scalars (eligibility rules like
-    widest_list_size ≥ 2 are stat rules). Side effect: the d34b realism
-    problem (garbage datetime/uri samples) never touches Inject —
-    doc-copied surfaces are real by construction; generated surfaces
-    survive only in the synthetic rung.
-    (f) *Inject's supply ladder*: parent's own gold doc → d40g
-    inversion (a lane doc carrying the surface becomes the grounding
-    doc; row doc_grounded) → synthetic closed-world rung. The rung is
-    read per floor from the supply index at run time — never assumed;
-    augmentation_supply.ipynb is the standing readout.
-    (g) *Inside every LLM operator: an agentic tool loop.* The LLM gets
-    the operator's measuring tools, the metric explained, and the
-    target as a RANGE (bands natively), iterating while the goal is
-    unreached under a bounded retry budget (exhaustion drops the row —
-    parents are plentiful). In-loop measurements steer and are never
-    the record: acceptance is a fresh LOCAL verify() on the returned
-    text — closes the Augmenter prototype's confirmed d2 gap (the
-    final instructor pass can reword after the last in-loop verify;
-    features_used was LLM self-report).
-    (h) *Admission sequencing (d40 applied).* Decorate earns credit
-    immediately (politeness-class declaration). OperatorSyntaxRewrite
-    and each StatRewrite entry: after their one-time human-audited
-    declaration pilots (d34b pattern). Inject: after the d40e per-row
-    coherence gate ships its pilot. Until their gate, rows bank as
-    feature-stock.
-    (i) *Integration: frozen base + deficit-only mini-fill.* The
-    existing 50K rows stay byte-identical — their labels are paid.
-    WeakestFirstFill gains a start-from-base mode: only the generated
-    pool, only the hungry floors, current credits as the opening
-    balance; caps and the minimum natural share enforced by the fill,
-    never by the loop's own accounting. The natural-share number lives
-    in the recipe (set at recipe review — d33 binding now). The
-    composition grows past 50K; slice-proportion drift is an eval-time
-    weighting concern (d30).
-    (j) *Lineage on every row*: `generated_from` — null for natural
-    rows, the parent query_id for constructed rows (d40c's
-    parent_query_id in the selection schema). The parent-side
-    "superseded" filter is a derived view: one parent may have many
-    children, and frozen rows are never mutated.
-    (k) *Constructed docs are a separate store, never an in-place index
-    write*: `constructed_docs` (doc_id, source_dataset, for_query,
-    text). Invariant: adding a doc to an existing lane collection
-    silently falsifies that lane's already-computed labels (a new doc
-    can steal rank-1). The synthetic rung therefore materializes its
-    OWN collection — constructed docs forced, distractors borrowed by
-    value from source_dataset's corpus (seeded, CorpusRecipe reused).
-    Only the synthetic rung writes documents; every other operator is
-    query-side only.
-    (l) *Batch gauge*: the per-batch all_zero rate at labeling time is
-    the construction-quality metric (d40h) — no embedding metric
-    anywhere in the loop.
-    (m) *Decorate pilot amendments (arch-validator 2026-07-30, first
-    live batch as evidence).* Diversity: seeded bank-vocabulary
-    exemplars vary per call — instruction-only pressure was refuted by
-    the observed mode collapse ("Hi there," on every row) and is
-    literature-consistent (typicality bias); a per-batch
-    surface-concentration readout (bank-measured, model-free) is the
-    check, escalating to a rejection cap only if the readout proves the
-    exemplars insufficient. Register fit: the hard exclusion of
-    formal-content parents was REVERTED — the failure was the weave,
-    not the parent class ("could someone help me with: <problem>" is
-    attested register); the instruction is parent-aware instead
-    (help-request framing when the parent carries
-    logical:math_expression / logical:code_fragment), and exclusion
-    returns only as a computed rule if the d34b audit measures a high
-    failure rate on these parents. Pool persistence: per-acceptance
-    append (crash loss ≤ 1 row ≈ 5s vs ~1.2h of paid calls end-of-batch
-    on a greeting-size run; parameter-free — a chunk size would be a
-    hand number; partial pool is harmless, the mini-fill is the door).
-    Verdicts keep/switch/keep, confidence HIGH/MEDIUM/HIGH.
-    (n) *Engine interaction modes (runtime session 2026-07-30).* The
-    Augmenter runs one of two modes per the operator's declared
-    `tool_loop` field. Single-shot (False, Decorate): one completion,
-    no tools, local accept, retry-on-feedback — ~10s/row measured under
-    the old three-call flow drops to one call (~3s). Tool loop (True,
-    the range-chasing operators): the taxonomy_generators trio plus a
-    `submit_text` control tool — the model ends by CALLING submit_text,
-    so extraction is the tool call's arguments and the instructor
-    completion is gone (one round-trip saved per attempt, and with it
-    the d2 reword window). Operators describe the task; the engine owns
-    the interaction-protocol lines. Local accept() stays the only gate
-    in both modes. Batch concurrency and prompt caching deliberately
-    deferred to the 861-row batches.
-    — *Demand from the sheet, supply from the tables, meaning by
-    declaration, truth by re-measurement. The LLM only weaves.*
-
-43. **The full-loop build-out: three passes, measured supply first**
-    (grill-me 2026-07-30; sequences the remaining d42 machinery so
-    every pseudocode branch goes live. Decorate + engine + pool already
-    piloted — 28 politeness rows staged awaiting admission).
-    (a) *Pass 2 = the mini-fill (d42i), before any new operator.* It is
-    the only piece that closes the loop: admits staged rows into the
-    frozen-base selection, re-computes credits, enforces the natural
-    share, re-emits the order sheet. Until it exists `missing` never
-    moves and every batch only grows the queue — observed live with the
-    politeness pilot. Pass 3 = the corpus-free operators
-    (OperatorSyntaxRewrite, StatRewrite) plus the structural hook —
-    gated only by their one-time declaration audits. Pass 4 = the
-    Inject stack (supply index, InjectOperator, minted qrels, d40e
-    coherence pilot) — double-gated, so last.
-    (b) *Structural checks are an operator hook.*
-    `structural(parent, text) -> failure reasons` (default none), run
-    by the loop after accept(); any failure drops the row, reason
-    logged. Needed because the remaining checks compare child against
-    PARENT — no-new-spans (StatRewrite), content tokens unchanged
-    (OperatorSyntaxRewrite), literal surface containment (Inject) —
-    which absolute Targets cannot express. Comparative Targets in
-    taxonomy_generators rejected (grounding-blind package would grow an
-    augmentation-only concept); ad-hoc in-operator checks rejected
-    (undeclared). When the d34b audit rules on the observed Decorate
-    restructurings, a Decorate content-word check is a one-line
-    addition here. Refined at the 2026-07-30 arch/clean-code pass:
-    `structural` and `serves` are ABSTRACT — an operator with no
-    parent-relative check declares `return []` with its reason, never
-    inherits silence (d42c default-deny applied to the hook itself);
-    Declaration.floor_prefix became `floors`, a human-readable
-    statement, dispatch lives in serves().
-    (c) *Supply index = full per-lane artifact.*
-    `data/<lane>/surfaces.parquet` (doc_id, floor key, bank, surface) —
-    one idempotent regex pass per corpus, user-triggered like every
-    corpus job. Serves all three consumers: rung-1 pair joins, rung-2
-    inversion lookup, and the rung-assignment readout — per-floor
-    capacities measured BEFORE any LLM spend ("id:datetime: N direct
-    pairs, M inversion docs; id:logistics: 0/0 → synthetic"). Lazy
-    scans rejected: re-pay every batch, cannot produce the readout.
-    (d) *Answer keys are born with the row.*
-    `data/augmentation/qrels.parquet`, written at candidate creation
-    (d40c born-with), columns (query_id, doc_id, relevance, source,
-    inherited_from). Source semantics refine d40b: minted keys
-    (Inject, synthetic) carry source='constructed'; inherit-path
-    children COPY the parent's judgments keeping source='human' — the
-    judgment is still a human's, only the query changed under a
-    declared operator — with inherited_from recording the transfer.
-    QrelStore merges by its existing priority at labeling. Per-lane
-    qrels_constructed files rejected (lane dirs stay pure source
-    snapshots); minting at admission rejected (key-less pool rows are
-    unauditable).
-    (e) *Substrate facts pinned.* The stats table exists —
-    `data/feature_table/catalog.parquet` (225,752 × 60) carries the
-    scalars for StatRewrite/OperatorSyntaxRewrite eligibility
-    (selection ⋈ catalog, near-parents first); stat-band floor keys
-    parse against composition.catalog_axes band definitions, never
-    re-derived; child-side stat verify needs the spaCy extractor
-    (FeatureExtractor(engines=None) + the pinned en_core_web_sm),
-    wired per operator via the Augmenter's extractor parameter.
-    — *The sheet moves only through the fill; supply is measured
-    before it is spent; every key is born with its row.*
 
 44. **Corpus-conditioned routing: the headroom readout is recorded, the
     router gains collection eyes, and two pilots gate every scale-out
@@ -1326,331 +413,699 @@ breadth; strategy labeling is explicitly a later stage.
     collection it serves; every scale-out claim now has a number to
     beat.*
 
-45. **Measure the distance before collecting: two cheap experiments on
-    existing data drive everything downstream** (grill-me 2026-07-30;
-    executes d44's pilot as a build plan; human-readable twin at
-    `PLAN.md`). Standing finding this decision acts on: the composition
-    is selected for *feature diversity* (d32, serves the taxonomy demo),
-    which is a weak proxy for *routing signal* — measured, slices A/B
-    (feature-targeted) yield 8.5% / 8.2% decisive vs feature-blind C/D
-    at 13.4% / 12.6%. The labeling method is sound; the selection target
-    half-fits the golden set. So distance-to-a-usable-router is unknown
-    and is *measured*, not assumed, by two runs on data already on disk.
-    (a) *The classifier baseline (a day).* Decisive rows only (margin ≥
-    0.4 = winner hit rank 1, runner-up missed — d41d) become a
-    hard-label set: 2,510 rows, dense 1,858 / sparse 507 / rrf 145. Two
-    one-vs-rest binaries — P(dense-decisive), P(sparse-decisive) — and
-    the serving rule *both below threshold ⇒ pure_rrf*, which is not a
-    scarcity hack but the correct semantics: rrf is the hedge (d41's
-    "runs both", production's 3–6 band), so "neither component
-    confidently wins ⇒ fuse" is the right call, and it sidesteps the
-    145-row rrf class that is structurally unlearnable (fusion artifact,
-    d37g). If both fire, higher probability wins. rrf is never a trained
-    class; it is the residual.
-    (b) *Train on decisive, threshold on the full distribution.* The
-    model fits on clean decisive rows but its abstention thresholds are
-    set against a validation set that INCLUDES all_tied/thin-margin rows,
-    so ambiguous queries fall through to rrf instead of drawing a
-    confident wrong route. Training-only-on-decisive is otherwise
-    overconfident on the ambiguous rows it never saw.
-    (c) *Model ladder: instrument → workhorse → (not) NN.* v1 = logistic
-    regression, kept for its coefficients — the readout of WHICH
-    features carry routing signal is the instrument that validates or
-    refutes the taxonomy's founding bet, and a black box cannot give it.
-    v2 = gradient-boosted trees (LightGBM): captures the feature
-    interactions a linear model cannot, handles class imbalance and the
-    null/sparse features (corpus stats absent for unindexed lanes,
-    zero-span rows) natively, stays interpretable via importances. Deep
-    NN is REJECTED for this feature profile (~70 engineered tabular
-    features, thousands of rows): trees beat nets on tabular at this
-    scale (Grinsztajn 2022; Shwartz-Ziv & Armon 2021) and a
-    text-fine-tuned NN re-hits the d37f query-only ceiling. If query
-    text ever enters, it enters as a FROZEN bge-small embedding as extra
-    columns into the tree, never end-to-end fine-tuning. The v1→v2 swap
-    is one implementation change behind (d) 's API.
-    (d) *Stable API, swappable model.* A `predict(query, *,
-    collection_stats=None) -> StrategyName` surface (the two-binary +
-    rrf-fallback rule is the contract; logistic/LightGBM is the
-    implementation). The signature carries `collection_stats` from day
-    one even though v1 ignores it, so the d44(b) corpus features graft
-    in without an interface break.
-    (e) *Two validation protocols (d44c), the gap between them is the
-    measurement.* (i) random 20% within-lane mask — new queries on known
-    collections, near-duplicate-aware (the ~5.5% cos>0.95 pairs must not
-    straddle the split). (ii) hold ONE lane fully out — new collection
-    never seen. The (i)−(ii) gap is corpus-dependence. Hold-out lane =
-    **rarb-math**: the only lane with all three classes substantial and
-    a real dense/sparse balance (dense 334 / sparse 191 / rrf 61, ratio
-    0.57), so it tests transfer across every class. Cost recorded: it
-    holds 38% of all sparse-decisive rows, so the *transfer estimate*
-    trains on the other 15 lanes while the *shipped* model retrains on
-    all 16 — the hold-out measures generalization, it does not define the
-    deployed model. crumb-set-op (ratio 0.95, 47 rows) rejected as
-    hold-out: too small for a stable estimate.
-    (f) *Six-column eval, over decisive rows.* constant-dense /
-    constant-sparse / constant-rrf / production classifier / our router /
-    oracle ceiling. The bar is the best CONSTANT (d37h), not production
-    alone — a router that loses to `always-dense` is worthless whatever
-    it does against the incumbent.
-    (g) *The judge spike runs in parallel (d44d), not after.* It is a
-    different axis (labeling, not modeling) and blocks nothing, but its
-    result decides whether step-(5) redesign can be labeled at scale.
-    List-preference judge over stored top-10s (route_rankings, d37e —
-    zero retrieval), ~500 rows across nfcorpus / crumb-legal-qa /
-    rarb-math, calibrated against the ~24K empirical spine; thresholds
-    ≥80% agreement on decisive rows opens scale-labeling, 60–80% ⇒ panel,
-    <60% ⇒ the number goes to the CTO conversation. The ~24K empirical
-    labels are re-scoped: their first-class use is the judge's
-    calibration/validation spine, not router training data (they are
-    feature-curated, weak for that).
-    (h) *Results drive (5) and (6), which stay plans not builds.* (5)
-    composition redesign — the target becomes (query, corpus) signal,
-    not query-features alone; opened only by the experiments' failure
-    modes (loses on sparse ⇒ minority-class volume; loses everywhere ⇒
-    information gap ⇒ corpus stats). (6) augmentation into the pipeline —
-    collapses to Inject-only for the sparse class, gated behind the
-    realism validation that needs the orcas natural baseline (d44e), and
-    fires only if harvest leaves sparse starved. Both deliberately
-    unbuilt until the two experiments report.
-    — *Nobody in the room knows the distance yet; a day of logistic
-    regression and a day of judge spike replace the argument with a
-    number, and the number names the next data to collect.*
+48. **Composition redesign: archetype cells replace span floors; the split
+    becomes a train/control boundary** (2026-08-04; executes d45(h5) ahead of
+    d47's ablation — the diagnosis no longer needs it). Cell definitions:
+    `src/composition/cells.json`. Generation brief:
+    `docs/composition-cells-prompt.md`.
+    (a) *Diagnosis: route is a lane property, not a query property.* Sparse-win
+    rate spans 0.8%–100% across the 16 labelled lanes, and query-side signals
+    that look predictive pooled go flat within a lane. Most populated archetype
+    cells under the d32 fill drew the bulk of their rows from one corpus. This,
+    not feature coverage, is what caps the router, and it explains the
+    within-lane vs holdout-lane gap.
+    (b) *A recipe change alone is worthless.* The d32 fill already selected
+    every feature-bearing row available in the labelable lanes — the
+    `exhausted` order-sheet lines restated. No different recipe has unexploited
+    supply to pick. Rejects "reopen recipe values" as a standalone fix.
+    (c) *`ArchetypeCell` replaces the 1-D span floor.* ANDed `AxisBand`s over
+    `catalog_axes` columns, plus `any_of` so one cell can span an identifier
+    family (the router cannot learn a rule from 33 examples of one format, but
+    can learn the token shape across several).
+    (d) *Cell definitions carry no numbers derived from current holdings.*
+    Supply, lane spread, labelling cost and fill tier are COMPUTED at fill time
+    against whatever catalog exists then; freezing them in the spec is
+    stale-by-construction and imports today's bias into tomorrow's fill.
+    `predicts` is a prior from retrieval first principles, tested by labelling,
+    never used to allocate.
+    (e) *Never narrow a target from current labels.* Asymmetry: observing a
+    route in a cell PROVES reachability, while not observing one proves
+    nothing — absence of evidence in a lane-biased sample. Narrowing is also
+    self-fulfilling, since a quota that asks only for dense never draws
+    candidates that could show sparse. Every cell quotas dense AND sparse;
+    `n_per_route` is a single Recipe value, not a per-cell judgement.
+    `pure_rrf` is never quotaed — it wins on near-ties, which the decisive
+    filter removes by construction, so its signal comes from the d41a
+    score-vector target.
+    (f) *Lane diversity is a share, not a count.* `min_lanes` is satisfiable
+    while a cell remains single-corpus in substance; `max_lane_share` is
+    checkable against real supply. Computed per cell at fill time as the
+    tightest cap that cell's lanes can satisfy. Cells that cannot reach the
+    target share are the acquisition requirement, stated in numbers.
+    (g) *Slices A+C merge; B+D become the control group.* A and C were two
+    mechanisms for one job (a cell predicate with zero identifiers plus a
+    length band IS a C stratum). B and D are the only rows whose distribution
+    we did not choose, so they become the never-trained evaluation slice —
+    spending them as training data throws away the only unbiased measurement
+    we own (WEAKNESSES #14). D's mechanism dies with it: three champions at
+    ≤50% each is what the ≤20% allocator forbids. Per-archetype eval runs on
+    held-out CELL rows, since rare archetypes are by definition rare in an
+    unbiased sample; aggregate realism eval runs on the control group.
+    (h) *Cell set provenance: three LLM runs, scored not read.* Ranked against
+    the catalog on hypothesis breadth, lane concentration and redundancy rather
+    than on how convincing the rationales read. All three runs skipped the same
+    thin-supply features — the region the d33 floors also under-served —
+    covered by hand-written cells grouped by retrieval mechanism. Caveat
+    carried: the brief fed the runs statistics from our own labels, so the
+    priors are contaminated to that extent; a clean re-run needs those sections
+    cut.
+    (i) *Gates before the fill.* Acquisition (the ≤20% cap makes T=100,000
+    unreachable from current holdings) and the d47 CorpusIndex side test, which
+    decides whether lane diversity is capped by row share or by corpus-stat
+    band. Both govern which rows get labelled, so both precede the spend.
+    — *The old fill asked "does feature X appear enough?" The cells ask "does
+    it appear enough, in enough corpora, with enough outcome variety?" Only the
+    first was answerable before labelling, which is why the fill is iterative.*
 
-46. **Track A build spec: three-representation ablation, encoder decoupled
-    from the label stack** (grill-me 2026-07-31; turns d45's classifier
-    into a build; human twin PLAN.md). Features already exist and join
-    clean: `data/feature_table/catalog.parquet` (57 numeric query
-    features — 8 continuous signals + 49 span counts, no nulls) covers
-    all 24,338 labelled rows on (dataset, query_id).
-    (a) *v1 ships the serving API, not just the experiment* (user, Q1):
-    `StrategyRouter` in `hybrid_search_rrf_dataset/router.py` with
-    `fit(features, labels)` / `predict_batch(df)` for the experiment AND
-    `predict(query, *, collection_stats=None) -> StrategyName` that
-    extracts features inline for serving. `collection_stats` present from
-    day one though v1 ignores it (d44b grafts in without a break).
-    (b) *Three feature configs, one pipeline, run as an ablation:*
-    (1) the 57 engineered features (interpretable, English, regex/spaCy);
-    (2) a frozen **intfloat/multilingual-e5-small** query embedding
-    (via sentence-transformers — added dep, user's call over fastembed
-    for speed/availability; e5 needs the `query: ` prefix), PCA-reduced
-    to ~50 dims; (3) both concatenated. The three headroom-captured
-    numbers ARE the finding — does the embedding add signal past the
-    taxonomy (3>1), can a free multilingual vector match it alone (2 vs
-    1).
-    (c) *The encoder is deliberately NOT bge-small-en* — the label
-    stack's dense retriever (user caught the bias). Feeding the
-    label-generating encoder back as a feature lets the classifier learn
-    a shortcut through bge's own quirks ("queries in region R of bge
-    space are dense-wins"), which inflates the score and collapses when
-    the dense encoder is swapped (R2). A different model breaks the
-    shared-representation shortcut and is the multilingual serving
-    candidate; the engineered features (regex/spaCy) are encoder-free by
-    construction, a second hedge. Labels stay bge-pinned (they are
-    retrieval outcomes) — decoupling the FEATURES means an encoder swap
-    moves only the label side, which R2 can then isolate. Multilingual
-    is future-proofing, not enabling-today: every labelled lane is
-    English (incl. miracl-en-dev), and a query encoder does NOT escape
-    the d37f corpus ceiling — it generalizes across languages, not past
-    the corpus blind spot; both representations still need d44b.
-    (d) *Model + rule.* Two one-vs-rest logistic binaries (dense, sparse),
-    `class_weight='balanced'`, standardized (fit on train only), L2.
-    Serving rule (d45a): both below threshold ⇒ pure_rrf, both fire ⇒
-    higher probability; rrf never a trained class (145 rows, fusion
-    artifact). v2 = LightGBM behind the same API once v1's ceiling is
-    read; NN ruled out (d45c).
-    (e) *Honest plumbing.* Hard label on a decisive row = argmax of its
-    three route scores. Thresholds tuned by cross-validation WITHIN the
-    training rows (incl. all_tied/thin so abstention calibrates); the
-    six-column comparison reported ONLY on the held-out split, never the
-    tuning rows (user: evaluate on the validation set only). seed 0.
-    (f) *Two validation protocols (d45e), the gap is the measurement.*
-    (i) random 20% within-lane, near-dup-aware (~5.5% cos>0.95 pairs must
-    not straddle); (ii) hold **rarb-math** out (all three classes: dense
-    334 / sparse 191 / rrf 61 — trains on the other 15, ships on all 16;
-    holds 38% of sparse so the transfer estimate ≠ the shipped model).
-    (g) *Six-column eval (d45f), production last and cheap* (user): call
-    `fusion.qdrant.tech/classify` once per unique HELD-OUT query and
-    cache (query-only → a few thousand calls, not 24K); table ships
-    five-column (constant-dense/-sparse/-rrf / router / oracle) first,
-    production appended as the sixth. Headline = share of headroom
-    captured = (router − best_constant)/(oracle − best_constant), read
-    over held-out decisive rows.
-    (h) *Deps:* add scikit-learn + sentence-transformers; e5-small
-    (~470MB) downloads on first embed — a user-initiated step (cache
-    fills are never smoke-triggered).
-    — *One configurable model, three representations, an encoder chosen
-    so the features aren't a mirror of the labels; the ablation says
-    which representation carries routing signal and whether it needs the
-    multilingual vector at all.*
+49. **Datasets become supply, not structure: the box model** (grill-me
+    2026-08-04; supersedes d29's per-dataset quota framing and d33d's
+    champion/dark-forest mechanism; amends d39g's ORCAS parking).
+    (a) *Datasets are undifferentiated boxes; cells are the only objective.*
+    Dataset identity stops being a selection axis. The fill searches every box
+    for queries satisfying a cell predicate and fills that cell's quota; which
+    box a row came from matters only to `max_lane_share`. Kills the "which
+    dataset should we acquire" judgement call — the answer is all of them that
+    can produce a label.
+    (b) *Size is an output, not a target.* No row-count goal. T is whatever
+    the filled quotas plus the dark forest come to. Rejects hunting for large
+    datasets: under a per-dataset cap, supply depth past the cap buys nothing
+    and only lane COUNT moves the ceiling, so selecting for size is selecting
+    for the wrong thing.
+    (c) *The global ≤20% per-dataset cap is dropped.* `max_lane_share` inside
+    each cell is the whole constraint — a diversified global mix is fully
+    compatible with individual cells being single-corpus, which is the
+    confound, so the cap belongs where it means something. Global shares are
+    reported, never targeted. Also removes the cell-vs-ledger conflict that
+    would have forced the deferred ILP escalation.
+    (d) *Fill order puts the cheap decision first.* Cell membership is
+    computable from query features alone, so: load queries from every box →
+    assign cell candidates across all boxes → materialise and embed ONLY the
+    corpora that won quota slots → label → check route quotas → top up. The
+    expensive corpus decision falls out of the fill instead of being a guess
+    about a dataset nobody has opened.
+    (e) *Box pool: everything registered plus Wave 2, English only.* Wave 1 is
+    already registered but not exhausted — `BrightSplit` and `RarbPool` are
+    parameterized, so the 9 unregistered BRIGHT splits and the RAR-b
+    commonsense pools (TempReason targets the temporal cell) are an enum
+    member and a line each. Those are the cheapest lanes available (landed
+    2026-08-04: 12 BRIGHT splits registered, 30 datasets / 29 lanes).
+    Admission is by **answer key, not by grounding card** — corrected
+    2026-08-04, the first draft of this clause wrongly excluded all QC boxes.
+    Two admissible kinds: QQ (source qrels) and QC-with-passage-answers,
+    which is d40(a)'s `doc_grounded` path — the answer passage IS the
+    grounding doc, msmarco's own regime. GooAQ is the case that forced the
+    correction: measured 62.7% passage-answer coverage over a 100K sample,
+    and its Google-autocomplete register (short, telegraphic, unit-bearing)
+    is exactly what the msmarco-dominated short-question cells lack.
+    Inadmissible: QO (no corpus, so nothing to retrieve) and
+    QC-without-answers (no key at all). Wave 2 therefore admits FreshStack,
+    ANTIQUE, LoTTE, WebFAQ en, ScIRGen-Geo en, CLERC (pending availability),
+    GooAQ, and nq_open if it ships a corpus — its card says QC while its
+    description says "short answers only", so verify before counting it.
+    XOR-TyDi excluded — cross-lingual is its point and the extractors are
+    English-only (`en_core_web_sm`; d14 rejects the weaker `xx` model).
+    Query-wellformedness excluded twice over: QO, and its only stated
+    consumer was the dropped corruption group. hotchpotch-simulated is not a
+    box but keeps a job: generation calibration against ORCAS.
+    (f) *ORCAS unparked as its own lane* (amends d39g). `msmarco-document`
+    corpus, `QrelSource.CLICK`. It is the only source that breaks the
+    head-of-traffic cells' single-corpus concentration, because it is a
+    genuinely different corpus at comparable scale — real Bing queries versus
+    crowdsourced questions — and it supplies four otherwise-empty cells.
+    Accepted cost: positive-only click qrels, ~1 judged doc per query, the
+    known-noisy regime of WEAKNESSES #10. `deferred` as a label lane is
+    retired; lanes are named by qrel source.
+    (g) *Existing labels are reused on overlap.* Labels key on
+    (dataset, query_id) and record what happened when retrieval ran; the old
+    bias lived in which queries were selected, not in the labels. Fresh
+    selection, free labels on the intersection.
+    (h) *`predicate − 1` relaxation: relax where the feature exists, mint
+    where it does not.* Measured over the thin cells: only two have a
+    near-miss to nudge (the feature is common, just not at that length band)
+    and nine have no candidate at any length in any box. So StatRewrite
+    serves the two, `InjectOperator` the nine, `OperatorSyntaxRewrite` the
+    boolean cell. Injection is therefore the dominant augmentation path, not
+    the fallback — which puts d40e on the critical path for roughly a third
+    of the cell spec.
+    (i) *The augmentation stack is reused, not rebuilt.* It is keyed on a
+    floor NAME and is indifferent to what a floor is, so cells emit
+    shortfalls with `floor = cell.name` and `operator_for` maps per (h).
+    `AugmentationCampaign.pilot_n` already implements pilot-sized staging for
+    gated floors, so cells short of natural supply need no new tiering
+    mechanism. d40e coherence pilot runs in parallel with box loading — it
+    needs no new data, and a failure is cheapest to learn before the corpora
+    are paid for.
+    (j) *Dark forest = leftovers.* Random draws from queries that entered no
+    cell, at ~20% of the cell rows. Strictly better than d33d's three-champion
+    mechanism: it is genuinely unchosen rather than chosen-to-look-unchosen,
+    and it costs nothing to select. The 20% is provisional — the defensible
+    size depends on how often the router and the best constant disagree per
+    row, which is only measurable once these rows are labelled, so it gets
+    resized next pass.
+    (k) *The d32 selection artifact is retained, not overwritten.* Every
+    number in PLAN.md and WEAKNESSES.md references it.
+    — *The old design made datasets structural — champions, per-dataset
+    quotas, a dark forest drawn from named sources. Making them anonymous
+    supply removes a whole layer of accounting and lets the objective be
+    stated once, in the cells.*
 
-47. **Router improvement plan: setup pass, corpus eyes in the taxonomy,
-    side-test gate** (grill-me 2026-08-03; responds to d46's ablation
-    losing to constant-dense — router 0.678 vs 0.738 on random-within-lane
-    with `t_sparse` tuned to 0.9, tied at 0.608 vs 0.604 on rarb-math
-    holdout, embedding+engineered at 0.707 still below the constant.
-    Sequences the fixes so each intervention's contribution is measurable
-    and adds an early gate that abandons the corpus-stats path cheaply if
-    the mechanism doesn't discriminate our 16-lane mix).
-    (a) *Setup pass — impl-only, no SPEC amendment. F1 attempted and
-    dropped; F2 stands.* Original design bundled two fixes; F1 was tried,
-    measured against baseline, and reverted — kept here as documented
-    negative result. **F1 (dropped 2026-08-03)** — `tune_thresholds`
-    weighted by `1/freq(winner_class)` was intended to close the observed
-    `t_sparse=0.9` degeneracy, framed as parity with the LR loss's own
-    `class_weight="balanced"`. Measured: two variants tried
-    (naive 1/freq over full-frame argmax with rrf at 16.7×; decisive-only
-    with rrf as residual at 2.33×) — router dropped from baseline 0.678
-    to 0.300–0.326 on random-within-lane, 0.608 to 0.342–0.371 on
-    holdout. Diagnosis: `t_sparse=0.9` was not a degeneracy — it was the
-    tuner correctly reading a poor sparse-binary separator (AUC ~0.65)
-    where any threshold below ~0.9 has false-positive cost exceeding
-    true-positive gain regardless of class weighting. The unweighted
-    tuner's `(0.45, 0.9)` is near-optimal for the current LR
-    probabilities; class-balanced weighting shifts thresholds away from
-    firing well-behaved routes and the hedge rule sweeps more rows into
-    rrf, scoring worse. **F1's premise treated a symptom that wasn't the
-    disease** — the LR needs better features (F2), not different
-    thresholds. **F2** — three derived columns computed at fit time in
-    `FeatureSpace.transform`: `identifier_density =
-    sum(structured_identifiers.*) / max(length_words, 1)`,
-    `avg_word_length = length_chars / max(length_words, 1)`,
-    `short_id_query = (identifier_density > 0) & (length_words ≤ 5)`;
-    drop `length.length_words` after `avg_word_length` lands (redundant
-    with length_chars once the informative diff is exposed as a feature).
-    No feature-table rebuild — additions live inside FeatureSpace, not
-    the catalog. Applied once as a shortlist, ablation re-runs on both
-    protocols, numbers recorded, move to (b) regardless — setup is
-    de-confounding, not optimizing. Reopen trigger for a tuner change:
-    F2 + (b) land a better-discriminating LR, then a class-balanced
-    tuner variant (e.g., per-class recall floor per Q4 option B) may
-    earn its keep on top; not now.
-    **F1' (landed 2026-08-04)** — the actual working tuner fix. Filters
-    `tune_thresholds`'s input to `routes_differ` rows only. Measurement:
-    67% of the tune frame is threshold-invariant (all-tied and all-zero
-    rows contribute constants regardless of threshold, diluting the
-    argmax). After filtering, sparse fires at `t_sparse ≈ 0.6–0.8` on
-    identifier-bearing queries. Numbers after F2 + F1': random_within_lane
-    `router 0.751` (+0.057 headroom captured), holdout_lane `router 0.611`
-    (+0.017). First positive headroom on either protocol.
-    (b) *Corpus-relative features — RETIRED as router inference feature
-    (2026-08-04).* Deployment target for the router is unknown at ship
-    time; the router's API surface stays `query → route`, no
-    `collection_stats` input. The `CorpusRelativeBank` design below is
-    preserved for offline labelling analysis and dataset diagnostics,
-    but does not enter the router at inference. The corpus-signal-at-
-    training direction (LUPI: privileged features at training, masked at
-    inference) supersedes the original (b) framing — three implementations
-    (dropout / auxiliary reconstruction / teacher-student distillation)
-    documented in PLAN.md, own grill before implementation.
-    *Original (b) design, retained for the query_taxonomy work:* The
-    Airtable/CSV taxonomy has
-    committed Query-Corpus as a first-class group with multiple members
-    (Answerability, Specificity, Ambiguity, Vocabulary mismatch — all
-    `Corpus Relative: Yes`); the code twin hadn't caught up, and d47 is
-    that catch-up. New package `query_taxonomy/corpus_relative/`:
-    `CorpusRelativeBank` base + six concrete banks (`AvgIDFBank`,
-    `MaxIDFBank`, `OOVShareBank`, `CollectionSizeBank`,
-    `AvgDocLengthBank`, `VocabOverlapBank`); `CorpusIndex` a plain
-    dataclass (df counts dict + N + avgdl), no parquet/tokenizer deps
-    inside query_taxonomy. Banks take `(tokens, CorpusIndex)` — the BM25
-    tokenizer used by the sparse route lives in the parent repo and
-    pre-tokenizes queries before dispatch (symmetric with how spaCy
-    banks receive pre-tokenized docs from the shared pipeline cache).
-    Six CSV rows added to `query_taxonomy/query-taxonomy.csv` under
-    Query-Corpus, `Method: ALGO`, `Corpus Relative: Yes`. Amends d18's
-    implicit "corpus-relative features live in the parent repo"
-    assumption: taxonomy owns the definition AND the compute; parent
-    repo owns the data plumbing.
-    (c) *No new Engine value.* `FeatureExtractor` gains
-    `resolve(text, *, corpus: CorpusIndex | None = None)`;
-    corpus-relative banks dispatch on **corpus presence**, not on
-    `Engine`. Rationale: `Engine`'s purpose is "what heavy runtime does
-    this bank drag in" (REGEX = nothing, SPACY = the pinned pipeline);
-    corpus-relative banks drag stdlib arithmetic — a caller-provided
-    CorpusIndex isn't a heavy import. Adding `Engine.CORPUS_RELATIVE`
-    would misuse the axis: someone constructing the regex-only default
-    extractor (`FeatureExtractor()`) can still ask for
-    `resolve(text, corpus=idx)` and get corpus features without
-    installing spaCy. Two orthogonal axes: engine filtering (mechanism/
-    deps), corpus presence (input signature). `CorpusRelativeBank` has
-    no `Engine` ClassVar. Rejected alternatives: tagging under
-    `Engine.SPACY` (misleading — banks don't use spaCy; regex-only
-    users forced to install spaCy for stat lookups), tagging under
-    `Engine.REGEX` (equally misleading), a new `CorpusFeatureExtractor`
-    class (splits the extractor surface for one feature family).
-    (d) *Tokenizer: BM25 index-native.* The stats' purpose is predicting
-    when sparse wins; sparse is BM25; if the router's IDF/OOV/overlap
-    signal comes from BM25's own tokenization, the feature aligns with
-    the retriever's actual behavior with zero translation gap.
-    Alternatives rejected: spaCy tokenizer (drifts from BM25's lens),
-    naive whitespace (out of sync with both retrievers). Tokenizer lives
-    in the parent repo alongside the sparse route, not in query_taxonomy
-    — keeps taxonomy dependency-clean.
-    (e) *Parent repo owns the data plumbing.*
-    `hybrid_search_rrf_dataset/collection_features.py`: one offline
-    counting pass per lane's existing `corpus.parquet` builds a
-    `CorpusIndex`; per-query stat extraction dispatches to the six
-    banks; output at `data/route_labels/collection_features.parquet`
-    keyed (dataset, query_id). `labels.parquet` stays frozen — paid
-    labels are never edited; stats join in at router train/serve time,
-    consistent with d44(b)'s "router features computed after labeling".
-    Subsumes the outstanding d44(b) builder TODO.
-    (f) *Early gate: 16-row side test BEFORE the full ablation.* Once
-    CorpusIndex artifacts exist for all 16 lanes, compute per-lane mean
-    stats (16 rows × 6 stats) and train a tiny classifier predicting
-    each lane's best-constant route (3-class target). Read: **≥12/16
-    correct ⇒ d47's mechanism has real signal on our mix, proceed to
-    (g)**; 8–11/16 ⇒ modest expected gains, ablation still worth
-    running; ≤7/16 (~chance for a 3-class target) ⇒ the stats don't
-    discriminate our 16 lanes, escalate to d45(h) branches without
-    paying for the transfer pilot. Rationale: the +6.3%
-    per-collection-constant tier (d44a) is the mechanism's literature-
-    grounded ceiling (CORI/ReDDE/Taily; arXiv:2504.01101 achieved
-    ~4%), and the side test IS that tier — if the six numbers can't
-    recover it on 16 lanes, they won't rescue a per-query router
-    either. Cheap (minutes of code after (e) lands), and honest — a
-    failed hypothesis costs minutes not weeks. Runs before spending on
-    the full 6-config pilot.
-    (g) *Six-config ablation, per-collection normalized.* Contingent on
-    (f) reading positive. Ablation axis becomes 3 base representations
-    (engineered / embedding / both) × {with_stats, without_stats} = 6
-    configs per protocol, both random-within-lane and rarb-math
-    holdout. Stats z-scored **within each lane** using training-row
-    means/stds — raw IDF magnitudes are not comparable across corpora
-    (msmarco IDF vs nfcorpus IDF live on different scales); per-
-    collection normalization strips the corpus-magnitude and leaves
-    the query-relative signal that transfers. Reads: (1 vs 2) does
-    d47 add signal to engineered features; (5 vs 6 on holdout − 5 vs 6
-    on random) shrinks the (i)−(ii) gap iff stats transfer.
-    Realistic expected outcome: random-within-lane router lifts 3–5
-    points from F1+F2 + 1–3 more from stats (~0.73–0.75, parity with
-    constant); holdout is where the stats leverage lives (0.608 →
-    0.63–0.66 realistic, first protocol where router visibly beats
-    constant). Both guesses; (f) makes them cheaper to falsify.
-    (h) *Deferred, with reopen triggers.* **F3** (relax decisive-only
-    training toward all `routes_differ` or full score-vector regression
-    per d41a's canonical path): own grill if (a)+(b–e) still lose to
-    constant on random-within-lane after (g). SPEC-touching — amends
-    d45(a)'s clean-label decision. **d45(h) branches** (composition
-    redesign to (query, corpus) targets; Inject-only sparse
-    augmentation): triggered by (g)'s outcome per d45(h)'s pre-
-    committed decision tree. **d44(d) judge spike**: continues on its
-    own track (d45g), not gated by this decision. **Notebook
-    presentation** (how the failing d46 baseline is portrayed alongside
-    the fixed router): impl detail, not a design call. **Ship-
-    criterion** for the router product: CTO conversation per d44(d)'s
-    <60% escalation clause, not this decision.
-    — *One setup pass, one taxonomy home, one early gate, one ablation.
-    The side test replaces guessing with a number cheaply enough that a
-    failed hypothesis costs minutes, not weeks.*
+50. **Cells are a-priori archetypes: predicate repair now, mechanism-driven
+    expansion next, generator deferred** (grill-me 2026-08-05). The audit
+    (`src/selection_audit.ipynb`) asked whether the 32 cells cover enough and
+    whether more single-route cells were needed; the answer inverted the
+    question.
+    (a) *A cell's validity is a real dense/sparse divergence mechanism plus
+    expressibility as bands over measurable features — never natural supply in
+    the acquired lanes.* The 41 datasets are supply, not ground truth (d49).
+    Thin cells (uuid 24 catalog rows, ip 51, email 35) are generation targets,
+    not weak cells; low supply must never rank, prune, or gate a cell. This
+    retires the "supply-as-validity" reasoning the audit's feasibility counts
+    invited.
+    (b) *Predicate repair happens at the bank, with a re-extraction.* The audit
+    found the sparse-leaning cells matching false positives, and the counts are
+    post-resolution catalog columns, so the fix is in `query_taxonomy`, not
+    cells.json: **UUID** keeps its 32–64 hex digest branch but rejects
+    low-entropy / single-repeated-char runs (`aaaa…` is a padding artifact, not
+    a digest) — a regex negative-lookahead if edify exposes backreferences,
+    else a bank post-filter plus an `OVERRIDES` generator entry; **DateTime**
+    drops the bare-epoch branch entirely (any 10-digit int in 1.5–1.9e9 is a
+    phone/ID false positive), ISO 8601 only. Rebuild `catalog.parquet` (380K
+    rows); the generator↔bank round-trip test stays green (generators derive
+    from bank patterns, so a regex tightening self-heals). IP-vs-version is left
+    irreducible — a 4-part version is a valid IPv4 and RIGID IP wins the range,
+    so `version_string` undercounts; both are two-route cells and labelling
+    tests them. Email is left as-is: the strict pattern's flagged rows are real
+    incidental addresses, not FPs.
+    (c) *Two cells.json guards ride along, no re-extraction:* `uri_in_query`
+    gains `length_words below 15` (stop claiming prose that merely mentions a
+    link); `opaque_token_any_domain` drops `http_status_code` from its `any_of`
+    (the "277 V" false positive).
+    (d) *Cell expansion is produced the way the current set was — a separate,
+    human-run LLM task that writes a static `cells.json`, NOT an automated
+    pipeline pass — with a revised prompt.* The 32 are shallow (single-feature
+    or 2–3-band); the gap is cross-group INTERACTION cells and statistical
+    permutations (conjunctions across identifiers × stats × markers × logical —
+    e.g. rare-entity × high-stopword × short). The lever is the generation
+    brief `docs/composition-cells-prompt.md`, adapted to prior shortcomings:
+    **cut the `MEASURED FACTS` section** (it fed our 16-lane label statistics as
+    facts to "respect" — the d48h `predicts`-contamination) and **cut the
+    `SUPPLY` section** (per-feature catalog counts — the supply-as-validity error
+    d50a retires); **drop `BUDGET`/`n_per_route`** (not a cell property, computed
+    at fill time). Keep the exact-column vocabulary (the measurability
+    constraint — invent no columns), the bad-cell rules, and the
+    pooled-vs-within-corpus confound restated as a PRINCIPLE, not a table of
+    numbers. Add an explicit ask for cross-group conjunctions and statistical
+    permutations, and for a stated retrieval mechanism + `predicts` prior per
+    cell. Argue from retrieval mechanics and entity×statistic relationships
+    (LLM knowledge), never from what the acquired corpora contain. Archetypes
+    needing a property nothing measures are logged as a taxonomy-extractor
+    backlog, not built now. Resolves the d48h contamination deferral. *(Brief
+    rewritten 2026-08-05; a stale output schema — `lo/hi`, `hypothesis`,
+    `n_per_route`, `min_lanes`, `supply` — was also corrected to the shipped
+    `ArchetypeCell` fields `at_least/below`, `any_of`, `predicts`, `source`, so
+    the generated file loads. Running an LLM against it is the open step.)*
+    (e) *`predicts` stays a tested prior; selection and pruning are post-label
+    on measured divergence, never pre-label on prior or supply.* The loop: LLM
+    proposes rich cells → fill (natural draw + augmentation + constructed docs)
+    → label → keep the cells that measurably diverge (dense/sparse top-10
+    Jaccard as a pre-label screen; measured route-split after labels), merge or
+    drop the rest.
+    (f) *50/50 sparse/dense is an eval-time weighting, not a selection target.*
+    Real decisive traffic is ~74% dense in the current mix; a balanced
+    population would be unrepresentative and teach over-prediction of sparse.
+    Training needs a per-class FLOOR — enough sparse decisive rows to learn the
+    boundary — met by augmentation/generation, consistent with the
+    Representative doctrine (balance applied at eval as a weighting).
+    (g) *Cell-conditioned generation is the deferred spine — its own session,
+    recorded here for a parallel effort.* The whole augmentation stack is
+    parent-based (mutates an existing selection row); nothing generates a query
+    from a cell spec. The capability the vision needs: given a cell's multi-band
+    predicate, produce a coherent query hitting every band and — for a
+    zero-natural-supply cell — the constructed document that answers it, from
+    LLM knowledge, no parent. It leans on the constructed-docs / synthetic lane,
+    which moves from edge-case to core under this design.
+    — *The audit's real finding was not a coverage gap but a category error:
+    judging cells by what the acquired corpora happen to supply. Fixing the
+    false-positive predicates makes the sparse claims honest; expanding by
+    mechanism (bounded by what the extractors can measure) and validating by
+    measured divergence is how the cell set earns a defensible route mix without
+    ever baking in the prior.*
+
+60. **Ties are judgment-resolution artifacts, upgraded by an acceptability
+    view, not by re-weighting the objective** (grill-me 2026-08-07).
+    (a) *Diagnosis, measured on the cached lane oracles.* Of 15,037
+    `all_tied` rows, **zero** have identical top-10 lists across the three
+    routes; 96.1% share only the top-1 doc and differ in their (unjudged)
+    tails; 70% sit in three median-one-judged-doc lanes (webfaq 60% tie
+    rate, gooaq 45%, orcas 28%). A tie means the judgments ran out of
+    resolution, never that the routes are equivalent. Objective
+    re-weighting was separately measured dead (§9, all 42 lanes pooled):
+    0.5/0.5 flips zero real labels vs shipped, bare NDCG@10 ~92 of 46K —
+    the label is not an artifact of the 0.7/0.3 choice. min_relevance+1
+    is degenerate (39 of 42 lanes have binary qrels; gold empties).
+    (b) *Acceptability is a derived view, never stored columns.* Per route:
+    `ok = score >= oracle − tolerance`, `oracle = max` of the row's three
+    scores — computed by a view class over `labels.parquet`'s score vector,
+    tolerance as its parameter. CONTEXT.md already rules `route` "a view
+    over the scores"; materializing ok_* would create the twin-structure
+    consistency bug CLAUDE.md forbids and bake one tolerance into the
+    artifact. `tolerance=0` reproduces today's labels exactly — nothing is
+    destroyed. (Sanity-check, compressed: the component is one small class
+    computing three booleans from three stored floats; the rejected
+    alternatives — new parquet columns, a sibling parquet per tolerance —
+    both add an artifact to keep consistent. KEEP the view.)
+    (c) *Canonical tolerance 0.3 = hit parity, derived not hand-picked.*
+    0.3 is the objective's own `ndcg_weight`: the widest gap two routes
+    can show while sharing the same top-1 outcome (a hit/miss difference
+    forces ≥ 0.4 — same derivation style as d41's 0.4 decisive margin).
+    The measured gap distribution confirms the band is real: runner-up
+    gaps have median 0.022, p75 0.095, then jump to 0.811 at p90 —
+    nothing lives between 0.3 and 0.4, and serve flips saturate at 6,827
+    by tol 0.2. Accepted trade-off: tail quality alone (NDCG 1.0 vs 0.4,
+    both rank-1 hits) never disqualifies a route — Top-1 parity is what
+    the production router optimizes.
+    (d) *all_zero stays null (d41 upheld), for a bias reason, not
+    conservatism.* The view could express `[0,0,0]` ("no route
+    acceptable") — argmax never could — but qrel holes are asymmetric
+    (dense 14–32% vs BM25 ~6% on older pools), so a chunk of the 8,181
+    all-zeros are fake and disproportionately fake against dense;
+    training all-negatives on them injects exactly that bias. Revisit
+    after (f)'s option A shrinks the fake-zero population.
+    (e) *The training target is three binary acceptability heads.* One
+    head per route on ok_dense/ok_rrf/ok_sparse; at inference, serve the
+    cheapest route whose P(ok) clears a threshold. This keeps [1,0,1]
+    distinct from [1,1,1], turns the 15,018 tied rows into sparse-positive
+    training signal (7,789 genuine sparse wins + ties ⇒ the starving
+    class is fed), and leaves cost policy in the inference rule, tunable
+    without relabeling. The derived `serve` column is the evaluation
+    oracle readout only — including for the production hard-classifier
+    baseline.
+    (f) *Follow-up sequence, decided: A next, C conditional, D last.*
+    A = LLM-judge the differing tails (PPI-rectifier spine per
+    docs/research/route-label-sourcing.md): ~14.4K tied queries ×
+    ~15–20 unique unjudged tail docs, the honest tie-breaker, and the
+    unlock for revisiting (d). C = harden webfaq/gooaq/msmarco corpora
+    with adversarial distractors — only if A shows the ties are real
+    (tails genuinely irrelevant ⇒ the corpus is too easy). D = augment
+    tied parents into harder children — waits for A/C evidence on which
+    perturbations break ties.
+    — *The finding that pays for the whole grill: zero of fifteen
+    thousand ties are irreducible. The information to break every one of
+    them already sits in the cached rankings; only judgments are missing.
+    The acceptability view is how the dataset stays useful while they
+    are.*
+
+61. **Admitted augmented rows reach evaluation by read-time supplement, not
+    by mutating a lane's own snapshot** (grill-me 2026-08-10; closes the
+    "labels.py merge of augmentation qrels" item open since d40's grill).
+    (a) *Diagnosis: two files, one silent gap.* `cell_selection.parquet`
+    records WHICH `query_id`s the composition wants scored; `QuerySubset`
+    (retrieval/base.py) narrows a lane's OWN `queries()`/`qrels()` down to
+    those ids but can only subtract, never add — a query_id absent from the
+    lane's persisted `queries.parquet` silently disappears from evaluation,
+    no error. Confirmed by grep: `CellFill.admit()` never touches any lane's
+    `queries.parquet`. An admitted augmented row would have valid qrels
+    (`AugmentationQrels`, d43d/d59-era `backfill()`) but no query text
+    anywhere retrieval reads from.
+    (b) *The qrels half of this was already designed for, never wired up.*
+    `QrelStore`/`QrelSource` (hybrid_search_rrf_dataset/qrels.py) already
+    merge judgments from multiple sources at READ time — `concat()` plus a
+    declared trust precedence (`HUMAN > CONSTRUCTED > CLICK > LLM`) — and
+    `QrelSource.CONSTRUCTED`'s own docstring names Inject rows explicitly.
+    Nothing calls `QrelStore.from_dataset`-equivalent construction against
+    `AugmentationQrels`'s data today; the mechanism exists, the caller
+    doesn't.
+    (c) *Query text follows the identical pattern: read-time, additive,
+    never a snapshot mutation.* No corpus reindexing or re-embedding is
+    ever needed — confirmed by reading `fusion.py`/`indexer.py`: dense and
+    sparse both embed the query string LIVE inside `rank()`, nothing is
+    precomputed or cached per query, and augmentation never adds documents,
+    only queries pointing at documents already indexed. Given that, physically
+    appending into each lane's `queries.parquet` would be the ONLY reason
+    to ever touch it, and doing so risks silently losing augmented rows on
+    the next `materialize_corpora.py` rebuild of that lane. Resolution:
+    `QuerySupplement`, mirroring `QuerySubset`'s exact shape (wraps a
+    `source: RetrievalDataset`, same constructor pattern) but ADDS rows to
+    `.queries()`/`.qrels()` instead of narrowing them. Named "supplement"
+    specifically over "overlay" (CONTEXT.md, d61): an overlay reads as
+    covering/replacing what's underneath; a supplement only adds alongside
+    it, which is the whole point — the lane's own snapshot stays exactly
+    reproducible from scratch.
+    (d) *Two generations of augmented row need different rules, so the
+    inclusion criterion is parametric, not hard-coded.* `floor` distinguishes
+    them by construction: a bare label (`marker:greeting`, `id:medical`, ...)
+    predates the d51 cell rebuild; a `CELLS_BY_NAME` member postdates it.
+    `generation: Literal["floor_based", "cell_based"] = "cell_based"` (named
+    for what each IS, not a version number). `"floor_based"` includes every
+    such pool row unconditionally — admission never applied to them (they
+    predate `CellFill`; they are already gate-free, `credit_gate="none"`, so
+    there was never a gate to clear either) — retrofitting an admission
+    check onto them would invent a rule that never governed their creation.
+    `"cell_based"` includes only rows whose `query_id` is already in
+    `cell_selection.parquet` — the credit-gate/admission pipeline (d42h)
+    stays the single source of truth for "counted," and a raw, unreviewed
+    `pool.parquet` row (today, most of it) must not become silently
+    evaluable.
+    (e) *One shared filter feeds both halves, so text and qrels can never
+    silently disagree about which rows are in.* A single function resolves
+    `(pool, cell_selection, generation) -> filtered pool rows`; `QuerySupplement`
+    reads `query_id`/`query` off it, the `QrelStore` builder reads
+    `query_id`/`doc_id`/`relevance`/`source` off the matching `AugmentationQrels`
+    rows for the same id set. Verified as a fact, not assumed: every
+    `home_lane` value in the current pool matches a real dataset-registry
+    name, so it is trustworthy as the lane key both pieces key off.
+    (f) *Scope: both halves, one decision.* Query text and qrels are two
+    views of the same filtered row set — building them separately now risks
+    them drifting apart on which rows count as "in" later.
+    — *The lane's own files are the ground truth for what it shipped;
+    augmentation's contribution is additive and provable from
+    `pool.parquet`/`qrels.parquet` alone. Nothing about "did this query get
+    evaluated" should ever require asking "did someone remember to append it
+    somewhere."*
+
+62. **Opaque tokens defeat two measurements at once; both repairs are stated as
+    rules and enforced by tests, never as named instances** (grill-me
+    2026-08-10; extends d56's `NUM` removal and d50(c)'s cell guards, each of
+    which repaired an instance and did not survive).
+    (a) *Diagnosis: two independent defects on one path.* The archetype probe
+    `a3f5d8b9e12c4d56789abcdef0123456` routes `dense_only`. Two inputs are
+    wrong and either alone is sufficient. FEATURE: `natural_language_share`
+    reads 1.0 — spaCy tags the unseen token `AUX`, a closed class, so a hex
+    digest scores as pure grammatical glue, above real prose at 0.4–0.5.
+    MEMBERSHIP: `bare_concept_token` claims it, the cell whose prior is
+    `dense_only`, so the training data teaches the same thing the feature
+    does. Repairing one alone leaves the probe failing.
+    (b) *The tag is a guess on any token the tagger has not seen, and the guess
+    is not systematic.* `deadbeefcafe1234` tags `NOUN` and is harmless; the
+    probe's digest tags `AUX` and counts as glue. d56 diagnosed the `NUM` case
+    as "not tagger noise, a definition mismatch" — true there, since UD really
+    does file numerals closed-class. It does not cover `AUX`: UD files no hex
+    digest as an auxiliary. The root cause is wider than d56 named, which is
+    why removing one tag did not end it.
+    (c) *The rule: a closed-class token must be word-shaped.* A closed class is
+    closed, and no member of English's contains a digit — so a digit-bearing
+    token is never a function word, whatever tag it carries. One condition at
+    the counting site, stated about token shape rather than about `AUX`, so a
+    sibling tag on a future unseen token is already covered. Alternatives
+    measured and refused: excluding `AUX` (the whack-a-mole d56 already lost
+    once); `token.is_alpha` (drops `'s` and `n't`, real function words out of
+    contractions); `token.is_oov` (true for every token under
+    `en_core_web_sm`, so it separates nothing).
+    (d) *Cost is small in aggregate and decisive where it counts.* 18 of 4,000
+    labelled queries change `nl_share` (0.45%), none by more than 0.15 — the
+    same shape as d56's own 24.8%-inflated / 2.0%-band-crossing split. Only a
+    query containing a digit can change value, so the rebuild filters to
+    digit-bearing rows, a provable superset, instead of the full 380K.
+    (e) *Scope is the natural-language bank alone, on evidence.* `MorphologyBank`
+    reads 0.000 on opaque input. `SyntacticDepthBank` genuinely hallucinates —
+    a bare UUID parses to `nesting_depth` 3.0, above a real question at 2.0 —
+    but every cell banding a parser scalar already carries a
+    `natural_language_share` floor, so the NL signal IS the guard for the
+    parser banks and repairing it restores the gate. That convention holds in
+    all four such cells today and nothing enforces it; (g) does.
+    (f) *`bare_concept_token`'s predicate contradicts its own `looks_like`, and
+    the repair must cover identifiers as a class.* The prose says "No digits,
+    no acronyms, no code, nothing verbatim-rare — opaque jargon belongs to the
+    identifier cells"; the predicate says only `length_words < 3` and
+    `number < 1`, and cells.yaml's header rules the predicate the sole matcher.
+    So it claims the digest, `ERR_CONNECTION_RESET` and `HTTP 502` alike. The
+    trap to avoid: the cell DOES band an identifier absence, so a test asking
+    "does this cell forbid an identifier?" passes while the bug stands — it
+    forbids 1 of 54. The invariant is about coverage, which is why the class
+    must be expressible as one column.
+    (g) *Both rules are enforced by tests in `tests/test_cells.py`, because SPEC
+    prose demonstrably cannot enforce them.* d50(c) guarded `uri_in_query` and
+    `opaque_token_any_domain`; d50(d) regenerated the cell set, both cells
+    stopped existing, and neither guard is among today's 44. Two tests, beside
+    the 14 already there: a short cell (a `length_words` ceiling ≤ 10) that
+    demands no identifier presence must band identifier absence as a class; and
+    a cell banding any parser scalar must band a `natural_language_share`
+    floor. The trigger reads length and identifier demand, never `predicts` —
+    d48(d) makes that a falsifiable prior, and a prior must no more drive an
+    invariant than it drives allocation.
+    (h) *The identifier aggregate is derived, never stored.* One column summing
+    the structured-identifier span counts, so the class is one band instead of
+    54 and the invariant is expressible at all. Storing it would create a sum
+    that can disagree with its parts after any bank change — the twin structure
+    CLAUDE.md forbids — and would not even suffice: three producers build
+    catalog-shaped rows, and `mini_catalog` builds them from `QueryFeatures`
+    for generated children without reading the parquet at all. The derivation
+    lives with the existing catalog-column convention and is applied at every
+    producer; nothing is re-extracted.
+    (i) *Sequencing: the cell side now, the bank side behind a green build.*
+    (f)–(h) need no re-extraction and can land immediately; labels key on
+    `(dataset, query_id)` and are reused on overlap (d49g), so a membership
+    change costs labelling only for newly selected rows. (c)–(d) land in the
+    nested `src/query-taxonomy` repo, whose round-trip suite is red (92
+    failures at `6008f40`) — a change made against a red build cannot be shown
+    to have broken nothing.
+    (j) *The probes are the acceptance test, not the aggregate.* Both repairs
+    are judged on `src/hybrid_search_rrf_dataset/probes.py` and
+    `route_experiments.ipynb` §7, where the affected rows are visible. At 0.45%
+    of queries and 3 of 44 cells, neither repair is expected to move a headline
+    mean, and quoting one as evidence either way would be reading noise.
+    (k) *Corpus indexing becomes incremental, because every repair path from
+    here assumes it* (amendment, same session). `_index()` re-uploaded an
+    ENTIRE lane whenever the collection held fewer points than the corpus —
+    119,976 re-embeds to add one document to `crumb-code-retrieval`, O(n)
+    embedding work per O(1) documents added. Harmless while every lane is a
+    frozen snapshot, which is why it had never fired; load-bearing the moment
+    d50(g)'s cell-conditioned generation writes its first constructed document,
+    since that lane then grows every round. `BaseIndexer.missing()` diffs
+    `item_id` — a deterministic `uuid5` of `doc_id`, so the building block was
+    already there — against the collection and uploads only the difference; the
+    point count stays as the cheap "did this corpus grow?" trigger. Accepted
+    limitation, recorded rather than left to be discovered: identity is the
+    point id alone, so edited text under an unchanged `doc_id` is not
+    re-embedded — exactly the behaviour of the count check it replaces.
+    — *Both prior repairs were correct, and both were lost: one to a sibling
+    tag, one to a regeneration. What makes this decision different is not a
+    better patch but that the rule outlives the artifact it was found on — a
+    test fails loudly where a decision paragraph waits to be read.*
+
+63. **The encoder router: frozen input channels, one latent, feed-forward
+    privileged branches** (grill-me 2026-08-11; supersedes d46's encoder
+    line and d47's LUPI-option-B item; evidence base:
+    `docs/research/qpp-retrieval-routing.md`,
+    `docs/research/lupi-privileged-information.md`,
+    `docs/research/tooling-mlp-router.md` — a three-report literature pass
+    standing in for arch-validator).
+    (a) *Input = frozen bge-small embedding ⊕ hashed char-3–5-gram SVD
+    (~128 dims, fit on training queries) — complete transforms, nothing
+    curated.* bge-small supersedes d46's "NOT bge-small-en": a frozen
+    encoder's weights never see labels, and the stack coupling lives in
+    the labels themselves, so hiding the embedding would not decouple it.
+    The d46 worry stays falsifiable, not vetoed: arm 7 trains the identical
+    architecture on multilingual-e5-small; if bge wins only
+    random_within_lane and loses holdout routes_differ, d46 was right and
+    e5 ships. The SVD block is the complete lexical channel — every
+    substring counts, so identifiers, digits, and casing survive with zero
+    per-format judgment; completeness, not curation, is what makes an
+    input unbiased. Evidence: lexical inputs beating frozen embeddings on
+    route classes (RAGRouter-Bench), XGBoost-on-frozen-embedding beating
+    fine-tuned DeBERTa at moderate scale (LTRR). Fine-tuning the encoder
+    is arm 6, run once as the published ceiling (the BERT-QPP/CIKM'21
+    regime starts ~500K labels; we have ~40K).
+    (b) *One MLP encoder → latent z; two supervised branches whose outputs
+    FEED the route layers (hallucination wiring, Hoffman 2016) — not
+    dropped heads.* Cell branch ĉ: Linear(z→44) sigmoids, BCE with
+    per-cell pos_weight, graded against per-row evaluation of EVERY cell
+    predicate (multi-hot, recomputed offline at build time) — never the
+    fill's stored single assignment, which bakes quota and tie-break
+    bookkeeping into the geometry; overlapping multi-hot targets force the
+    latent to encode shared archetype factors instead of 44 islands.
+    Corpus branch â: z-scored MSE over three named blocks — per-lane
+    corpus stats (corpus.parquet scan + taxonomy extraction over ~5K
+    sampled docs per lane; retires d48i's CorpusIndex wish), per-query
+    gold-doc stats (taxonomy over the row's qrel docs at the lane's
+    min_relevance, plus query↔gold lexical overlap — per-query targets are
+    what break the ~15-lane lane-ID degeneracy), and fold-local
+    route-outcome stats (ok-rate per route + decisive share, computed from
+    training rows only; named outcome stats because they are a property of
+    corpus × selection, never of the corpus alone). Route layers consume
+    concat(z, ĉ, â) at train AND serve: the model imputes at inference the
+    privileged knowledge it cannot see, and the skip connection on z lets
+    training down-weight unreliable estimates. The branch losses exist
+    only at training — without them ĉ and â are anonymous hidden units;
+    with them they are meaningful, inspectable estimates.
+    (c) *Route output = the three d60 acceptability heads under the
+    existing cheapest-acceptable serve rule*, so LR and encoder router are
+    compared under identical serving.
+    (d) *Training frame: every labelled row, masked route loss.* all_zero
+    rows contribute zero route gradient (d60d holds) but still supervise
+    both branches; all_tied rows supervise all five outputs; near-duplicate
+    clusters (cos>0.95) never straddle a split.
+    (e) *Seven arms, one eval harness.* (1) the design; (2) taxonomy
+    features as extra input, corpus branch only — do features earn input
+    status; (3) no branches — does branch supervision help at all;
+    (4) shuffled branch targets — information or regularization, the
+    TMLR-2025 mandatory control; (5) LightGBM ×3 on arm-2 inputs — is the
+    MLP the right learner at this scale; (6) fine-tuned bge + 3 heads,
+    once — the ceiling; (7) e5-small control — settles (a) empirically.
+    Eval: leave-one-lane-out CV over every lane with the spread reported
+    (the binding small number is ~15 lanes, not 40K rows), routes_differ
+    as the headline slice (every published query-side predictor is weakest
+    exactly where dense and sparse disagree), baselines const-dense /
+    LR+priority / auto-fusion / production hard classifier, the 7
+    archetype probes as the standing smoke test. Branch losses z-scored,
+    λ annealed down (branch targets are ground truth from step 0, unlike a
+    distillation teacher), gradient cosine-gated (Du et al. 2018) so a
+    branch cannot hurt the route loss by construction, λ tuned on the
+    route validation metric only.
+    (f) *No feature column ever supervises the model.* The per-feature
+    recoverability question ("can the embedding see identifiers?") is an
+    offline linear probe on frozen inputs and latent — a diagnostic with
+    zero gradient. This is where the curation-bias objection closes: the
+    only human-designed structures that touch the weights are
+    dataset-native — cells, gold docs, outcomes — each already policed by
+    its own falsification loop.
+    (g) *Sequencing: prototype on dataset v2 now; reportable numbers ride
+    the v3 dataset build.* The catalog is stale in the exact columns cell
+    predicates read (d56e/d62 re-extraction owed, blocked on the taxonomy
+    repo's 92 red round-trip tests), so v2 cell targets are wrong for
+    digit-bearing queries. Rather than a bug-fix rerun, the extractor
+    repairs land inside the v3 build together with more data and better
+    augmentation. v2 numbers are shakedown; v3 numbers are the arm
+    comparison of record.
+    (h) *Code shape: own package `src/encoder_router/` (the composition/
+    precedent — user's call over the single-module recommendation),
+    experiments surfaced through a notebook the user runs; deps: torch
+    (direct pin), lightgbm.* Plain PyTorch with a hand loop — every
+    tabular framework surveyed makes the branches harder, not easier.
+    sanity-check 2026-08-11: KEEP — rungs 1–3 (production classifier, LR,
+    AcceptabilityRouter) are measured below the ceiling this exists to
+    lift; the GBDT rung is embedded as arm 5; revisit if arm 5 matches
+    arm 1 on holdout routes_differ (then ship the trees).
+    — *The through-line of the grill: every "which features?" question
+    dissolved into "which dataset-native structure already owns this?" —
+    cells over span columns, predicates over assignments, measured
+    outcomes over hand priors. The model is supervised by the dataset's
+    own artifacts, and the dataset was built to be exactly that.*
+
+64. **Ceiling levers ride one re-measurement** (grill-me 2026-08-12; the
+    "remaining levers" triage after the playground exposed the harness).
+    (a) *Nothing is adopted until the arm sweep re-runs on the repaired
+    harness.* This session's fixes invalidate every v3 panel number: early
+    stopping restored epoch-0 weights on every fold (validation used
+    unweighted BCE, which RISES as the pos_weighted training objective
+    converges — the two losses disagreed about what "better" means), and
+    serving/threshold-tuning carried a cost discount now removed (thresholds
+    maximize raw captured score; serve = most probable head among those
+    clearing thresholds, rrf hedge when none fires; cost never picks between
+    heads). Re-run the 10-lane panel on a fresh results path, plus a
+    learning curve (25/50/100% of fit rows, fixed val split) — hours of
+    compute, zero new design, and every lever below reads its go/no-go off
+    this readout.
+    (b) *The serve-time constraint stays hard: the router sees the raw query
+    string only.* No extractor, no corpus, no spaCy at inference — "we
+    generalize features, we do not extract them": feature knowledge enters
+    through privileged branches that teach the model to estimate at serve
+    time what it cannot compute there. Bundled static data (a frequency
+    table) is admissible; a runtime dependency is not. CONTEXT.md updated.
+    (c) *Two new arms instead of the d63 proxy trigger.* `zipf_channel`:
+    design inputs ⊕ query-local rarity scalars from a background-frequency
+    table (wordfreq dep; min/mean/max token Zipf, share below a rarity
+    cutoff, share absent from the table — the hex digest maxes the last).
+    `feature_branch`: taxonomy features as a third privileged branch's
+    TARGETS (the admissible form of arm 2, whose serve-time inputs violate
+    (b)). Supersedes d63's deferred "rarity input channel if arm 2 > arm 1
+    on sparse wins" — for the same compute the sweep measures both designs
+    directly. Adoption rule: beats design on differ_agreement, checked
+    specifically on sparse-win rows.
+    (d) *Labels: the cheap repairs land BEFORE the re-run; the expensive one
+    waits for it.* Now: raise beir-nfcorpus min_relevance (the §1b audit:
+    95.3% of its qrels are grade 1, weak positives counted as full
+    successes) and relabel that lane; fix the two Option A blockers
+    (GoldenRoutingBuilder round-trip contradiction, stale nfcorpus oracle
+    cache) — they are correctness debts regardless. Option A itself
+    (LLM-judge tied-row tails, PPI spine) is spend, gated on the readout:
+    if the new arms move differ_agreement, inputs were binding and A waits;
+    if every arm stays flat under honest training, label noise is the prime
+    suspect and A jumps the queue. Ordering is load-bearing: the relabel
+    changes one lane's labels, so after-the-sweep would mix label regimes.
+    (e) *Composition gated on the learning curve; "more data" means decisive
+    rows in thin archetypes, never more of the same.* Flat by 50→100% ⇒ the
+    lever closes this cycle (the v3 build continues on its own d63g gate).
+    Still sloping at 100% ⇒ the buy order is d50(g) cell-conditioned
+    generation — which means finally unblocking distractor borrowing — not
+    more fat-lane natural rows, which mostly add ties. Bundled proxy, free
+    with the re-run batch: a TIE_WEIGHT sweep (0 / 0.25 / 1.0) — if
+    excluding ties helps validation, that is the same
+    decisive-rows-matter-most hypothesis confirmed before any generation
+    spend.
+    — *The through-line: every lever already had a standing decision or a
+    designed next step; what was missing was a trustworthy measurement to
+    arbitrate between them. One re-run buys arbitration for all three.*
+
+65. **Query authorship is a card fact, never inferred** (grill-me 2026-08-24).
+    The v3 showcase reported 71,966 rows as "natural (real user query)" when
+    52,343 of them are ScIRGen-Geo, whose own catalog entry calls it
+    synthetic-but-filtered LLM generation, and 723 are LIMIT, constructed from
+    a template. Nothing on `DatasetCard` recorded authorship, and `llm_target`
+    does not: it describes the retrieval task's orientation and is `True` for
+    CRUMB, whose queries no model wrote as far as anyone has checked.
+    `DatasetCard.query_provenance: QueryProvenance` now carries it —
+    `HUMAN | LLM | TEMPLATE | UNKNOWN`, **with no default**, so a new
+    registration cannot pass silently as human-written. `UNKNOWN` is a
+    ratification state in the sense of decision 7 (profiling proposes, a human
+    ratifies), not a fallback: the eight CRUMB lanes hold it until someone
+    reads the upstream card, and any consumer that groups by provenance shows
+    them as unratified rather than folding them into `HUMAN`. Two consequences
+    worth stating, because they are the reason the field earns its place:
+    the published half of v3's supply is ~74% machine-written, so v3's claim
+    was never "our queries are human" but "our minted queries are grounded in
+    a real corpus document and their route labels were earned by retrieval";
+    and a boolean would have been wrong, since LIMIT has no author at all.
+
+71. **Per-lane card generator (`CardGenerator`) validated on 6 negative-bearing
+    lanes; the binding constraint on further recall is definitional, not
+    technical (2026-09-07).** `scripts/card_transfer.py` runs paired A/B
+    (arm A: universal INSTRUCTION only; arm B: universal + `G(lane)` card) on
+    crumb-clinical-trial, wands, dbpedia-entity, freshstack-{langchain,laravel},
+    miracl-en-dev — the six referee lanes with both human positives AND
+    negatives, so precision and recall are simultaneously measurable. On the
+    two task-family twins for deploy lanes (dbpedia ~ quest, crumb-clinical ~
+    crumb-legal-qa) G delivered **Δrecall +0.180 and +0.110 with zero
+    card-caused false positives** — matching hand-card effectiveness (+13.0%
+    mean on the 5 deploy lanes per d69). Aggregate across all 6 test lanes was
+    only +5.3%, dragged down by 3 lanes where cards were structurally inert.
+
+    Three-agent triangulation (fable, opus×2) on why the 3 lanes were inert:
+    **~57% of the residual false-negative gap is definitional** (partial-grade
+    matches the strict standard correctly rejects; loosening trades precision
+    blind), plus ~13% judge literalism on numeric equivalence (miracl), plus
+    ~5% lanes where the graded-relevance boundary is invisible to any
+    metadata bundle (wands, freshstack-laravel gold is nugget-based). Only
+    ~25–35% of the remaining gap on the twin lanes is bundle-addressable —
+    and even a hand-tuned card cannot exceed what a strict, gate-safe rule
+    can encode. Model upgrades are the wrong lever: G's cards already fire
+    correctly per their input; the ceiling is what a strict card CAN say, not
+    how well it's written.
+
+    Bundle-content fix APPLIED (`card_generator._lane_metadata`): stratified
+    query sampling across short/long × set-cue/no-cue buckets (dbpedia's
+    "list of X" queries now surface), and up to 3 grade-0 negatives per query
+    with a fallback that keeps trying candidates when the first doc_ids don't
+    resolve to loaded corpus text (a silent zero-snippet bug the first pass
+    hit on dbpedia). Post-fix per-lane negative snippet counts: wands 15,
+    freshstack-{laravel,langchain} 15/13, crumb-clinical 11, dbpedia 1,
+    miracl 0 (last two data-bound — grade-0 doc_ids point outside the loaded
+    corpus). Expected additional lift on twin lanes: +5–8pp; the definitional
+    residue remains unaddressed and is CORRECT-per-standard, not a defect.
+
+    STANDING: the generator mechanism is safe on all 6 lanes (Δfpr ≤ +0.01,
+    max 1 fp on 100 negatives); useful where a card is warranted; and its
+    average lift across a mixed lane population is modest by construction
+    because most lanes don't need cards. Deploy G on deploy lanes with this
+    caveat: the aggregate lift claim is misleading — quote per-lane twin
+    numbers instead. `wands`/`freshstack` recall gap is a strict-vs-topical
+    definitional gap; do not "fix" it by loosening cards without changing
+    what min_relevance selects. Artifacts:
+    `src/data/relevance_judge/card_transfer/{predictions_{baseline,carded},summary}.parquet`
+    and `generated_cards.parquet`.
 
 ## Deferred questions
 
-- Recipe values remaining after d32's macro-split (50K; 60/20/20; entity
-  slice 80/20; dark forest ≥3 champions, ≤50% each): per-cell floor sizes
-  (d30a precision rule), per-span-type target amounts, minimum natural
-  share, harvest-target N, per-quota per-dataset source cap (d29 default
-  ≤50%).
 - Register/box definitions for eval-time weighting + page-search log
   acquisition (d30; boxes wait for a real log).
 - Judgment-shaped MODEL features (word-order sensitivity, syntactic depth,
@@ -1666,30 +1121,8 @@ breadth; strategy labeling is explicitly a later stage.
   from lane corpus parquets, registry untouched (consistent with d39a).
   The richer candidates (vocabulary mismatch, ambiguity, specificity)
   reopen only if the d44(c) transfer pilot's captured headroom stalls.
-- Strategy labeling stage: empirical dense/sparse/hybrid labels in
-  `src/hybrid_search_rrf_dataset`, scored by d37(a)'s objective (was "via
-  NDCG"). Remaining: pool extraction; the unanswerable-query outcome
-  (d37i) resolved by d41 (route = null); corpus sizing settled
-  composition-wide by d39(e)'s threshold rule. Anchor yield (d37j)
-  measured 2026-07-28, msmarco lane 2026-07-29:
-  `data/route_labels/labels.parquet` (8,020 rows).
-- Pass-1 reality check (d39): per-lane qrels_ready counts are unknown
-  until the fetches run — msmarco's 49.1% says declared QQ grounding
-  does not guarantee per-query coverage. Re-price wave order if a lane
-  comes back thin. Qrels dialects (RAR-b tsv, BRIGHT gold_ids +
-  excluded_ids, crumb/quest/limit lists) verified at implementation.
 - msmarco corpus scale-up past 100K if margins look corpus-limited —
   recipe is a parameter (d38c), embedding cache amortizes the retry.
-- ORCAS click-lane labeling (the other 31% of the composition): clicks are
-  weak relevance of a different kind (`source='click'` in QrelStore, d37d)
-  — own decision, not lumped into qrels-lane work.
-- ILP escalation for quota conflicts (solver choice, formulation).
-- Next acquisitions: CLERC, the 9 unregistered BRIGHT splits, further BEIR
-  subsets (ORCAS with `recommended_sample=100K` + 3 BRIGHT splits
-  registered 2026-07-20, d21/d31).
-- Enrichment grounding layer (d34a) — resolved: d40 (admission rules) +
-  d42 (generation-side design: supply index, Inject ladder, operator
-  declarations). Implementation tracked in TODOS d42.
 - StatRewrite entries beyond (length, up) — reopen when a band goes
   hungry; a "telegram queries feel underrepresented" instinct is a
   recipe/band question first, demand second (d42d).
@@ -1697,18 +1130,455 @@ breadth; strategy labeling is explicitly a later stage.
   implementation, informed by the Decorate pilot batches.
 - Hungry-floor rung assignment (d42f) — pending the supply-scan readout
   (augmentation_supply.ipynb, three cells left to run).
-- Corruption operators' home (R5 programmatic damage):
-  taxonomy-generators later wave vs parent-repo lane (d34d).
-- Orchestrator-LLM batch lane (d10/d34e) — superseded by d42's Augmenter
-  (the agentic tool loop with local-verify acceptance IS that lane).
 - Realism overrides over the d34b defaults: which features need them is
   discovered empirically from seeded round-trip samples, not decided up
   front.
-- Demo (b) infrastructure: corpus indexing + local Qdrant
-  (docker-compose.yml exists) for the disagreement measurement.
 - Model backstop for CODE_FRAGMENT/MATH_EXPRESSION recall (symbol-light
   formal content: "x squared plus y squared", prose pseudo-code) — layered
   bank; needs a code/math detection model choice (d20).
 - Attested search-syntax extensions to OPERATOR_SYNTAX (quoted phrases,
   minus-exclusion, `site:`) — attested in query logs but precision-dangerous;
   own decision (d20).
+- Rung 2 under d51 (d43's inversion: any lane doc carrying the surface, not the
+  parent's own gold doc). A key minted against a doc that carries the surface
+  but does not answer the parent's need is weaker than rung 1 — decide when
+  rung 1 runs dry, not before.
+- `AugmentationCampaign.pilot_n` staging under cell demand (d51). Credit gates
+  are per-operator, so one cell served by Inject stages a pilot while the same
+  cell served by Decorate does not — unexamined in the d51 grill.
+- Whether `operator:` is removed from cells.yaml or kept as a human override of
+  d51(c)'s derivation. Two sources of truth is what went stale; a veto path for
+  a mechanically-valid-but-semantically-wrong mint has no home without it.
+- Inference fallback when no acceptability head clears its threshold (d60e) —
+  a serving policy (cheapest? abstain-to-rrf?), decided at router-training
+  time, never encoded into labels.
+- `[0,0,0]` for all_zero rows (d60d) — reopens only after option A's tail
+  judging shrinks the fake-zero population enough to measure the dense-hole
+  bias instead of assuming it.
+- `GoldenRoutingBuilder` parquet round-trip inconsistency: ~147 of 46K rows
+  have `route_rankings` that contradict their stored `route_scores` (traced
+  live on gooaq 139935 — score implies the gold doc in top-10, rankings lack
+  it). The §9 noise floor; harmless to d60's view (reads labels.parquet, not
+  oracles) but must be fixed before option A judges tails from those rankings.
+- Stale `beir-nfcorpus_oracle` cache: 323 upstream queries vs the 12 the
+  composition selects — rebuild or delete before any oracle-pooled readout is
+  quoted as exact.
+- Enumerated function-word lexicon replacing the POS test entirely (d62c).
+  A closed class has finite membership, so membership could be looked up
+  rather than inferred — immune to every tagger guess, alpha or not. Costs a
+  hand-maintained vocabulary and redefines the signal from POS-based to
+  lexicon-based. Reopen on evidence, not taste: a pure-alpha out-of-vocabulary
+  token observed landing in a closed class (0 of 13 sampled).
+- Stale `cell` values on already-labelled rows after a predicate change (d62f).
+  `RouteLabels.CARRIED` copies `cell` onto every label at `label()` time, so
+  rows labelled under the old `bare_concept_token` predicate keep a membership
+  the cell no longer claims — 217 of 46,856 measured. Harmless to the scores,
+  which are measured facts and must NOT be deleted when a row leaves a cell:
+  three retrieval runs bought them, leaving a cell does not make a measurement
+  wrong, and a later predicate may claim the row back. No refresh is needed
+  today and none should be built: the canonical per-cell readout
+  (`scripts/cell_divergence.py`) reads `cell` off `cell_selection.parquet` and
+  merges rankings on `(dataset, query_id)`, exactly as `label()`'s own comment
+  says — so rebuilding the selection makes every joined readout correct and the
+  carried column is a stale copy nothing consults. Reopen only if something
+  starts reading `labels["cell"]` directly.
+- PFD teacher-student wiring (teacher sees query+corpus, student distills
+  its logits) — the literature's strongest-evidenced privileged-information
+  alternative (Taobao, +5% online), deliberately not a v1 arm. Reopen if
+  arm 1 fails to beat arm 3 (d63b).
+- Prototype/contrastive cell shaping (learned archetype anchors in latent
+  space instead of the linear multi-hot branch). Reopen if the cell branch
+  flatlines — per-cell AP ≈ 0 despite pos_weight (d63b).
+- Sparse-leg/Zipf rarity stats as a third input channel — RESOLVED by
+  d64(c) 2026-08-12: the conditional trigger is replaced by a direct
+  `zipf_channel` arm in the re-run sweep; adoption reads off its own
+  measured readout, not the arm-2 proxy.
+- If BOTH d64(c) arms (`zipf_channel`, `feature_branch`) beat design:
+  ship one, or both — a combined arm needs its own run to attribute the
+  gain before it ships.
+- Whether the label-side serve oracle (d60e cheapest-acceptable at
+  tolerance 0.3) should also drop cost, now that router serving is
+  quality-only (d64a) — differ_agreement currently compares a cost-free
+  router against a cost-aware oracle, so a residual disagreement band is
+  structural, not model error.
+- d50(g) distractor borrowing — opened only if the d64(a) learning curve
+  still slopes at 100%; flat curve keeps it closed this cycle.
+- Multilingual serving: bge-small is English-only; arm 7 previews the
+  encoder swap, but real multilingual routing also needs multilingual
+  probes and a decision on ngram-SVD script coverage (d63a).
+- Gold-doc aggregation for multi-qrel rows (v1 default: mean over docs at
+  the lane's min_relevance) and the ~5K-docs-per-lane sampling size —
+  implementation defaults; revisit only if per-lane variance is large
+  (d63b).
+
+66. **v4 composition validation: dials pinned against Layer 2 evidence, no
+    code-implementer handoff** (grill-me 2026-08-26). Resolves the eight
+    open dials of the v4 plan (`~/.claude/plans/i-feel-like-we-scalable-
+    phoenix.md` §9) using Layer 2 measured evidence
+    (`notebooks/v4_substrate_replay.ipynb`) against the shipped Rung B
+    skeleton (`src/composition/composer_v4.py`, `tests/test_compose_v4.py`,
+    13 passing property tests, 1 skipped for Rung A). No prior SPEC decision
+    superseded — each plan-local dial reinterpreted to remain compatible with
+    d48(e), d49(b), d49(c), d50(f). The plan itself explicitly rejects
+    code-implementer handoff; this entry records the dial resolution against
+    measured evidence, not a build-order.
+    (a) *Acceptance = paired Layer 3 pilot, §6 is a regression bar not a
+    verdict.* Lane-equal aggregation at n ≥ 100 per lane (per
+    `VERDICT.md:97`), three arms: constant-router null, matched-random draw,
+    v4 draw. Aggregate = mean of per-lane deltas. The §6 shortcut gate stays
+    as a build-to-build regression check between v4 iterations. The plan
+    itself retracted its "worse than random" claim after realizing §6 was
+    underpowered as a verdict.
+    (b) *N* is a label-spend ceiling, not a target (d49(b) preserved).*
+    Composition stops at the tighter of `{all cells filled, N* labels
+    spent}`. Working ceiling N* = 200,000; size |D| remains an output,
+    reported via `class_shortfall` and `waste_shortfall` on
+    `CompositionReport`.
+    (c) *κ is a global lane-share safety cap at 0.20 (d49(c) preserved).*
+    Must always be ≥ max(cell.max_lane_share); per-cell caps carry the load,
+    κ backstops.
+    (d) *π is a composition share, deliberately narrower than d50(f).*
+    Midpoint {dense: .45, sparse: .45, hybrid: .10} allocated by
+    `_largest_remainder`. The router training layer applies d50(f)'s
+    per-class floor separately — carve-out, not supersession.
+    (e) *ρ = 0.5 for large-|S_a| axes; flat f_s = 25 for axes with |S_a|
+    < 10.* Layer 2 measured: at ρ = 0.5, only 12 of 63 cells reach f_s =
+    1,587 → 81% generation debt. Consistent with d50(a): thin cells are
+    generation targets. The small-|S_a| fix is already in the skeleton.
+    (f) *θ₀ = 0.7, Δ = 0.1 (Rung A novelty, pre-registered).* Layer 2: 95%
+    stratum survival at θ = 0.7, Δ relaxation almost never fires. Rung B
+    skeleton does not use these — deferred activation until Rung A
+    `order()` ships.
+    (g) *π is a band, ±5pp uniformly, on the direct `route_class_any`.*
+    dense ∈ [40, 50], sparse ∈ [40, 50], hybrid ∈ [7, 13]. Band-pass status
+    reported in `CompositionReport`; the composer never sacrifices floors
+    to hit an exact share. Consistent with d50(f) — balance is corrected
+    at eval-time weighting.
+    (h) *Rung A class allocation via per-candidate propensity, not lane-
+    yield.* P̂(c|q) via character n-gram Jaccard kNN over the labelled pool
+    (k = 20, weighted vote, `max_sim < 0.15` = class-unknown, excluded from
+    E[n_c(B)] used for the (g) band check). Lane-yield ŷ_c(l) retires from
+    class allocation; lane budgets remain supply-driven. R0-compliant: the
+    candidate's own outcome is never referenced, only neighbors' frozen
+    labels — a finer-grained aggregate prior than lane-yield, same shape.
+    (i) *U_lo = 0.15, U_hi = 0.40 on U(D) = (1/|D|) Σ clip(m/m*, 0, 1).*
+    Symmetric protection: catches all-zero (U → 0) and cherry-pick (measured
+    U = .455 for high-margin policy) with equal ~6pp margin; realistic
+    policies (.217–.341, SD .048) sit safely in-band. U is a gate, not a
+    maximand — the composer never optimizes it.
+    (j) *δ = 0.10, 25 of 39 lanes clear AUC ≥ 0.60, held out by lane.* If
+    the `information_gain_proxy` (G, N, Π → 1[m ≥ m*]) fails the gate, kill
+    the term; Rung A falls back to §2.6 lexicographic order (already the
+    default, so failure is not catastrophic). Pre-registering δ prevents
+    base-rate hacking after the pilot lands.
+    (k) *Stability test on the Rung B skeleton: perturb ρ ∈ {0.3, 0.4}
+    (one-sided; 0.5 is the (e) ceiling, no symmetric upper perturbation
+    exists) and κ ∈ {0.15, 0.25} around the baseline (ρ=0.5, κ=0.20); pass
+    if mean Jaccard(D_baseline, D_perturbed) ≥ 0.80 AND min ≥ 0.70 across
+    the four perturbations.* Runs on an n=600 synthetic pool, not the n=240
+    Layer 1 fixture: at n=240 the κ=0.25 cascade drops Jaccard to 0.558 as
+    a small-pool artifact (cap changes shift a large fraction of a tiny
+    row set), whereas at n≥600 the numbers converge (κ=0.25 → 0.845 stable
+    through n=2400). θ perturbation deferred until Rung A ships. Lives in
+    `tests/test_stability.py`.
+    — *The plan is not a SPEC decision; it explicitly rejected
+    code-implementer handoff. Rung A `order()` implementation, catalog_v3
+    unlabelled-query extension (plan B0), Rung A propensity index, band
+    reporting on `CompositionReport`, stability test wiring, and the Layer
+    3 pilot are tracked in TODOS. Nothing here authorizes a build without
+    a further grill-me on the Rung A scope.*
+
+67. **Tie-breaking judge work-list: all tail docs, one function, framed as
+    qrels depth not router gain** (grill-me 2026-09-03). Replaces
+    `JudgeQueue.sub1_pairs()` with a single work-list method covering every
+    tied row. Supersedes nothing; implements the work half of d60 Option A
+    (TODOS "Option A (next)"), whose PPI-rectifier half stays deferred and
+    whose list-preference framing is dead under arch5k §10.
+
+    *Why the scope was wrong.* `above_gold()` documents itself as "the only
+    docs whose relevance can break a sub-1.0 tie" — true for the HitRate@1
+    lever, false for the objective as a whole. A perfect (1.0/1.0/1.0) tie
+    breaks through the `0.3·NDCG@10` term when any tail doc is judged
+    relevant, verified on the real objective (exact tie -> margin 0.0505).
+    `sub1_pairs()` filtered `res["sub1"]`, so all 1,832 perfect ties were
+    structurally excluded: the 85-vs-1,917 gap was a code artifact, not a
+    mechanism limit. Measured on the arch5k draw's 1,595 perfect ties,
+    **0 are unbreakable** (matches TODOS' earlier "0 of 15,037 have
+    identical top-10s").
+
+    (a) **Candidate set = every route's top-k, minus gold, minus docs at the
+    identical rank in all routes.** 15.9 docs/row (25,439 for the draw).
+    Docs in all routes at *differing* ranks discriminate too (verified,
+    margin 0.0368), so the narrower "union − intersection" set (14.3/row)
+    drops ~12% of valid breakers for no reason. Same-rank-everywhere docs
+    are provably inert: they add an identical DCG and IDCG increment to
+    every route, so a tie stays a tie — one rule, valid for sub-1.0 and
+    perfect ties alike.
+
+    (b) **One function, not two.** `sub1_pairs()` deleted; the new method
+    serves all 1,917 residual tied rows. Two work-list builders would be two
+    candidate-set definitions to keep consistent (a design bug per
+    CLAUDE.md), and `sub1_pairs()` was under-serving even its own 85 rows by
+    offering only above-gold docs when tail docs break sub-1.0 ties too.
+    `above_gold()` itself is retained — the pilot notebook uses it for the
+    l2 above-gold diagnosis and three tests cover it — with its overclaiming
+    docstring corrected. Breaking callers to update:
+    `src/scripts/run_relevance_judge.py:95` and the pilot notebook's
+    `queue.sub1_pairs()` cell.
+
+    (c) **Static ranked work-list, no adaptive early-stop.** Return all
+    candidates as one inspectable frame ordered by rank-spread (widest
+    route disagreement first), stable-tiebroken by doc_id for determinism.
+    At $0.00038/judgment the draw's 1,917 tied rows yield ~30,300 judgments
+    = **~$11.50** (measured: 15.8 pairs/row over a 200-row build; the 25,439
+    figure quoted during the grill covered only the 1,595 perfect ties, not
+    all tied rows). That EXCEEDS the config's `max_spend_usd = $10`, so a
+    full pass either raises the guard or shards via `--limit` — the guard
+    truncating is safe, not a crash. Early-stop would save ~half and cost a
+    redesign (judge<->scorer interleaving couples the queue to `PilotScorer`
+    and destroys the auditable work-list). Truncation comes
+    free from `--limit` and the spend guard, and banked judgments make
+    partial runs resumable. Full v2-100K would be 393,540 judgments = $148,
+    at the bottom of d60 Option A's own $140–700 estimate.
+
+    (d) **Framed as dataset supply (qrels depth), never as router gain.**
+    A perfect tie keeps HitRate@1 = 1 for every route, so only the
+    `0.3·NDCG` term can move and the maximum reachable margin is 0.3 —
+    below `RouterObjective.decisive_margin` (`hit_weight − ndcg_weight` =
+    0.4). Measured over 360 sampled rows: every row breaks, best achievable
+    margin is **0.1161** (median = p90 = max), and **0% reach 0.4**. So
+    deep-judging moves rows all_tied -> low_margin and adds **zero** rows to
+    the router's decisive training set (`router.py:304`). Recording this in
+    the method docstring and here, because the two thresholds disagree:
+    `residual.regime()` calls 0.116 `decisive_strong` (its bar is a
+    hand-typed 0.1) while the router rejects it (bar 0.4) — a ledger read as
+    router gain would be wrong. Consistent with
+    `docs/research/relevance-judge-recovery.md` pre-registering the judge as
+    supply, not router improvement.
+
+    (e) **Binary relevance retained; graded deferred to a binary ladder.**
+    Judged atoms stay `relevance ∈ {0,1}`. Binary is sufficient — with a
+    second relevant doc, binary gold already separates NDCG@10 1.0000 vs
+    0.6131 — and it is what the 0.955-precision gate was measured on, so
+    grading would invalidate the validation and need a new per-grade gate.
+    LLMs are also more reliable on binary than on multi-point scales. If
+    depth measurement later shows grades matter, the upgrade is a ladder of
+    binary questions (rung 1 "relevant at all?", rung 2 "fully answers?"),
+    whose first rung is the question already asked — so existing atoms stay
+    valid and nothing is re-judged.
+
+    (f) **No objective change now; the dependency runs the other way.**
+    99.6% of perfect ties carry exactly one relevant doc, at rank 1 in
+    100% of routes. Under that condition HitRate@1, NDCG@10, MRR, Recall@10
+    and MAP all equal exactly 1.0, so **no weighting of this metric family
+    can separate the routes** — which is why previously-tried objectives
+    moved all_tied nothing. Depth is the only lever, so the judge is the
+    precondition for evaluating an objective, not the reverse. The
+    "tier-2 rank-win certificate" (separating a rank-1 flip from a
+    ranking-quality win, so margins in (0, 0.3] become expressible) is
+    deliberately NOT specified here: its threshold must be derived from
+    post-depth measurement, per the computed-not-assumed rule. Tracked in
+    TODOS.
+
+    *Not authorized here: the tier-2 certificate, any objective reweighting,
+    graded atoms, the PPI rectifier, and scaling beyond the draw. Each needs
+    the step-2 depth measurement first.*
+
+68. **Judge run hardening + the tie-depth pilot result: ties break, none reach
+    decisive** (session 2026-09-03). Implements d67 and reports what the first
+    paid run bought. Supersedes no decision; d67(d)'s prediction is now measured
+    rather than argued.
+
+    (a) **Measured payoff — the mechanism works, and buys only depth.**
+    5,133 atoms over 354 rows of the arch5k residual. Rescoring the v2 rankings
+    under `human ∪ judged` gold:
+
+        before \ after   all_tied  low_margin  decisive_strong
+        all_tied              189          71                0
+        low_margin              1          88                5
+
+    **71 of 260 tied rows (27.3%) broke** — ties are NOT encoder-invariant, and
+    the NDCG lever is real. But **0 of those 71 reached `decisive_strong`**; all
+    landed in `low_margin`, exactly as d67(d) predicted from the 0.3-vs-0.4
+    ceiling. The 5 decisive rows came from `low_margin`, never from a tie.
+    `qrels_hole_rate_rows` = 35.6% — a third of judged rows had a relevant doc
+    missing from qrels. Published `tie_conversion_rate` (0.209) UNDERSTATES it:
+    its denominator is all 354 rescored rows, including the 94 never tied.
+
+    (a2) **The true-l2 run closes the stack caveat and splits the tie mass in
+    two.** Re-retrieving l2 rankings live (no v2 proxy) over the sub-1.0 tie
+    population — all 85 of them — gives 80 tied before, **18 broke (22.5%), of
+    which 2 reached `decisive_strong`** and 16 `low_margin`. That is not a
+    contradiction of (a); the two runs cover complementary halves, and the
+    mechanism predicts both:
+
+    | population | share of `all_tied` | tied | broke | -> decisive | -> low_margin |
+    |---|---|---|---|---|---|
+    | perfect (score = 1.0) | 1,832 (95.6%) | 260 (v2) | 71 (27.3%) | **0** | 71 |
+    | sub-1.0 (score < 1.0) | 85 (4.4%) | 80 (l2) | 18 (22.5%) | **2** | 16 |
+
+    A perfect tie has gold at rank 1 in EVERY route, so `HitRate@1` is already
+    maxed and only the `0.3*NDCG` term can move — capped below the 0.4 bar, hence
+    0. A sub-1.0 tie does not, so judging an ABOVE-GOLD doc relevant flips
+    `HitRate@1` and the margin can clear 0.4 — hence 2. So d67(d)'s ceiling holds
+    exactly where it was argued (perfect ties) and the `above_gold` lever d67(b)
+    kept is what produces the only decisive rows.
+
+    **Router yield is still negligible: 2 decisive rows out of 1,917 tied rows
+    (0.1%)**, or ~26 rows if scaled to v2-100K's 24,751 ties. The program remains
+    **qrels depth / dataset supply and nothing else**; any ledger reading these
+    conversions as router gain is wrong.
+
+    (b) **Sparse discovers more missing gold than dense** — discovered-relevance
+    rate 6.3% sparse / 6.5% rrf / 5.0% dense. A small counter-signal to arch5k
+    finding 4's 87%-dense skew, in the direction the os_distill upgrade
+    ([[project-leg2-sparse-bakeoff]]) would push further. Not a router claim.
+
+    (c) **Reasoning suppression is the whole latency story; the prompt paid for
+    the precision.** luna is a reasoning model. Sent only as nested
+    `extra_body={"reasoning":{"effort":...}}` it reasoned anyway at ~60s/call;
+    adding the top-level `reasoning_effort` param drops it to **~1.2s (50x)**.
+    Precision then moved 0.955 (full reasoning) -> **0.905** (suppressed,
+    verdict-first prompt) -> **0.932** (`ASKED:` evidence line before the
+    verdict) -> **0.988** (instruction rewritten from a measured failure brief,
+    `docs/research/judge-prompt-brief.md`), at `anchor_recall` 0.7225 over the
+    0.6 floor. So the accuracy lost to suppression was recovered by prompt
+    design, not by paying 50x latency — and the winning version beats full
+    reasoning. Verdict-FIRST is specifically wrong for a non-reasoning judge:
+    it commits before examining, then rationalises.
+
+    (d) **Pricing was 2x over-budgeted.** Engine rates corrected to OpenRouter's
+    published card for `openai/gpt-5.6-luna`: **$0.20/M in, $1.20/M out** (were
+    0.40/1.60 placeholders the config itself flagged as provisional). The full
+    tie run re-costs from $13.10 to **~$7.00**, inside the existing $10 guard, so
+    d67(c)'s "raise the guard or shard" question is moot. A `:batch` variant
+    halves it again and was REJECTED: at 19 min and $7 it cannot repay an
+    async submit/poll code path.
+
+    (e) **Four paid-path defects, each with a regression test.**
+    - `judge_pairs` and `judge_rows` both flushed their verdict buffer AFTER the
+      loop, so a `BudgetExceeded` arriving through `windowed_map`'s
+      `future.result()` discarded up to 99 (resp. 49) already-PAID verdicts.
+      Both wrapped in `try/finally`.
+    - `judge_one` caught only `TRANSIENT_PROVIDER_ERRORS`, so any other provider
+      error abandoned every remaining pair — observed killing a run after 2 of
+      3,600. Now catches broadly (re-raising `BudgetExceeded` alone, which MUST
+      stop the run) and counts by exception name.
+    - A reply cut off at the token cap loses its `VERDICT:` line, parses to
+      nothing, and is discarded: **249 paid pairs (5.2%) lost in one run**. The
+      cap is now a config knob (128 -> 256) AND `finish_reason == "length"`
+      triggers ONE retry at double the cap; non-truncated garbage is not retried
+      (it would only pay twice). Re-running recovered all 249 with 0 unreadable.
+    - Swallowed errors were invisible, which is why a 60s/call provider looked
+      like a hung run and a format regression looked like a provider blip.
+      `RelevanceJudge.dropped` / `.dropped_detail` / `.unreadable` now count by
+      cause, keep the first message per type, and sample raw unparseable replies;
+      both run paths print them. `judge_rows` also stopped discarding its `Spend`
+      and now reports cost live on the bar and as `spend_usd` in the report.
+
+    (f) **The validation gate is a TRANSFER estimate, and says so.** The 12
+    negative-bearing referee lanes and the 6 lanes the judge is applied to are
+    **disjoint** — the deploy lanes ship positive-only qrels, so precision is
+    structurally unmeasurable there (a judged-relevant unjudged doc is
+    indistinguishable from the qrels hole the judge exists to fill). `score()`
+    now emits `precision_is_transfer_estimate`, `referee_lanes`,
+    `deploy_lanes_refereed` / `_unrefereed`, and a random-corpus pseudo-negative
+    false-positive rate measured ON the deploy lanes — kept strictly OUT of every
+    gate metric (a `pseudo` flag), because random docs are far easier to reject
+    than human-judged near-misses and pooling them would inflate precision
+    exactly where it is least earned. This bounds gross over-calling only; the
+    near-miss boundary, where a relevance judge actually fails, stays unmeasured
+    on the deployment population.
+
+    *Known-unfixed: neither litellm's per-call `timeout=` kwarg nor the
+    module-level `litellm.request_timeout` bounds a call on this OpenRouter path
+    (a `timeout=30` call was measured completing at 60.9s; a probe with the
+    global set to 90 ran past 120s). There is currently NO working per-call
+    ceiling, so one stalled request parks a worker indefinitely. At ~1.2s typical
+    this is low-impact but unresolved — tracked in TODOS.*
+
+69. **Per-lane task context for the judge: recall +46% at no precision cost from
+    the cards** (session 2026-09-05). The judge applied one question-answering
+    definition of "relevant" to lanes whose task is not question-answering.
+    Reading the deploy-lane false negatives showed five DIFFERENT failures, not
+    one recall problem — which is why no single lever had presented itself.
+
+    (a) **The diagnosis, per lane.** Recall against human gold on the six lanes
+    the judge is applied to ranged 0.055–0.980. The failures decompose:
+
+    | lane | recall | what was actually wrong |
+    |---|---|---|
+    | quest | 0.165 | queries are boolean set expressions; the judge read OR as AND |
+    | finder | 0.105 | terse analyst shorthand; gold SUPPLIES figures, judge demanded the analysis |
+    | clerc | 0.265 | query is a legal passage TRUNCATED at the citation point — no question is asked |
+    | scirgen-geo-en | 0.185 | query GENERATED FROM the gold record; gold is "derived-from", not "answers" |
+    | crumb-legal-qa | 0.055 | gold is wrong (attorney-fees query paired with a violations-against-elderly statute) |
+    | rarb-math | 0.980 | works; its 4 misses reject solutions with wrong arithmetic |
+
+    The quest case was a comprehension bug, not strictness: "2004 Italian novels
+    or about secret societies or books by Eco" -> "It is an Eco book, but lacks
+    the other requested attributes" -> REJECTED. 56 of 167 false negatives were
+    explicitly disjunctive queries rejected for satisfying only one alternative.
+
+    (b) **Root cause was in the universal contract, not the lanes.** `ASKED: the
+    ONE thing the query needs` plus `MISSING: whatever THE QUERY needs that the
+    document never states` made a disjunctive query structurally unanswerable —
+    a document satisfying one of "A or B or C" put A and B in MISSING, and the
+    mechanical rule "MISSING names anything -> no" rejected it. No per-lane card
+    can override arithmetic. Fixed by (i) `ASKED` naming the single alternative
+    THIS document could satisfy, and (ii) rebinding `MISSING` to ASKED rather
+    than to the whole query ("an alternative ASKED did not name is not missing").
+
+    (c) **`relevance_judge/lane_context.py`** — a per-lane card of five fields
+    (task / queries / gold / judging / benchmark). Rendered into the SYSTEM turn
+    after the universal rules, so a card NARROWS what counts as relevant for a
+    collection and never loosens the standard of evidence. `benchmark` is stored
+    for humans and deliberately NOT sent: it never changes a verdict and would
+    cost tokens on every call. The card is hashed into `prompt_hash`, or two
+    lanes' atoms would record identical provenance. `crumb-legal-qa` is
+    DELIBERATELY uncarded — no card can be written without rationalising labels
+    that look simply wrong, and a missing card falls back to the universal
+    instruction, which is the safe default.
+
+    (d) **Measured on a full n=3,600 sample, both stages carded.**
+
+    | lane | before | after | change |
+    |---|---|---|---|
+    | clerc | 0.265 | **0.590** | +0.325 |
+    | quest | 0.165 | **0.465** | +0.300 |
+    | finder | 0.105 | 0.205 | +0.100 |
+    | scirgen-geo-en | 0.185 | 0.245 | +0.060 |
+    | rarb-math | 0.980 | 0.980 | 0.000 |
+    | crumb-legal-qa (uncarded) | 0.055 | 0.075 | +0.020 |
+    | **deploy pooled** | **0.292** | **0.427** | **+0.135 (+46% rel)** |
+
+    Precision 0.9882 -> 0.9683 (8 false positives, gate 0.95). **All 8 are in
+    `freshstack-*` lanes and NONE in a carded lane** — carded lanes are
+    positive-only and structurally cannot produce a false positive, so the cards
+    are provably free on precision and the ~0.02 cost is attributable solely to
+    the universal (b) edit. The uncarded `crumb-legal-qa` barely moving is the
+    control: it confirms the gains came from the cards, not run-to-run drift.
+
+    (e) **Both stages must send the same cards.** `judge_rows` (the gate) and
+    `judge_pairs` (which writes gold) call one `judge_one`, and both pass the
+    row's `dataset`. Had only the banking stage been carded, the gate would
+    certify an instrument that never runs — the same structural error as the
+    disjoint referee/deploy lanes, self-inflicted. Tested per-row: five lanes in
+    one batch produce five distinct system prompts.
+
+    (f) **Transport faults are retried, not discarded.** One run lost 2,115 of
+    3,600 pairs to `OpenrouterException - [Errno 61] Connection refused` and
+    reported a MEANINGLESS precision of 1.0 — the drops fell hardest on
+    `freshstack` (10% sampled), the lanes carrying 83% of all false positives,
+    so the hard cases were removed by the failure mode. A refused connection
+    reaches no model, costs nothing, and is pure lost work: `connect_retries=3`
+    with linear backoff now recovers it. Request-level rejections are NOT
+    retried (they would fail identically). Matched on the message, because
+    litellm wraps the socket error and erases its type. `llm_workers` 32 -> 12,
+    and litellm's per-error stderr banner is suppressed — at 32 workers it
+    buried the run's own output while telling us nothing.
+
+    *Caveat that travels: precision is still measured only on the 12 uncarded
+    referee lanes, so the cards' effect on precision is unmeasured, not proven
+    zero — the argument is structural (positive-only lanes cannot produce a false
+    positive), not empirical.*

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -41,6 +43,10 @@ class FusionRow(BaseModel):
     metric: float
     metric_name: str
     strategy_name: StrategyName
+    provenance: str = "natural"
+    """The query's own origin (`RetrievalDataset.provenance()`) — natural
+    unless the source declares otherwise. Defaulted so rows written before
+    this field existed still load."""
 
 
 class BaselineDataset(FusionRow):
@@ -65,6 +71,33 @@ class GoldenRoutingDataset(FusionRow):
 
     route_scores: dict[str, float] = Field(default_factory=dict)
     route_rankings: dict[str, list[str]] = Field(default_factory=dict)
+    route_raw_scores: dict[str, list[float]] = Field(default_factory=dict)
+    """Each route's own retrieval score (cosine/BM25/RRF-fused), parallel to
+    `route_rankings[route]` by position"""
+
+
+REGIME_SUFFIX = ".provenance.json"
+"""Sidecar naming, shared with `scripts/rederive_labels.py`."""
+
+
+class ScoringRegime(BaseModel):
+    """The scoring inputs `metric_name` cannot show — the relevance threshold,
+    each route's fetch depth, and the model behind each vector slot.
+
+    Written beside a cache and compared on load, because `Objective.name` is
+    invariant to all three: nfcorpus' `min_relevance` 1→2 and `fetch_limit`
+    1000→50 each moved scores under an unchanged name, and a swapped encoder
+    moves every dense rank the same way.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    objective: str
+    min_relevance: int
+    fetch_limit: dict[str, int]
+    slots: dict[str, str] = Field(default_factory=dict)
+    """Vector slot name -> model id. Defaulted so sidecars written before the
+    encoder was fingerprinted still load."""
 
 
 class QueryContext(BaseModel):
@@ -81,6 +114,7 @@ class QueryContext(BaseModel):
     query: str
     gold_qrel: dict[str, int]
     dataset_name: str
+    provenance: str = "natural"
 
 
 T = TypeVar("T", bound=FusionRow)
@@ -95,6 +129,9 @@ class LLMScoreClient:
     """
 
     SCORE_MAX = 9
+    MAX_BYTES = 4096
+    """The server's cap is on encoded bytes, not characters — measured: every
+    payload it refused was >4096 bytes, none was under."""
 
     def __init__(
         self,
@@ -113,11 +150,16 @@ class LLMScoreClient:
         self._api_key = key
         self._timeout = request_timeout
 
+    @classmethod
+    def fit(cls, query: str) -> str:
+        """`query` cut to the server's byte cap, never mid-character."""
+        return query.encode()[: cls.MAX_BYTES].decode(errors="ignore")
+
     def score(self, query: str) -> int:
         response = requests.post(
             self._api_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={"text": query},
+            json={"text": self.fit(query)},
             timeout=self._timeout,
         )
         response.raise_for_status()
@@ -147,10 +189,28 @@ class FusionBuilder(ABC, Generic[T]):
             for qid, docs in (excluded or {}).items()
         }
 
+    @property
+    @abstractmethod
+    def strategies(self) -> list[FusionStrategy]:
+        """Every route this builder queries."""
+
+    @property
+    def regime(self) -> ScoringRegime:
+        return ScoringRegime(
+            objective=self.objective.name,
+            min_relevance=self.objective.min_relevance,
+            fetch_limit={str(s.name): s.fetch_limit for s in self.strategies},
+            slots={
+                cfg.name: cfg.model_id
+                for s in self.strategies
+                for cfg in (s.dense_cfg, s.sparse_cfg)
+            },
+        )
+
     def _ranked(self, strategy: FusionStrategy, ctx: QueryContext) -> dict[str, float]:
         """Rank, then drop the query's excluded docs before scoring. Exclusion is per-query: a doc excluded here
-        can be another query's gold, so the corpus keeps it and the fetch
-        depth (1000) refills the cutoff."""
+        can be another query's gold, so the corpus keeps it and the strategy's
+        own `fetch_limit` refills the cutoff."""
         ranking = strategy.rank(ctx.query)
         banned = self._excluded.get(ctx.query_id)
         if not banned:
@@ -165,6 +225,8 @@ class FusionBuilder(ABC, Generic[T]):
     ) -> Iterator[QueryContext]:
         store = qrels or QrelStore.from_dataset(dataset)
         by_query = store.lookup(dataset.name)
+        prov_df = dataset.provenance()
+        provenance = dict(zip(prov_df["query_id"].astype(str), prov_df["provenance"]))
         queries_df = dataset.queries()
         for i, q in enumerate(
             tqdm(
@@ -183,6 +245,7 @@ class FusionBuilder(ABC, Generic[T]):
                 query=str(q.text),
                 gold_qrel=gold,
                 dataset_name=dataset.name,
+                provenance=provenance.get(qid, "natural"),
             )
 
     def _row(
@@ -205,6 +268,7 @@ class FusionBuilder(ABC, Generic[T]):
             metric=score,
             metric_name=self.objective.name,
             strategy_name=strategy_name,
+            provenance=ctx.provenance,
             **extra,
         )
 
@@ -216,19 +280,61 @@ class FusionBuilder(ABC, Generic[T]):
         dataset: RetrievalDataset,
         start_id: int = 0,
         qrels: QrelStore | None = None,
+        *,
+        max_workers: int = 1,
     ) -> list[T]:
         """Score `dataset`'s queries. Pass `qrels` to judge against a store
-        other than the dataset's own — an LLM lane, or lanes merged."""
-        return [
-            self.build_row(ctx)
-            for ctx in self._iter_queries(dataset, start_id, qrels)
-        ]
+        other than the dataset's own — an LLM lane, or lanes merged.
+
+        `max_workers` > 1 overlaps queries on a thread pool — worth it once a
+        strategy's calls are network-bound (a cloud dense slot over
+        OpenRouter: httpx's client is safe for concurrent use, verified).
+        Pointless for local fastembed, which is CPU/GIL-bound and serializes
+        regardless. Default 1 keeps every existing caller's behaviour and
+        exact row order unchanged. Note: with workers>1 `_iter_queries`'s own
+        bar tracks queries SUBMITTED, not completed — it fills the moment work
+        is scheduled; the `done:` bar below is the one that reflects real
+        completions, ticking as each row's three searches finish."""
+        contexts = self._iter_queries(dataset, start_id, qrels)
+        if max_workers <= 1:
+            return [self.build_row(ctx) for ctx in contexts]
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(self.build_row, ctx) for ctx in contexts]
+            for _ in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"done:{dataset.name}", unit="row", leave=False):
+                pass
+            return [f.result() for f in futures]  # submission order preserved
 
     def save(self, rows: list[T], path: Path | str | None = None) -> Path:
         out = Path(path or self.default_dir)
         out.mkdir(parents=True, exist_ok=True)
         file = out / "rows.parquet"
         pd.DataFrame([r.model_dump() for r in rows]).to_parquet(file, index=False)
+        file.with_suffix(REGIME_SUFFIX).write_text(
+            self.regime.model_dump_json(indent=2) + "\n"
+        )
+        return file
+
+    def append(self, rows: list[T], path: Path | str | None = None) -> Path:
+        """Add `rows` to a cache, starting one if absent and keeping the newest
+        row per query — `RouteLabels.label` caches chunk by chunk, so the whole
+        lane is never in hand at once."""
+        out = Path(path or self.default_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        file = out / "rows.parquet"
+        frame = pd.DataFrame([r.model_dump() for r in rows])
+        if file.exists():
+            self._assert_regime(file)
+            # ponytail: read-modify-write per chunk, quadratic in chunk count.
+            # Same shape the labels artifact itself already accepts; move to
+            # row-group append if a lane's cache outgrows memory.
+            frame = pd.concat(
+                [pd.read_parquet(file), frame], ignore_index=True
+            ).drop_duplicates("query_id", keep="last")
+        frame.to_parquet(file, index=False)
+        file.with_suffix(REGIME_SUFFIX).write_text(
+            self.regime.model_dump_json(indent=2) + "\n"
+        )
         return file
 
     @classmethod
@@ -253,18 +359,44 @@ class FusionBuilder(ABC, Generic[T]):
         file = Path(path or self.default_dir) / "rows.parquet"
         if file.exists():
             rows = type(self).load(path)
-            stale = {r.metric_name for r in rows} - {self.objective.name}
-            if stale:
-                raise ValueError(
-                    f"{file} holds rows scored with {sorted(stale)}, but this "
-                    f"builder is configured for {self.objective.name!r}. Delete "
-                    f"the file to rebuild, or point at a different path — "
-                    f"mixing objectives silently would corrupt every comparison."
-                )
+            self._assert_reusable(file, rows)
             return rows
         rows = self.build(dataset, start_id=start_id, qrels=qrels)
         self.save(rows, path)
         return rows
+
+    def _assert_reusable(self, file: Path, rows: list[T]) -> None:
+        """Refuse a cache scored under a different objective or regime."""
+        stale = {r.metric_name for r in rows} - {self.objective.name}
+        if stale:
+            raise ValueError(
+                f"{file} holds rows scored with {sorted(stale)}, but this "
+                f"builder is configured for {self.objective.name!r}. Delete "
+                f"the file to rebuild, or point at a different path — "
+                f"mixing objectives silently would corrupt every comparison."
+            )
+        self._assert_regime(file)
+
+    def _assert_regime(self, file: Path) -> None:
+        """Refuse a cache whose sidecar records different scoring inputs."""
+        sidecar = file.with_suffix(REGIME_SUFFIX)
+        if not sidecar.exists():
+            warnings.warn(
+                f"{file} carries no {REGIME_SUFFIX} sidecar, so its "
+                f"min_relevance, fetch_limit and vector slots cannot be "
+                f"checked against {self.regime.model_dump()} — reuse is "
+                f"unverified. Rebuild to record them.",
+                stacklevel=3,
+            )
+            return
+        cached = ScoringRegime.model_validate_json(sidecar.read_text())
+        if cached != self.regime:
+            raise ValueError(
+                f"{file} was scored under {cached.model_dump()}, but this "
+                f"builder is configured for {self.regime.model_dump()}. Each "
+                f"moves the score while leaving metric_name untouched. Delete "
+                f"the file to rebuild, or point at a different path."
+            )
 
 
 class SingleStrategyBuilder(FusionBuilder[T], ABC):
@@ -279,6 +411,10 @@ class SingleStrategyBuilder(FusionBuilder[T], ABC):
     ) -> None:
         super().__init__(objective=objective, excluded=excluded)
         self.strategy = strategy
+
+    @property
+    def strategies(self) -> list[FusionStrategy]:
+        return [self.strategy]
 
 
 class RoutingBuilder(FusionBuilder[T], ABC):
@@ -301,8 +437,12 @@ class RoutingBuilder(FusionBuilder[T], ABC):
         super().__init__(objective=objective, excluded=excluded)
         self._routes = [dense_strategy, hybrid_strategy, sparse_strategy]
 
+    @property
+    def strategies(self) -> list[FusionStrategy]:
+        return self._routes
+
     def _by_name(self, name: StrategyName) -> FusionStrategy:
-        return next(s for s in self._routes if s.name == name)
+        return next(s for s in self.strategies if s.name == name)
 
 
 class BaselineBuilder(SingleStrategyBuilder[BaselineDataset]):
@@ -345,11 +485,10 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
     default_dir: ClassVar[Path] = Path("data/golden_routing")
 
     def build_row(self, ctx: QueryContext) -> GoldenRoutingDataset:
+        rankings = {s.name: self._ranked(s, ctx) for s in self.strategies}
         assessed = {
-            strategy.name: self.objective.assess(
-                self._ranked(strategy, ctx), ctx.gold_qrel
-            )
-            for strategy in self._routes
+            name: self.objective.assess(ranking, ctx.gold_qrel)
+            for name, ranking in rankings.items()
         }
         scores = {name: s for name, (s, _) in assessed.items()}
         serve = derive_route(scores)
@@ -361,6 +500,10 @@ class GoldenRoutingBuilder(RoutingBuilder[GoldenRoutingDataset]):
             strategy_name=serve,
             route_scores=scores,
             route_rankings={name: r for name, (_, r) in assessed.items()},
+            route_raw_scores={
+                name: [rankings[name][doc] for doc in r]
+                for name, (_, r) in assessed.items()
+            },
         )
 
 
@@ -401,7 +544,7 @@ class HybridRoutingBuilder(RoutingBuilder[HybridRoutingDataset]):
         self._client = client or LLMScoreClient()
 
     def _route(self, score: int) -> FusionStrategy:
-        dense, hybrid, sparse = self._routes
+        dense, hybrid, sparse = self.strategies
         if 0 <= score <= self._dense_max:
             return dense
         if self._dense_max < score <= self._hybrid_max:

@@ -5,25 +5,95 @@ weaves. Running a batch is a user-initiated LLM spend."""
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 from tqdm.auto import tqdm
 
-from augmentation.config import AugmentationConfig
-from augmentation.core import AugmentedCandidate, CreditGate, Operator
-from augmentation.engine import Augmenter
+from augmentation.config import FAULT_STREAK, AugmentationConfig
+from augmentation.core import (
+    NOTHING_ELSE,
+    AugmentedCandidate,
+    CreditGate,
+    Operator,
+    SurfaceOrigin,
+)
+from augmentation.dispatch import (
+    Call,
+    CellPlan,
+    Stage,
+    Step,
+    calls_for,
+    plan,
+    plan_report,
+    requirements,
+    targets_of,
+    unreachable,
+)
+from augmentation.engine import (
+    AugmentationOutcome,
+    Augmenter,
+    Budget,
+    ErrorCase,
+    Spend,
+    windowed_map,
+)
 from augmentation.operators import default_operators
+from augmentation.parents import ParentPool
+from augmentation.constructed import ConstructedDocs
 from augmentation.pool import GeneratedPool
 from augmentation.qrels import AugmentationQrels
+from augmentation.synthetic import SyntheticOperator
+from composition.cells import CELLS_BY_NAME
+from query_taxonomy.features import FeatureExtractor
+from taxonomy_generators.verify import Targets
 
 
-def _pair_line(sign: str, parent: dict, text: str, note: str) -> str:
+class NeedsSelection(ValueError):
+    """A cell its own unspent parents already satisfy: the shortfall is the
+    selection layer's, and no generated row can serve it."""
+
+
+@dataclass
+class FaultStreak:
+    """One `run()` call's fault-streak bookkeeping (d59): every attempted
+    parent id, in order, and whether the call stopped BECAUSE of the streak
+    rather than by reaching `need` or exhausting `queue`. Mutable, in-loop,
+    never crosses a boundary until `report()` — same shape as `Spend`, not a
+    pydantic model, for the same reason: it's an accumulator, not a value
+    object. `report()` feeds `AugmentationCampaign`'s chances scheduler via
+    `.attrs` — no loose counter threaded through the attempt loop."""
+
+    limit: int | None
+    attempted_ids: list[str] = field(default_factory=list)
+    consecutive: int = 0
+    stopped: bool = False
+
+    def tripped(self) -> bool:
+        """Whether the streak just hit `limit` — marks `stopped` itself, so
+        the call site never has to reach in and set the flag by hand."""
+        self.stopped = self.limit is not None and self.consecutive >= self.limit
+        return self.stopped
+
+    def record(self, query_id: str, *, accepted: bool) -> None:
+        self.attempted_ids.append(query_id)
+        self.consecutive = 0 if accepted else self.consecutive + 1
+
+    def report(self) -> dict[str, object]:
+        return {
+            "attempted_ids": tuple(self.attempted_ids),
+            "stopped_early": self.stopped,
+        }
+
+
+def _pair_line(sign: str, parent: dict, text: str | None, note: str) -> str:
     tag = "after: " if sign == "+" else "tried: "
+    shown = "(nothing — never got that far)" if text is None else repr(text[:80])
     return (
         f"{sign} {parent['query_id']}{note}\n"
         f"    before: {str(parent['query'])[:80]!r}\n"
-        f"    {tag} {text[:80]!r}"
+        f"    {tag} {shown}"
     )
 
 
@@ -40,18 +110,39 @@ class AugmentationLoop:
         sheet_path: Path | str | None = None,
         pool: GeneratedPool | None = None,
         qrels: AugmentationQrels | None = None,
+        docs: ConstructedDocs | None = None,
+        parents: ParentPool | None = None,
+        budget: Budget | None = None,
     ) -> None:
         self.selection = selection
+        self.parents = parents
+        """Cell demands draw parents from here (d51g); floor demands still
+        draw from `selection`."""
         self.config = config or AugmentationConfig()
+        # engines=None: cells band spaCy stats (natural_language_share,
+        # nesting_depth), and a regex-only extractor reports those as
+        # measured=None — a target the model can never satisfy, so it burns its
+        # whole round budget chasing one. Same parity the cell fill keeps (d42g).
+        # an injected engine owns its own budget; only the one built here can
+        # be handed the run's ceiling
         self.engine = engine or Augmenter(
-            self.config.engine, seed=self.config.seed
+            self.config.engine,
+            seed=self.config.seed,
+            extractor=FeatureExtractor(engines=None),
+            budget=budget,
         )
         self.operators = (
             operators if operators is not None else default_operators(self.config)
         )
         self.pool = pool or GeneratedPool(self.config.paths)
         self.qrels = qrels or AugmentationQrels(self.config.paths)
+        self.docs = docs or ConstructedDocs(self.config.paths)
         self._sheet_path = Path(sheet_path or self.config.paths.order_sheet)
+
+    @property
+    def sheet_path(self) -> Path:
+        """Which sheet this loop serves, and so which composition owns it."""
+        return self._sheet_path
 
     def order_sheet(self) -> pd.DataFrame:
         sheet = pd.read_parquet(self._sheet_path)
@@ -60,6 +151,433 @@ class AugmentationLoop:
 
     def operator_for(self, floor: str) -> Operator | None:
         return next((op for op in self.operators if op.serves(floor)), None)
+
+    def demand(self, floor: str) -> tuple[CellPlan | None, pd.DataFrame]:
+        """The plan for this demand and the parents that survived it. A cell
+        runs the staged pipeline; a floor keeps its single operator and has no
+        plan."""
+        cell = CELLS_BY_NAME.get(floor)
+        if cell is None:
+            operator = self.operator_for(floor)
+            if operator is None:
+                raise ValueError(f"No registered operator serves {floor!r}.")
+            return None, operator.eligible(self.selection, floor)
+        if self.parents is None:
+            raise ValueError(
+                f"{floor!r} is a cell: the pipeline needs a parent pool — "
+                "construct the loop with parents=ParentPool(...)."
+            )
+        result = plan(cell, self.parents.available(), self.operators)
+        if not result.servable:
+            unserved = ", ".join(
+                f"{step.stage}:{step.requirement[0].member}"
+                for step in result.unsatisfied
+            )
+            raise ValueError(f"{floor!r} has no parents left: {unserved}.")
+        if result.needs_selection:
+            raise NeedsSelection(
+                f"{floor!r} needs SELECTION, not augmentation: "
+                f"{len(result.parents):,} unspent queries already satisfy it. "
+                "Its shortfall comes from the fill's own constraints, so "
+                "paying an LLM here would change nothing."
+            )
+        return result, self.parents.hydrate(result.parents)
+
+    def planned(
+        self, floor: str, result: CellPlan | None
+    ) -> tuple[Operator, ...]:
+        """The operators this demand runs: a cell's planned mints, a floor's
+        single family."""
+        if result is not None:
+            return result.operators
+        operator = self.operator_for(floor)
+        if operator is None:
+            raise ValueError(f"No registered operator serves {floor!r}.")
+        return (operator,)
+
+    @staticmethod
+    def owner(planned: tuple[Operator, ...]) -> Operator:
+        """Which planned operator a banked row's answer key and credit gate
+        follow: the strongest surface origin among the mints — one doc-copied
+        surface makes the whole child grounded in that doc, regardless of how
+        many other operators also touched it."""
+        return max(
+            planned,
+            key=lambda op: op.declaration.surface_origin is not SurfaceOrigin.NONE,
+        )
+
+    def grounded(self, result: CellPlan | None, parent: pd.Series) -> pd.Series:
+        """The parent plus its gold document, read whenever Inject already
+        resolved one — never for the pool, one lookup per parent actually used.
+
+        NOT gated on `Stage.CONSTRAIN`: that classifies the PLAN, but
+        `StatRewrite.instruction` decides to cut from the PARENT's own value,
+        so a two-sided band the parent already overshoots also cuts — and
+        did so blind before this fix, dropping content with no document to
+        check it against. `grounding_doc_id` existing is the cheap proxy for
+        "a document is already known"; fetching it costs one pushdown filter
+        regardless of whether the eventual instruction ends up using it."""
+        if self.parents is None or parent.get("grounding_doc_id") is None:
+            return parent
+        return pd.Series({**parent, "gold_text": self.parents.gold_text(parent)})
+
+    def brief(self, floor: str, steps: tuple[Step, ...], parent: pd.Series) -> str:
+        """One call's request: what to change, what the result must look like,
+        then the exclusion ONCE. No operator asserts a shape of its own, so the
+        cell's `looks_like` is the only voice on that and needs no override
+        (d55d) — a floor demand simply has none."""
+        cell = CELLS_BY_NAME.get(floor)
+        moves = [
+            step.operator.instruction(floor, parent, step.requirement)
+            for step in steps
+            if step.operator
+        ]
+        shape = cell.looks_like if cell else None
+        return "\n\n".join(
+            moves
+            + ([f"The finished query must look like this: {shape}"] if shape else [])
+            + [NOTHING_ELSE]
+        )
+
+    def produce(
+        self, floor: str, result: CellPlan | None, parent: pd.Series
+    ) -> tuple[AugmentationOutcome, Targets]:
+        """Run the calls in harm order, feeding each result to the next (d55b).
+        Checks accumulate, so a later call cannot undo an earlier one; a call
+        that fails returns the last text that passed, which is a real row with
+        fewer targets met (d55c)."""
+        cell = CELLS_BY_NAME.get(floor)
+        if cell is None or result is None:
+            return self._one_call(floor, self.planned(floor, result), parent)
+
+        text, best, targets = str(parent["query"]), None, Targets()
+        calls = calls_for(result, cell, parent)
+        if not calls:
+            # every mint this parent could need is already free — measured,
+            # not assumed (2026-08 follow-up): no operator spends a call on a
+            # row that already is what the cell asks for
+            targets = targets_of(requirements(cell), parent)
+            report = self.engine.accept(text, targets)
+            return AugmentationOutcome(
+                text=text, accepted=report.passed, attempts=0, checks=report.checks,
+            ), targets
+        spend = Spend()
+        for call in calls:
+            targets = targets_of(call.verified, parent)
+            if unreachable(call, parent):
+                # tokens already committed (a mint's own surfaces) already
+                # break this call's ceiling — no rewrite fixes that, so this
+                # is not spent on the model at all
+                outcome = AugmentationOutcome(
+                    text=None, accepted=False, attempts=0,
+                    error=ErrorCase.INCOMPATIBLE_PARENT,
+                )
+                return spend.stamp(best or outcome), targets
+            produced = self._deterministic(floor, call, parent, text)
+            if produced is not None:
+                report = self.engine.accept(produced, targets)
+                outcome = AugmentationOutcome(
+                    text=produced, accepted=report.passed, attempts=1,
+                    checks=report.checks,
+                )
+            else:
+                outcome = self.engine.run(
+                    self.brief(floor, call.steps, parent),
+                    f"Query: {text}",
+                    targets,
+                    tool_loop=any(op.declaration.tool_loop for op in call.operators),
+                )
+            spend.add(outcome)
+            if not outcome.accepted:
+                return spend.stamp(best or outcome), targets
+            text, best = outcome.text, outcome
+        assert best is not None, f"{floor!r} planned no calls"
+        return spend.stamp(best), targets
+
+    @staticmethod
+    def _deterministic(
+        floor: str, call: Call, parent: pd.Series, text: str
+    ) -> str | None:
+        """The call's text when every one of its steps can be served without a
+        model — None the moment one step needs the LLM, because the brief is
+        written per call and a half-served call would lose the other half."""
+        working = text
+        for step in call.steps:
+            if step.operator is None:
+                return None
+            produced = step.operator.apply(parent, floor, working, step.requirement)
+            if produced is None:
+                return None
+            working = produced
+        return working
+
+    def _one_call(
+        self, floor: str, planned: tuple[Operator, ...], parent: pd.Series
+    ) -> tuple[AugmentationOutcome, Targets]:
+        """The floor path: one operator, its own postcondition, one call."""
+        operator = planned[0]
+        targets = operator.targets(floor, parent)
+        text = operator.apply(parent, floor, str(parent["query"]))
+        if text is not None:
+            # deterministic operator: local re-measure IS the acceptance, so
+            # the row costs no completion, no tokens, and reproduces from seed
+            report = self.engine.accept(text, targets)
+            return AugmentationOutcome(
+                text=text, accepted=report.passed, attempts=1, checks=report.checks,
+            ), targets
+        outcome = self.engine.run(
+            self.brief(floor, (Step((), Stage.QUERY_ONLY, operator),), parent),
+            f"Query: {parent['query']}",
+            targets,
+            tool_loop=operator.declaration.tool_loop,
+        )
+        return outcome, targets
+
+    def synthesize(
+        self,
+        floor: str,
+        n: int,
+        *,
+        source_dataset: str,
+        docs_per_query: int = 2,
+        max_consecutive_faults: int | None = FAULT_STREAK,
+    ) -> pd.DataFrame:
+        """The synthetic rung: rows for a cell no parent can reach.
+
+        Query first — a query that misses its bands costs one completion, and
+        documents are only written for a query that already measures into the
+        cell. `docs_per_query` defaults to 2 = the genuine-tie depth bar:
+        one doc is a depth classify() files as fake-tie waste, more buys
+        nothing at that boundary and costs a completion each. `source_dataset`
+        names the lane whose corpus lends the constructed collection its
+        distractors AND whose min_relevance grades the minted key.
+        """
+        operator = SyntheticOperator(self.config)
+        if not operator.serves(floor):
+            raise ValueError(f"{floor!r} is not a cell — nothing to synthesize")
+        from hybrid_search_rrf_dataset.lanes import LANES
+
+        relevance = (
+            LANES[source_dataset].min_relevance
+            if source_dataset in LANES else 1
+        )
+        spend = Spend()
+        faults = FaultStreak(max_consecutive_faults)
+        minted: list[AugmentedCandidate] = []
+        # completion = the minted KEY, not a banked doc: a row whose documents
+        # came up short has docs but no qrels, and must be retried, not stuck
+        already = set(self.qrels.load()["query_id"].astype(str))
+        bar = tqdm(total=n, desc=f"synthesize:{floor}", unit="row")
+        index = 0
+        while len(minted) < n and not faults.tripped():
+            parent = pd.Series({
+                "query_id": f"syn-{floor}-{index}",
+                "dataset": source_dataset,
+                "query": "",
+                "floors": [],
+                "branch_index": index,
+            })
+            index += 1
+            if str(parent["query_id"]) in already:
+                continue        # a rerun never regenerates a banked row
+            targets = operator.targets(floor, parent)
+            outcome = self.engine.run(
+                operator.instruction(floor, parent), "", targets
+            )
+            spend.add(outcome)
+            faults.record(str(parent["query_id"]), accepted=outcome.accepted)
+            if not outcome.accepted:
+                bar.write(f"- {parent['query_id']}: dropped — {outcome.checks}")
+                continue
+            doc_ids: list[str] = []
+            for ordinal in range(1, docs_per_query + 1):
+                answer = self.engine.run(
+                    operator.document(floor, outcome.text, ordinal),
+                    f"Query: {outcome.text}",
+                    Targets(),
+                )
+                spend.add(answer)
+                if not answer.text:
+                    break
+                doc_ids.append(self.docs.add(
+                    query_id=str(parent["query_id"]),
+                    source_dataset=source_dataset,
+                    text=answer.text,
+                    ordinal=ordinal,
+                ))
+            # all docs or none: a partial set writes a depth the row did not
+            # earn, and the banked ids would resurrect it on rerun anyway
+            if len(doc_ids) < docs_per_query:
+                bar.write(
+                    f"- {parent['query_id']}: query kept, documents incomplete "
+                    f"({len(doc_ids)}/{docs_per_query})"
+                )
+                continue
+            candidate = operator.candidate(parent, floor, outcome).model_copy(
+                update={"grounding_doc_id": doc_ids[0]}
+            )
+            minted.append(candidate)
+            self.pool.append([candidate])
+            self.qrels.mint_constructed(candidate.query_id, doc_ids, relevance)
+            bar.update(1)
+            bar.write(f"+ {candidate.query_id}: {outcome.text!r}")
+        bar.close()
+        produced = pd.DataFrame([c.model_dump() for c in minted])
+        print(f"  {spend.summary(len(minted))}")
+        return produced
+
+    def synthesize_lane(
+        self,
+        lane: str,
+        n: int,
+        *,
+        source_dir: Path | None = None,
+        exemplar_count: int = 3,
+        max_consecutive_faults: int | None = FAULT_STREAK,
+    ) -> pd.DataFrame:
+        """Mint up to `n` doc-grounded queries INTO `lane` — the class-residual
+        carrier: each accepted query is keyed to the REAL corpus document it
+        was written from, at the lane's grade bar, and earns its route label
+        later by retrieval against the live collection.
+
+        Reruns never re-pay (banked ids advance the id space) and a grounding
+        document never grounds a second query (its minted key marks it spent).
+        Mega-corpora are skipped: the doc sample reads the doc_id column.
+        """
+        from augmentation.lane_synthetic import LaneSyntheticOperator, normalized
+        from augmentation.parents import _corpus_text
+        from augmentation.supply import lane_dirs
+        from hybrid_search_rrf_dataset.lanes import LANES
+        from pyarrow.parquet import ParquetFile
+
+        operator = LaneSyntheticOperator(self.config)
+        relevance = LANES[lane].min_relevance if lane in LANES else 1
+        source = source_dir if source_dir is not None else (
+            self.config.paths.data_dir / lane_dirs().get(lane, lane)
+        )
+        corpus_path = source / "corpus.parquet"
+        if not corpus_path.exists():
+            print(f"[{lane}] no corpus at {corpus_path} — skipped")
+            return pd.DataFrame()
+        total_docs = ParquetFile(corpus_path).metadata.num_rows
+        if total_docs > 1_000_000:
+            # ponytail: the sample below reads the whole doc_id column;
+            # row-group sampling if a mega-lane ever earns a quota
+            print(f"[{lane}] corpus has {total_docs:,} docs — skipped")
+            return pd.DataFrame()
+
+        prefix = f"lane-{lane}-"
+        keys = self.qrels.load()
+        pool_rows = self.pool.load()
+        mine = keys[keys["query_id"].astype(str).str.startswith(prefix)]
+        # banking writes two stores, so a crash between them leaves an id in
+        # one and not the other — spend both, or a reissued id keys an existing
+        # query to another query's document
+        banked = pool_rows[pool_rows["query_id"].astype(str).str.startswith(prefix)]
+        used_docs = set(mine["doc_id"].astype(str)) | set(
+            banked["grounding_doc_id"].dropna().astype(str)
+        )
+        suffixes = set(mine["query_id"].astype(str)) | set(
+            banked["query_id"].astype(str)
+        )
+        index = max(
+            (int(s) for q in suffixes if (s := q[len(prefix):]).isdigit()),
+            default=-1,
+        ) + 1
+
+        doc_ids = pd.read_parquet(corpus_path, columns=["doc_id"])[
+            "doc_id"
+        ].astype(str)
+        fresh_docs = doc_ids[~doc_ids.isin(used_docs)].sample(
+            frac=1.0, random_state=self.config.seed
+        )
+        lane_queries = self._lane_query_texts(source)
+        taken = {normalized(q) for q in lane_queries}
+        if not pool_rows.empty:
+            taken |= {normalized(q) for q in pool_rows["query"].astype(str)}
+        exemplars = tuple(
+            pd.Series(lane_queries).sample(
+                n=min(exemplar_count, len(lane_queries)),
+                random_state=self.config.seed,
+            )
+        ) if lane_queries else ()
+
+        spend = Spend()
+        faults = FaultStreak(max_consecutive_faults)
+        minted: list[AugmentedCandidate] = []
+        pending: list[AugmentedCandidate] = []
+        pending_keys: list[tuple[str, list[str], int]] = []
+
+        def flush() -> None:
+            # chunked banking: per-row full-file rewrites are quadratic at
+            # lane-rung volumes; a crash re-pays at most one chunk of calls
+            if not pending:
+                return
+            self.pool.append(list(pending))
+            self.qrels.mint_constructed_many(list(pending_keys))
+            pending.clear()
+            pending_keys.clear()
+
+        def attempt(doc_id):
+            doc_text = _corpus_text(corpus_path, str(doc_id))[:1200]
+            if not doc_text:
+                return None, None
+            return doc_text, self.engine.run(
+                operator.instruction(lane, doc_text, exemplars), "", Targets()
+            )
+
+        bar = tqdm(total=n, desc=f"lane:{lane}", unit="row")
+        for doc_id, (doc_text, outcome) in windowed_map(
+            attempt, fresh_docs, self.config.llm_workers
+        ):
+            if doc_text is None:
+                continue
+            # credited before the stop check: the window runs ahead, so this
+            # call is already paid for whether or not its row is wanted
+            spend.add(outcome)
+            if len(minted) >= n or faults.tripped():
+                break
+            query_id = f"{prefix}{index}"
+            index += 1
+            reason = operator.rejects(
+                outcome.text or "", doc_text, taken
+            ) if outcome.accepted else (outcome.error or "not accepted")
+            faults.record(query_id, accepted=reason is None)
+            if reason is not None:
+                bar.write(f"- {query_id}: dropped — {reason}")
+                continue
+            taken.add(normalized(outcome.text))
+            parent = pd.Series({"query_id": query_id, "dataset": lane})
+            candidate = operator.candidate(
+                parent, f"lane:{lane}", outcome
+            ).model_copy(update={
+                "query_id": query_id,
+                "generated_from": "",
+                "grounding_doc_id": str(doc_id),
+            })
+            minted.append(candidate)
+            pending.append(candidate)
+            pending_keys.append((query_id, [str(doc_id)], relevance))
+            if len(pending) >= 50:
+                flush()
+            bar.update(1)
+            bar.write(f"+ {query_id}: {outcome.text!r}")
+        flush()
+        bar.close()
+        produced = pd.DataFrame([c.model_dump() for c in minted])
+        print(f"  {spend.summary(len(minted))}")
+        return produced
+
+    @staticmethod
+    def _lane_query_texts(source: Path) -> list[str]:
+        """The lane's real query texts — dup-guard keys and style exemplars."""
+        qpath = source / "queries.parquet"
+        if not qpath.exists():
+            return []
+        queries = pd.read_parquet(qpath)
+        if "query" not in queries.columns:
+            queries = queries.rename(columns={"text": "query"})
+        return queries["query"].astype(str).tolist()
 
     def hungry(self) -> pd.DataFrame:
         """The readout: every hungry floor, who serves it, and whether its
@@ -79,18 +597,62 @@ class AugmentationLoop:
             )
         return pd.DataFrame(rows)
 
-    def run(self, floor: str, *, n: int | None = None) -> pd.DataFrame:
+    def plans(self, pool: pd.DataFrame) -> pd.DataFrame:
+        """Every hungry cell priced against a parent pool before any spend: how
+        many parents survive the stages, who mints what, and which
+        requirements nothing can serve."""
+        return plan_report(
+            self.order_sheet(), pool, CELLS_BY_NAME, self.operators
+        )
+
+    def run(
+        self,
+        floor: str,
+        *,
+        n: int | None = None,
+        exclude: frozenset[str] = frozenset(),
+        max_consecutive_faults: int | None = FAULT_STREAK,
+    ) -> pd.DataFrame:
         """Produce up to `n` ACCEPTED candidates for one floor (default:
-        ceil of the floor's missing credit) and append them to the pool."""
-        operator = self.operator_for(floor)
-        if operator is None:
-            raise ValueError(f"No registered operator serves {floor!r}.")
-        if operator.declaration.credit_gate is not CreditGate.NONE:
+        ceil of the floor's missing credit) and append them to the pool.
+
+        `exclude` skips parents beyond what the persisted pool already
+        rules out — a campaign's repeat chance at a floor (d59) needs
+        parents THIS run already spent, which `parents_used` cannot see
+        since a dropped attempt is never persisted anywhere.
+
+        `max_consecutive_faults` stops the attempt loop the moment that many
+        non-accepted attempts happen in a row, rather than continuing to
+        `need` or exhausting `queue` — a fault (dropped for any reason) is
+        d59's unified signal, not just an engine error. It defaults to the
+        campaign's own `FAULT_STREAK` so the ceiling holds on every path;
+        pass None to chew through the whole queue deliberately. `produced.attrs`
+        then carries `stopped_early` (True only when THIS is why the loop
+        ended, never on hitting `need` or running out of parents) and
+        `attempted_ids` (every parent tried this call, accepted or not) —
+        both read by `AugmentationCampaign`'s chances scheduler, neither
+        changes what `run()` returns to any existing caller."""
+        # started before demand() so `spend.wall_s` covers the WHOLE run —
+        # dispatch/plan, catalog + pool reads — not just the LLM's own hops
+        spend = Spend()
+        result, parents = self.demand(floor)
+        planned = self.planned(floor, result)
+        for operator in planned:
+            if operator.declaration.credit_gate is not CreditGate.NONE:
+                print(
+                    f"NOTE: {operator.declaration.operator!r} is gated by "
+                    f"{operator.declaration.credit_gate} (d42h) — rows are "
+                    "produced as feature-stock (no floor credit; skipped by "
+                    "the mini-fill) until the gate's pilot passes."
+                )
+        if result and result.partial:
             print(
-                f"NOTE: {operator.declaration.operator!r} is gated by "
-                f"{operator.declaration.credit_gate} (d42h) — rows are "
-                "produced as feature-stock (no floor credit; skipped by the "
-                "mini-fill) until the gate's pilot passes."
+                f"NOTE: {floor!r} is served in part — "
+                + ", ".join(
+                    f"{step.stage}:{step.requirement[0].member}"
+                    for step in result.unsatisfied
+                )
+                + " unserved, so rows land in whatever cell they measure into."
             )
 
         sheet = self.order_sheet()
@@ -104,33 +666,40 @@ class AugmentationLoop:
 
         # eligibility arrives in the operator's declared preference order
         # (d42c) — near-parents for StatRewrite, seeded shuffle elsewhere
-        parents = operator.eligible(self.selection, floor)
-        parents = parents[
-            ~parents["query_id"].astype(str).isin(self.pool.parents_used(floor))
-        ]
+        spent = self.pool.parents_used(floor) | set(exclude)
+        queue = parents[
+            ~parents["query_id"].astype(str).isin(spent)
+        ].to_dict("records")
+        owner = self.owner(planned)
 
         accepted: list[AugmentedCandidate] = []
         attempted = 0
+        faults = FaultStreak(max_consecutive_faults)
         bar = tqdm(total=need, desc=f"augment:{floor}", unit="row")
-        for parent in parents.to_dict("records"):
+        for parent in queue:
             if len(accepted) >= need:
                 break
+            if faults.tripped():
+                break
             attempted += 1
-            outcome = self.engine.run(
-                operator.instruction(floor, parent),
-                f"Query: {parent['query']}",
-                operator.targets(floor, parent),
-                tool_loop=operator.declaration.tool_loop,
-            )
+            parent = self.grounded(result, parent)
+            outcome, targets = self.produce(floor, result, parent)
+            spend.add(outcome)   # a drop still paid for its hops
+            # structural checks read `targets` as the authorisation: a mint must
+            # not veto the span another was asked to add (d52d)
             problems = (
-                operator.structural(parent, outcome.text)
+                [
+                    problem
+                    for op in planned
+                    for problem in op.structural(parent, outcome.text, targets)
+                ]
                 if outcome.accepted
                 else []
             )
-            if outcome.accepted and not problems:
-                candidate = operator.candidate(
-                    parent, floor, outcome.text, outcome.attempts
-                )
+            banked = outcome.accepted and not problems
+            faults.record(str(parent["query_id"]), accepted=banked)
+            if banked:
+                candidate = owner.candidate(parent, floor, outcome)
                 accepted.append(candidate)
                 self.pool.append([candidate])   # banked immediately — paid spend
                 self.qrels.mint(candidate)      # answer key born with the row (d43d)
@@ -145,14 +714,31 @@ class AugmentationLoop:
                     f": dropped — structural: {problems}",
                 ))
             else:
-                failed = [c.target for c in outcome.checks if not c.passed]
+                # error is the reason nothing verifiable exists to grade —
+                # attempted_tools is the trace that separates a stuck loop
+                # from one that ran out of rounds doing varied real work
+                if outcome.error is not None:
+                    reason = str(outcome.error)
+                    if outcome.attempted_tools:
+                        reason += f" — rounds called: {list(outcome.attempted_tools)}"
+                else:
+                    failed = ", ".join(
+                        f"{c.target} (measured {c.measured})"
+                        for c in outcome.checks if not c.passed
+                    )
+                    reason = f"failed [{failed}]"
                 bar.write(_pair_line(
-                    "-", parent, outcome.text, f": dropped — failed {failed}",
+                    "-", parent, outcome.text, f": dropped — {reason}",
                 ))
             bar.set_postfix(attempted=attempted, dropped=attempted - len(accepted))
         bar.close()
         print(
             f"{floor}: accepted {len(accepted)}/{attempted} attempts "
-            f"(need {need}, parents available {len(parents):,}) -> {self.pool.path}"
+            f"(need {need}, parents available {len(queue):,}, minting "
+            f"{[op.declaration.operator for op in planned]}) -> {self.pool.path}\n"
+            f"  spend: {spend.summary(len(accepted))}"
         )
-        return pd.DataFrame([c.model_dump() for c in accepted])
+        produced = pd.DataFrame([c.model_dump() for c in accepted])
+        produced.attrs["spend"] = spend.report()
+        produced.attrs.update(faults.report())
+        return produced

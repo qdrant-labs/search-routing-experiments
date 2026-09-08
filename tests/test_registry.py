@@ -19,6 +19,7 @@ from dataset_registry import (
     IRDatasetsBacked,
     MiraclDev,
     Query,
+    QueryProvenance,
     RegistryDataset,
     Scope,
     SourceKind,
@@ -40,6 +41,7 @@ class FakeDataset(RegistryDataset):
             source=SourceKind.URL,
             grounding=Grounding.QO,
             llm_target=False,
+            query_provenance=QueryProvenance.HUMAN,
             scope=Scope.GENERAL,
             non_trivial=False,
             multilingual=False,
@@ -71,6 +73,16 @@ def test_registered_names_are_bijective_with_enum():
 def test_every_card_validates():
     for dataset in DATASETS:
         assert isinstance(dataset.card, DatasetCard)
+
+
+def test_query_provenance_is_declared_and_pins_the_machine_written_sources():
+    """The two sources whose queries no human wrote — a showcase that reports
+    them as real user queries is lying about 73% of its natural supply."""
+    by_name = {dataset.card.name: dataset.card for dataset in DATASETS}
+    for card in by_name.values():
+        assert isinstance(card.query_provenance, QueryProvenance)
+    assert by_name[DatasetName.SCIRGEN_GEO_EN].query_provenance is QueryProvenance.LLM
+    assert by_name[DatasetName.LIMIT].query_provenance is QueryProvenance.TEMPLATE
 
 
 def test_irds_ids_resolve_in_catalog():

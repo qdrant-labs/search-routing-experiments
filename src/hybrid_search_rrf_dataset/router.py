@@ -18,8 +18,10 @@ quirks (SPEC d46c).
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from enum import StrEnum
+from functools import lru_cache
 from query_taxonomy.features import FeatureExtractor as _FE
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
@@ -29,13 +31,15 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from tqdm.auto import tqdm
+from wordfreq import zipf_frequency
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from hybrid_search_rrf_dataset.fusion import StrategyName
+from hybrid_search_rrf_dataset.fusion import SERVING_COST, StrategyName
 from hybrid_search_rrf_dataset.golden import LLMScoreClient
+from hybrid_search_rrf_dataset.labels import AcceptabilityLabels
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
 if TYPE_CHECKING:
@@ -66,7 +70,14 @@ _DERIVED_ENGINEERED = (
     "derived.identifier_density",
     "derived.avg_word_length",
     "derived.short_id_query",
+    "derived.min_zipf",
+    "derived.rare_token_share",
 )
+_RARE_ZIPF = 4.0
+# ≥2 letters: hex/identifier blobs shed single-letter fragments ('e', 'a')
+# that score as common words and mask the blob's rarity.
+_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+_ZIPF_LANGS = ("en", "es", "fr", "de", "pt")
 _ROUTE_ORDER = list(StrategyName)  # column/index order for the score matrix
 DENSE_IDX = _ROUTE_ORDER.index(StrategyName.DENSE_ONLY)
 RRF_IDX = _ROUTE_ORDER.index(StrategyName.PURE_RRF)
@@ -172,14 +183,30 @@ class FeatureSpace:
     def needs_embedding(self) -> bool:
         return self.representation != Representation.ENGINEERED
 
-    def fit(self, train: pd.DataFrame) -> FeatureSpace:
+    def fit(
+        self,
+        train: pd.DataFrame,
+        support: pd.DataFrame | None = None,
+        min_fires: int = 0,
+    ) -> FeatureSpace:
+        """Fix the column set (and PCA) on train; when `support` is given,
+        drop engineered columns nonzero on fewer than `min_fires` of its rows —
+        near-constant columns get tiny scaler stds, so a handful of firing
+        rows can saturate a binary's probability at serve time."""
         if self.needs_engineered:
             base = [
                 c
                 for c in train.columns
                 if _is_engineered(c) and c not in _DROPPED_ENGINEERED
             ]
-            self._engineered_cols = base + list(_DERIVED_ENGINEERED)
+            cols = base + list(_DERIVED_ENGINEERED)
+            if support is not None and min_fires > 0:
+                enriched = _derive_engineered(support)
+                counts = (
+                    enriched.reindex(columns=cols, fill_value=0.0) != 0
+                ).sum()
+                cols = [c for c in cols if counts[c] >= min_fires]
+            self._engineered_cols = cols
         if self.needs_embedding:
             if self._encoder is None:
                 raise ValueError(
@@ -234,6 +261,7 @@ class StrategyRouter:
         pca_dims: int = 50,
         C: float = 1.0,
         extractor: FeatureExtractor | None = None,
+        delta: float = 0.0
     ) -> None:
         self.representation = representation
         self._space = FeatureSpace(representation, encoder, pca_dims)
@@ -241,6 +269,7 @@ class StrategyRouter:
         self._sparse = _binary_pipeline(C)
         self._t_dense = DEFAULT_THRESHOLD
         self._t_sparse = DEFAULT_THRESHOLD
+        self.delta = delta  # near-tie hedge width; 0 = rule unchanged
         self._extractor = extractor
         self._decisive_margin = RouterObjective().decisive_margin
 
@@ -256,23 +285,32 @@ class StrategyRouter:
         self,
         train: pd.DataFrame,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
+        min_fires: int = 20,
     ) -> StrategyRouter:
-        """Fit both binaries. Default (SPEC d45a) uses decisive rows only —
-        clean labels the LR can trust. `all_rows=True` expands to every
-        routes_differ row (thin-margin included; still a real winner);
-        `max_class_share` seeded-downsamples majority classes so no class
-        exceeds that share of the training set. Both are SPEC d47a F3
-        experimental flags — defaults preserve d45a."""
-        if all_rows:
+        """Fit both binaries on a substrate chosen by `all_rows`: 'decisive'
+        (default, also False) = clear wins only, 'recommended' (also True) =
+        every routes_differ row, 'all' = the whole frame with tied/all-zero
+        rows entering as negatives for both binaries (they have no winner);
+        `max_class_share` seeded-downsamples majority classes; features firing
+        on fewer than `min_fires` substrate rows are excluded (0 disables)."""
+        mode = {False: "decisive", True: "recommended"}.get(all_rows, all_rows)
+        if mode == "all":
+            rows = train
+        elif mode == "recommended":
             rows = train[_routes_differ(train)]
-        else:
+        elif mode == "decisive":
             rows = train[_margin(train) >= self._decisive_margin]
-        winner = _winner(rows)
+        else:
+            raise ValueError(
+                f"all_rows must be bool, 'decisive', 'recommended' or 'all';"
+                f" got {all_rows!r}"
+            )
+        winner = _winner(rows).where(_routes_differ(rows))
         if max_class_share is not None:
             rows, winner = _cap_class_share(rows, winner, max_class_share)
-        self._space.fit(train)
+        self._space.fit(train, support=rows, min_fires=min_fires)
         x = self._space.transform(rows)
         self._dense.fit(x, (winner == StrategyName.DENSE_ONLY).to_numpy())
         self._sparse.fit(x, (winner == StrategyName.SPARSE_ONLY).to_numpy())
@@ -308,7 +346,9 @@ class StrategyRouter:
 
     def predict_routes(self, frame: pd.DataFrame) -> list[StrategyName]:
         p_dense, p_sparse = self._probabilities(frame)
-        return _route_from_probs(p_dense, p_sparse, self._t_dense, self._t_sparse)
+        return _route_from_probs(
+            p_dense, p_sparse, self._t_dense, self._t_sparse, self.delta
+        )
 
     def coefficients(self) -> pd.DataFrame:
         """Per-feature logistic weights for each binary — the instrument readout
@@ -344,7 +384,11 @@ class StrategyRouter:
         p_dense, p_sparse = self._probabilities(self._query_frame(query))
         p_dense, p_sparse = float(p_dense[0]), float(p_sparse[0])
         route = _route_from_probs(
-            np.array([p_dense]), np.array([p_sparse]), self._t_dense, self._t_sparse
+            np.array([p_dense]),
+            np.array([p_sparse]),
+            self._t_dense,
+            self._t_sparse,
+            self.delta,
         )[0]
         return {
             "query": query,
@@ -353,6 +397,7 @@ class StrategyRouter:
             "p_sparse": p_sparse,
             "t_dense": self._t_dense,
             "t_sparse": self._t_sparse,
+            "delta": self.delta,
             "dense_fires": p_dense >= self._t_dense,
             "sparse_fires": p_sparse >= self._t_sparse,
         }
@@ -368,6 +413,96 @@ class StrategyRouter:
     def _probabilities(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         x = self._space.transform(frame)
         return self._dense.predict_proba(x)[:, 1], self._sparse.predict_proba(x)[:, 1]
+
+
+class AcceptabilityRouter:
+    """Three acceptability binaries (SPEC d60e): each head learns P(this route
+    is acceptable) from the d60 view's `ok_*` labels. `priority` carries the
+    cost policy d60e leaves in the inference rule — None serves the most
+    probable route, a route order serves the first one clearing `threshold`."""
+
+    COST_ORDER = sorted(StrategyName, key=SERVING_COST.__getitem__)
+
+    def __init__(
+        self,
+        representation: Representation = Representation.BOTH,
+        encoder: QueryEncoder | None = None,
+        pca_dims: int = 50,
+        C: float = 1.0,
+        extractor: FeatureExtractor | None = None,
+        tolerance: float | None = None,
+        threshold: float = DEFAULT_THRESHOLD,
+        priority: Sequence[StrategyName] | None = None,
+    ) -> None:
+        self.representation = representation
+        self._space = FeatureSpace(representation, encoder, pca_dims)
+        self._heads = {route: _binary_pipeline(C) for route in _ROUTE_ORDER}
+        self.tolerance = tolerance  # None = the view's hit-parity default
+        self.threshold = threshold
+        self.priority = priority
+        self._extractor = extractor
+
+    def fit(self, train: pd.DataFrame) -> AcceptabilityRouter:
+        """Fit all three heads on the answerable rows of `train` — all_zero
+        rows carry null ok_* labels (d60d) and are excluded, never negatives."""
+        view = AcceptabilityLabels(train, tolerance=self.tolerance)
+        self.tolerance = view.tolerance
+        rows = view.frame()
+        rows = rows[rows["serve"].notna()]
+        self._space.fit(rows)
+        x = self._space.transform(rows)
+        for route in _ROUTE_ORDER:
+            y = rows[f"ok_{route.value}"].to_numpy(dtype=bool)
+            self._heads[route].fit(x, y)
+        return self
+
+    def predict_routes(self, frame: pd.DataFrame) -> list[StrategyName]:
+        probs = self.probabilities(frame)
+        order = list(self.priority or _ROUTE_ORDER)
+        matrix = np.column_stack([probs[r.value] for r in order])
+        if self.priority is None:
+            return [order[i] for i in matrix.argmax(axis=1)]
+        fires = matrix >= self.threshold
+        # first firing head in priority order; fallback while SPEC d60's
+        # deferred policy is open: the most probable route.
+        idx = np.where(
+            fires.any(axis=1), fires.argmax(axis=1), matrix.argmax(axis=1)
+        )
+        return [order[i] for i in idx]
+
+    def probabilities(self, frame: pd.DataFrame) -> dict[str, np.ndarray]:
+        x = self._space.transform(frame)
+        return {
+            route.value: self._heads[route].predict_proba(x)[:, 1]
+            for route in _ROUTE_ORDER
+        }
+
+    def predict(
+        self, query: str, *, collection_stats: dict[str, float] | None = None
+    ) -> StrategyName:
+        del collection_stats
+        return self.predict_routes(self._query_frame(query))[0]
+
+    def explain(
+        self, query: str, *, collection_stats: dict[str, float] | None = None
+    ) -> dict[str, object]:
+        """`predict` plus the three acceptability probabilities behind it."""
+        del collection_stats
+        frame = self._query_frame(query)
+        probs = self.probabilities(frame)
+        return {
+            "query": query,
+            "route": self.predict_routes(frame)[0],
+            **{f"p_ok_{name}": float(p[0]) for name, p in probs.items()},
+            "threshold": self.threshold,
+            "tolerance": self.tolerance,
+        }
+
+    def _query_frame(self, query: str) -> pd.DataFrame:
+        row: dict[str, object] = {"query": query}
+        if self._space.needs_engineered:
+            row.update(_extract_features(self._extractor, query))
+        return pd.DataFrame([row])
 
 
 def _binary_pipeline(C: float) -> Pipeline:
@@ -391,11 +526,16 @@ def _score_matrix(frame: pd.DataFrame) -> np.ndarray:
 
 
 def _route_indices(
-    p_dense: np.ndarray, p_sparse: np.ndarray, t_dense: float, t_sparse: float
+    p_dense: np.ndarray,
+    p_sparse: np.ndarray,
+    t_dense: float,
+    t_sparse: float,
+    delta: float = 0.0,
 ) -> np.ndarray:
     """The hedge rule (SPEC d46d), vectorised to indices into `_ROUTE_ORDER`:
     both below threshold ⇒ rrf, both fire ⇒ higher probability, else the route
-    that fired."""
+    that fired; a near-tie (|p_dense − p_sparse| < delta) hedges to rrf
+    regardless of what fired."""
     fires_dense = p_dense >= t_dense
     fires_sparse = p_sparse >= t_sparse
     idx = np.full(p_dense.shape, RRF_IDX, dtype=int)
@@ -403,13 +543,19 @@ def _route_indices(
     idx[fires_sparse & ~fires_dense] = SPARSE_IDX
     both = fires_dense & fires_sparse
     idx[both] = np.where(p_dense[both] >= p_sparse[both], DENSE_IDX, SPARSE_IDX)
+    if delta > 0.0:
+        idx[np.abs(p_dense - p_sparse) < delta] = RRF_IDX
     return idx
 
 
 def _route_from_probs(
-    p_dense: np.ndarray, p_sparse: np.ndarray, t_dense: float, t_sparse: float
+    p_dense: np.ndarray,
+    p_sparse: np.ndarray,
+    t_dense: float,
+    t_sparse: float,
+    delta: float = 0.0,
 ) -> list[StrategyName]:
-    idx = _route_indices(p_dense, p_sparse, t_dense, t_sparse)
+    idx = _route_indices(p_dense, p_sparse, t_dense, t_sparse, delta)
     return [_ROUTE_ORDER[i] for i in idx]
 
 
@@ -417,12 +563,29 @@ def _is_engineered(col: str) -> bool:
     return col not in IDENTITY_COLS and "." in col
 
 
+@lru_cache(maxsize=65536)
+def _token_zipf(token: str) -> float:
+    """Max zipf across the covered languages, so non-English common words
+    don't masquerade as rare anchors."""
+    return max(zipf_frequency(token, lang) for lang in _ZIPF_LANGS)
+
+
+def _query_rarity(text: str) -> tuple[float, float]:
+    """(min zipf, share of tokens below the rare cutoff) over the query's
+    alphabetic tokens; (0.0, 0.0) when no such tokens exist."""
+    zipfs = [_token_zipf(t.lower()) for t in _WORD_RE.findall(str(text))]
+    if not zipfs:
+        return 0.0, 0.0
+    rare = sum(z < _RARE_ZIPF for z in zipfs)
+    return min(zipfs), rare / len(zipfs)
+
+
 def _derive_engineered(frame: pd.DataFrame) -> pd.DataFrame:
-    """Append the F2 derived columns (SPEC d47a): identifier_density,
-    avg_word_length, short_id_query. Missing base columns default to 0 so
-    the serving path (a one-row frame carrying only fired features) works
-    without KeyError — same tolerance FeatureSpace.transform already uses
-    for the catalog block."""
+    """Append the derived columns: identifier_density, avg_word_length,
+    short_id_query, plus min_zipf / rare_token_share from the query text.
+    Missing base columns default to 0 so the serving path (a one-row frame
+    carrying only fired features) works without KeyError — same tolerance
+    FeatureSpace.transform already uses for the catalog block."""
     words = frame.get(_LENGTH_WORDS, pd.Series(0.0, index=frame.index))
     chars = frame.get(_LENGTH_CHARS, pd.Series(0.0, index=frame.index))
     id_cols = [c for c in frame.columns if c.startswith(_STRUCTURED_ID_PREFIX)]
@@ -435,13 +598,28 @@ def _derive_engineered(frame: pd.DataFrame) -> pd.DataFrame:
     identifier_density = id_sum / safe_words
     avg_word_length = chars / safe_words
     short_id_query = ((identifier_density > 0) & (words <= 5)).astype(float)
-    return frame.assign(
-        **{
+    if "query" in frame.columns:
+        rarity = [_query_rarity(q) for q in frame["query"]]
+        min_zipf = pd.Series([r[0] for r in rarity], index=frame.index)
+        rare_share = pd.Series([r[1] for r in rarity], index=frame.index)
+    else:
+        min_zipf = pd.Series(0.0, index=frame.index)
+        rare_share = pd.Series(0.0, index=frame.index)
+    derived = pd.DataFrame(
+        {
             "derived.identifier_density": identifier_density,
             "derived.avg_word_length": avg_word_length,
             "derived.short_id_query": short_id_query,
-        }
+            "derived.min_zipf": min_zipf,
+            "derived.rare_token_share": rare_share,
+        },
+        index=frame.index,
     )
+    # Add the derived block in one operation.  Repeated ``assign``/``insert``
+    # calls fragment wide catalog frames and make every downstream operation
+    # progressively slower.
+    base = frame.drop(columns=list(_DERIVED_ENGINEERED), errors="ignore")
+    return pd.concat([base, derived], axis=1)
 
 
 def _margin(frame: pd.DataFrame) -> pd.Series:
@@ -493,7 +671,7 @@ def _cap_class_share(
 
 
 def decisive_rows(data: pd.DataFrame) -> pd.DataFrame:
-    """Decisive rows (SPEC d41d) with a `winner` column — the router's training
+    """Decisive rows with a `winner` column — the router's training
     and evaluation substrate. Decisive = the top route's score beats the
     runner-up by at least the objective's decisive margin."""
     keep = _margin(data) >= RouterObjective().decisive_margin
@@ -587,19 +765,22 @@ class AutoFusionRouter:
     ) -> list[StrategyName]:
         """Route every row of `frame` (needs `dataset`, `query_id`, `query`).
         Cache hits skip the network; only misses trigger a POST. Saves cache
-        once at end iff any miss fired."""
+        once iff any miss fired — in a `finally`, so a query the endpoint
+        refuses mid-batch cannot discard the scores already paid for."""
         routes: list[StrategyName] = []
         misses = 0
-        for _, row in tqdm(
-            frame.iterrows(), total=len(frame), desc=desc, leave=False
-        ):
-            key = (str(row["dataset"]), str(row["query_id"]))
-            if key not in self._cache:
-                self._cache[key] = self._client.score(str(row["query"]))
-                misses += 1
-            routes.append(_production_route(self._cache[key]))
-        if misses:
-            self._save_cache()
+        try:
+            for _, row in tqdm(
+                frame.iterrows(), total=len(frame), desc=desc, leave=False
+            ):
+                key = (str(row["dataset"]), str(row["query_id"]))
+                if key not in self._cache:
+                    self._cache[key] = self._client.score(str(row["query"]))
+                    misses += 1
+                routes.append(_production_route(self._cache[key]))
+        finally:
+            if misses:
+                self._save_cache()
         return routes
 
 
@@ -643,6 +824,10 @@ class RouterExperiment:
                 self._catalog_path, columns=["dataset", "query_id", *feat_cols]
             )
             merged = labels.merge(catalog, on=["dataset", "query_id"], how="inner")
+            # the v3 catalog's corpus-relative stats are NaN where unmeasurable
+            # (PMI needs a token pair); a feature not measured is a feature not
+            # fired — the same 0-default _derive_engineered documents
+            merged[feat_cols] = merged[feat_cols].fillna(0.0)
             self._data = merged.reset_index(drop=True)
         return self._data
 
@@ -651,7 +836,7 @@ class RouterExperiment:
         representations: Sequence[Representation] | None = None,
         production_client: object | None = None,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
         autofusion: bool | AutoFusionRouter = False,
         autofusion_sample: int | float | None = None,
@@ -762,7 +947,7 @@ class RouterExperiment:
         production_client: object | None,
         bar: tqdm | None = None,
         *,
-        all_rows: bool = False,
+        all_rows: bool | str = False,
         max_class_share: float | None = None,
     ) -> dict[str, object]:
         _phase(bar, "fitting")

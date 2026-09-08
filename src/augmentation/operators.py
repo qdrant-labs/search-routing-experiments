@@ -29,18 +29,31 @@ from augmentation.core import (
     AnswerKeyPath,
     CreditGate,
     Declaration,
-    Grounding,
+    SurfaceOrigin,
     Operator,
 )
+from augmentation.corruption import CorruptOperator
+from augmentation.dispatch import WORD_AXES
 from augmentation.supply import SupplyIndex, lane_dirs
 from composition.catalog_axes import StatAxis, stat_column
+from composition.cells import CELL_TO_BANKS, CELLS_BY_NAME, AxisBand
 from composition.floors import STAT_AXES, identifier_floor_key
+from query_taxonomy.core import FeatureSpan
 from query_taxonomy.features import FeatureExtractor
+from query_taxonomy.metrics.general import STOPWORDS
 from query_taxonomy.taxonomy import FeatureGroup
 from taxonomy_generators.registry import generator_for
 from taxonomy_generators.verify import SpanTarget, StatTarget, Targets
 
 _WORD = re.compile(r"[a-z0-9]+")
+_WORD_BOUNDED_NOT = re.compile(r"\bNOT\b")
+_WRITTEN_CONJUNCTION = re.compile(r"\b(?:and|or)\b")
+_WORD_TOKEN = re.compile(r"\w+")
+"""The length bank's own tokenization — a surface's cost in words must be
+counted the way the band that judges it counts."""
+
+SHARE_COLUMN = "natural_language_signal.natural_language_share"
+WORDS_COLUMN = "length.length_words"
 
 
 @lru_cache(maxsize=1)
@@ -57,6 +70,92 @@ def _catalog(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _span_names(text: str) -> set[str]:
+    """Every span feature the text exhibits, bare-named — the vocabulary
+    `SpanTarget.feature` and the structural checks share."""
+    features = _regex_extractor().resolve(text)
+    return {
+        name
+        for by_type in features.spans.values()
+        for name, spans in by_type.items()
+        if spans
+    }
+
+
+def _spans_by_name(text: str) -> dict[str, list[FeatureSpan]]:
+    """Every span this text exhibits, keyed by bare name, WITH position —
+    `_span_names` throws position away, but a check that wants to know
+    whether a gained span sits inside an already-authorised literal needs it."""
+    result: dict[str, list[FeatureSpan]] = {}
+    for by_type in _regex_extractor().resolve(text).spans.values():
+        for name, spans in by_type.items():
+            if spans:
+                result.setdefault(name, []).extend(spans)
+    return result
+
+
+def _explained_by_surfaces(
+    spans: list[FeatureSpan], text: str, surfaces: tuple[str, ...]
+) -> bool:
+    """Whether every occurrence of a gained span sits inside some literal
+    Inject was already authorised to insert verbatim (d52d covers the span
+    it was TARGETED for; this covers a span a different bank names for the
+    SAME characters — the model chose none of it, so it is not smuggled)."""
+    ranges = [
+        (m.start(), m.end())
+        for surface in surfaces
+        for m in re.finditer(re.escape(str(surface)), text)
+    ]
+    return all(
+        any(lo <= span.start and span.end <= hi for lo, hi in ranges)
+        for span in spans
+    )
+
+
+@lru_cache(maxsize=1)
+def _zipf():
+    from wordfreq import zipf_frequency
+
+    return zipf_frequency
+
+
+def _shorten(text: str, limit: int, protected: tuple[str, ...], gold: str) -> str:
+    """Drop `\\w+` tokens until at most `limit` remain, commonest-first, keeping
+    anything inside a copied surface and anything the gold document also uses —
+    the machine reading of "keep what keeps the document answering"."""
+    keep_ranges = [
+        (m.start(), m.end())
+        for surface in protected
+        for m in re.finditer(re.escape(surface), text)
+    ]
+    gold_words = set(_WORD.findall(gold.lower()))
+    tokens = list(re.finditer(r"\w+", text))
+    droppable = [
+        token for token in tokens
+        if not any(lo < token.end() and token.start() < hi for lo, hi in keep_ranges)
+    ]
+    surplus = len(tokens) - max(limit, 0)
+    if surplus <= 0:
+        return text
+
+    def expendability(token: re.Match) -> tuple[int, int, float]:
+        word = token.group(0).lower()
+        # stopwords go first, then words the document never uses, then the
+        # commonest survivors — rarity is what ties a query to one document
+        return (word not in STOPWORDS, word in gold_words, -_zipf()(word, "en"))
+
+    cut = sorted(sorted(droppable, key=lambda t: t.start()), key=expendability)
+    dropped = sorted(
+        ((t.start(), t.end()) for t in cut[:surplus]), reverse=True
+    )
+    for start, end in dropped:
+        text = text[:start] + text[end:]
+    # ponytail: naive punctuation repair — collapse the gaps a cut leaves and
+    # reattach orphaned marks. A real detokenizer if the audit ever complains.
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+([,.;:!?])", r"\1", text).strip(" ,;:")
+
+
 def _span_total(catalog: pd.DataFrame) -> pd.Series:
     span_prefixes = (
         "structured_identifiers.", "sentence_markers.", "logical_structures.",
@@ -67,12 +166,12 @@ def _span_total(catalog: pd.DataFrame) -> pd.Series:
 
 class DecorateOperator(Operator):
     """Weave a register marker into the query (d40d: politeness-class,
-    meaning-preserving — parent qrels inherit, no grounding, no gate)."""
+    meaning-preserving — parent qrels inherit, no surface_origin, no gate)."""
 
     declaration: ClassVar[Declaration] = Declaration(
         operator="decorate",
         floors="marker:greeting | marker:interjection | marker:politeness",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by="target marker span present on local re-measure",
@@ -88,27 +187,53 @@ class DecorateOperator(Operator):
         self._rng = Random(config.seed)
         self._order_seed = config.seed
 
-    @staticmethod
-    def marker(floor: str) -> str:
+    def marker(self, floor: str) -> str:
+        """The decoration this demand names: a marker: floor names it
+        outright, a cell resolves to one required decoration — any single
+        one satisfies an `any_of` cell."""
+        if floor in CELLS_BY_NAME:
+            return min(CELL_TO_BANKS[floor] & set(self._decorations))
         return floor.removeprefix("marker:")
 
+    def mints(self, band: AxisBand) -> bool:
+        """Only the registered decorations — other marker banks are
+        detections, not weavable filler."""
+        return band.demands_presence and band.member in self._decorations
+
     def serves(self, floor: str) -> bool:
-        return (
-            floor.startswith("marker:") and self.marker(floor) in self._decorations
-        )
+        return floor.startswith("marker:") and self.marker(floor) in self._decorations
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Checkable parents not already carrying the marker — a filter on
-        the selection's own `floors` column, no bank run (d42e). Returned
-        in preference order (seeded shuffle — dataset diversity); the loop
+        """Checkable parents the demand does not already cover — a filter on
+        the selection's own columns, no bank run (d42e). Returned in
+        preference order (seeded shuffle — dataset diversity); the loop
         consumes in order."""
         pool = self.parent_pool(selection)
-        lacks = ~pool["floors"].map(lambda floors: floor in floors)
-        return pool[lacks & pool["checkable"]].sample(
+        pool = self.unsatisfied(pool, floor)
+        return pool[pool["checkable"]].sample(
             frac=1.0, random_state=self._order_seed
         )
 
-    def instruction(self, floor: str, parent: pd.Series) -> str:
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Weave the marker's own phrase in directly — the same list that used
+        to reach the model as examples, seeded per row so a re-run reproduces."""
+        marker = self.marker(floor)
+        rng = Random(f"{self._order_seed}:{parent['query_id']}:{marker}")
+        phrase = generator_for(f"sentence_markers:{marker}").sample(rng, 1)[0]
+        body = text.strip()
+        if rng.random() < 0.5:
+            return f"{phrase}, {body}"
+        return f"{body.rstrip('?.!')}, {phrase}"
+
+    def instruction(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> str:
         """Per-call seeded vocabulary examples — variety is supplied by the
         bank's own phrase list, never left to the LLM's favorite opener.
         Parent-aware: formal-content parents get help-request framing."""
@@ -131,14 +256,17 @@ class DecorateOperator(Operator):
             f"{examples}. Pick a phrasing that fits the query's tone and "
             "world, and vary it — never default to one stock opener; it may "
             f"sit at the start, middle, or end. {framing}Keep every content "
-            "word and the meaning unchanged. Add no other information: no "
-            "names, numbers, dates, or identifiers."
+            "word and the meaning unchanged."
         )
 
-    def targets(self, floor: str, parent: pd.Series) -> Targets:
+    def targets(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> Targets:
         return Targets(spans=(SpanTarget(feature=self.marker(floor), min_count=1),))
 
-    def structural(self, parent: pd.Series, text: str) -> list[str]:
+    def structural(
+        self, parent: pd.Series, text: str, targets: Targets
+    ) -> list[str]:
         """Declared: no parent-relative machine check. Decoration is
         additive; its meaning claim rests on the politeness-class
         declaration (d40d) and the d34b audit of before/after pairs —
@@ -157,12 +285,13 @@ class OperatorSyntaxRewrite(Operator):
     declaration: ClassVar[Declaration] = Declaration(
         operator="operator_syntax_rewrite",
         floors="logical:operator_syntax",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by=(
             "operator_syntax span present + no new content tokens beyond "
-            "AND/OR/NOT (structural)"
+            "AND/OR + no NOT emitted (structural). The AND/OR half only: "
+            "exclusion moves relevance, so the parent's qrels would not carry"
         ),
         credit_gate=CreditGate.DECLARATION_AUDIT,
         tool_loop=False,
@@ -173,6 +302,9 @@ class OperatorSyntaxRewrite(Operator):
         super().__init__(config)
         self._catalog_path = config.paths.catalog
         self._order_seed = config.seed
+
+    def mints(self, band: AxisBand) -> bool:
+        return band.demands_presence and band.member == "operator_syntax"
 
     def serves(self, floor: str) -> bool:
         return floor == "logical:operator_syntax"
@@ -203,26 +335,55 @@ class OperatorSyntaxRewrite(Operator):
             .sample(frac=1.0, random_state=self._order_seed)
         )
 
-    def instruction(self, floor: str, parent: pd.Series) -> str:
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Uppercase the coordination already written out, else promote a comma
+        list; a parent whose coordination is neither falls through to the model."""
+        upper = _WRITTEN_CONJUNCTION.sub(lambda m: m.group(0).upper(), text)
+        if upper != text:
+            return upper
+        if "," in text:
+            return re.sub(r"\s*,\s*", " AND ", text)
+        return None
+
+    def instruction(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> str:
         return (
             "Rewrite the user's search query into keyword-search dialect: "
             "restructure its EXISTING coordination using uppercase AND / OR "
-            "/ NOT between the existing terms. You may drop small function "
-            "words (how, to, the, a). You may NOT add any new content word, "
-            "name, number, or fact — only the words already present plus "
-            "the uppercase operators."
+            "between the existing terms. Never use NOT or any other exclusion "
+            "— excluding a term changes which documents answer the query. You "
+            "may drop small function words (how, to, the, a). Use only the "
+            "words already present plus the uppercase operators."
         )
 
-    def targets(self, floor: str, parent: pd.Series) -> Targets:
+    def targets(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> Targets:
         return Targets(spans=(SpanTarget(feature="operator_syntax", min_count=1),))
 
-    def structural(self, parent: pd.Series, text: str) -> list[str]:
+    def structural(
+        self, parent: pd.Series, text: str, targets: Targets
+    ) -> list[str]:
+        problems = []
         parent_tokens = set(_WORD.findall(str(parent["query"]).lower()))
         child_tokens = set(_WORD.findall(text.lower()))
-        new = child_tokens - parent_tokens - {"and", "or", "not"}
+        new = child_tokens - parent_tokens - {"and", "or"}
         if new:
-            return [f"new content tokens: {sorted(new)}"]
-        return []
+            problems.append(f"new content tokens: {sorted(new)}")
+        # NOT excludes, which moves relevance: a judged doc can become the
+        # wrong answer, and inherited qrels would then be a wrong label. The
+        # feature stays off RELEVANCE_CHANGING because this operator emits only
+        # the AND/OR half — enforced here, not merely asked for.
+        if "NOT" in _WORD_BOUNDED_NOT.findall(text):
+            problems.append("emitted NOT, which changes the relevant doc set")
+        return problems
 
 
 class StatRewrite(Operator):
@@ -234,15 +395,19 @@ class StatRewrite(Operator):
     declaration: ClassVar[Declaration] = Declaration(
         operator="stat_rewrite",
         floors="any <axis>:<band> whose axis has a declared direction",
-        grounding=Grounding.NONE,
+        surface_origin=SurfaceOrigin.NONE,
         answer_key=AnswerKeyPath.INHERIT,
         meaning_preserved=True,
         verifiable_by=(
-            "scalar lands in the band + span profile unchanged "
-            "(zero-span parents stay zero-span, structural)"
+            "scalar lands in the band + no span the request did not ask for "
+            "(the parent's own spans and a composed mint's target survive, "
+            "structural)"
         ),
         credit_gate=CreditGate.DECLARATION_AUDIT,
-        tool_loop=True,
+        # the cut is deterministic now, so only expansion is bought — and the
+        # loop's measured retry serves it without the round budget the model
+        # spent thrashing between verify and submit
+        tool_loop=False,
     )
 
     def __init__(self, config: AugmentationConfig | None = None) -> None:
@@ -251,8 +416,39 @@ class StatRewrite(Operator):
         self._stats: StatDeclarations = config.stats
         self._catalog_path = config.paths.catalog
 
+    def _band(
+        self, floor: str, requirement: tuple[AxisBand, ...] = ()
+    ) -> tuple[StatAxis, float, float]:
+        """The (axis, low, high) this call serves. The caller hands over the
+        requirement, so a cell that lives in no global registry still resolves
+        (d55); a floor falls back to the band-label table."""
+        band = self._mintable(requirement) or self._cell_band(floor)
+        resolved = band or self._floor_band(floor)
+        if resolved is None:
+            raise ValueError(
+                f"StatRewrite has no band for {floor!r}: pass the cell "
+                "requirement, or name a floor whose axis is declared."
+            )
+        return resolved
+
+    def _mintable(
+        self, requirement: tuple[AxisBand, ...]
+    ) -> tuple[StatAxis, float, float] | None:
+        """The first band in this requirement this family can actually move."""
+        for band in requirement:
+            if band.is_span or not self.mints(band):
+                continue
+            axis = next((a for a in STAT_AXES if a.title == band.member), None)
+            if axis is not None:
+                return (
+                    axis,
+                    float(band.at_least if band.at_least is not None else -np.inf),
+                    float(band.below if band.below is not None else np.inf),
+                )
+        return None
+
     @staticmethod
-    def _band(floor: str) -> tuple[StatAxis, float, float] | None:
+    def _floor_band(floor: str) -> tuple[StatAxis, float, float] | None:
         for axis in STAT_AXES:
             for index, label in enumerate(axis.labels):
                 key = f"{axis.title}:{str(label).replace(chr(10), ' ')}"
@@ -260,14 +456,33 @@ class StatRewrite(Operator):
                     return axis, axis.edges[index], axis.edges[index + 1]
         return None
 
+    def _cell_band(self, floor: str) -> tuple[StatAxis, float, float] | None:
+        """Registry fallback for a caller that passed no requirement."""
+        cell = CELLS_BY_NAME.get(floor)
+        return self._mintable(cell.bands if cell else ())
+
+    def mints(self, band: AxisBand) -> bool:
+        """A stat band whose axis declares the direction that reaches it: a
+        lower bound wants UP, a bare upper bound wants DOWN (undeclared, so
+        shortening never happens — d51f)."""
+        if band.is_span:
+            return False
+        wanted = (
+            StatDirection.UP if band.at_least is not None else StatDirection.DOWN
+        )
+        return wanted in self._stats.directions(band.member)
+
     def serves(self, floor: str) -> bool:
-        band = self._band(floor)
+        """Floor demands only — a cell reaches this family through
+        `dispatch`, which derives it from the bands a parent fails."""
+        band = self._floor_band(floor)
         return band is not None and bool(self._stats.directions(band[0].title))
 
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Zero-span checkable parents on the DECLARED side of the band,
-        nearest first (smallest move = least meaning risk, d42d). The
-        current value rides along as `stat_value` for the instruction."""
+        """Checkable parents on the DECLARED side of the band, OR already
+        holding it once a prior CORPUS mint's committed words are counted —
+        those sort FIRST, since needing no edit beats any edit (2026-08
+        follow-up). The current value rides along as `stat_value`."""
         axis, low, high = self._band(floor)
         catalog = _catalog(self._catalog_path)
         marks = catalog.assign(
@@ -278,15 +493,29 @@ class StatRewrite(Operator):
             marks, on=["dataset", "query_id"], how="left"
         )
         declared = self._stats.directions(axis.title)
+        # words Inject already committed to insert, known before this step
+        # runs — present only when a CORPUS mint preceded this one
+        extra = (
+            joined["surfaces"].map(lambda s: sum(len(str(x).split()) for x in s))
+            if "surfaces" in joined.columns and axis.stat in WORD_AXES
+            else 0
+        )
+        effective = joined["__value"] + extra
+        already = (effective >= low) & (effective < high)
         movable = (
             (StatDirection.UP in declared) & (joined["__value"] < low)
         ) | (
             (StatDirection.DOWN in declared) & (joined["__value"] >= high)
         )
-        mask = joined["checkable"] & (joined["__spans"] == 0) & movable
-        out = joined[mask].assign(stat_value=joined["__value"])
+        # the zero-span pool is a stat-FLOOR convention (d33b); a cell may
+        # legitimately demand a span band and a stat band together
+        zero_span = True if floor in CELLS_BY_NAME else joined["__spans"] == 0
+        mask = joined["checkable"] & zero_span & (movable | already)
+        out = joined[mask]
+        out = out.assign(stat_value=out["__value"])
         distance = np.where(
-            out["__value"] < low, low - out["__value"], out["__value"] - high
+            already[mask], -1.0,
+            np.where(out["__value"] < low, low - out["__value"], out["__value"] - high),
         )
         return (
             out.assign(__distance=distance)
@@ -294,8 +523,51 @@ class StatRewrite(Operator):
             .drop(columns=["__value", "__spans", "__distance"])
         )
 
-    def instruction(self, floor: str, parent: pd.Series) -> str:
-        axis, low, high = self._band(floor)
+    def _cuts(self, floor: str, parent: pd.Series, requirement: tuple) -> bool:
+        """Whether THIS parent has to shrink — the same read `instruction` makes,
+        so the deterministic and model paths never disagree on direction."""
+        _, low, high = self._band(floor, requirement)
+        current = parent.get("stat_value")
+        return (current is not None and float(current) >= high) or not np.isfinite(low)
+
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Serve the cut by scoring terms, not by writing: keep what ties the
+        query to its gold document, drop filler. Expansion stays with the model
+        — `need-neutral elaboration` has no machine definition, and a padding
+        template would teach the router the template instead of the register."""
+        axis, _, high = self._band(floor, requirement)
+        if axis.stat != "length_words" or not self._cuts(floor, parent, requirement):
+            return None
+        # the spans already in the text are why this parent was selected, so
+        # the cut must not eat them: at `length_words < 3` only two tokens
+        # survive and an acronym otherwise competes with any other rare word
+        carried = tuple(
+            span.text for spans in _spans_by_name(text).values() for span in spans
+        )
+        return _shorten(
+            text,
+            limit=int(high - 1) if np.isfinite(high) else 0,
+            protected=tuple(str(s) for s in (parent.get("surfaces") or ())) + carried,
+            gold=str(parent.get("gold_text") or ""),
+        )
+
+    def instruction(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> str:
+        axis, low, high = self._band(floor, requirement)
+        # which way THIS parent has to move, not which way the band could be
+        # reached: a two-sided band holds parents on both sides of it, and a
+        # parent above the ceiling told to "expand" is being sent backwards
+        current = parent.get("stat_value")
+        overshoots = current is not None and float(current) >= high
+        if overshoots or not np.isfinite(low):
+            return self._cut_instruction(axis, high, parent)
         band = (
             f"at least {low:g}"
             if high == float("inf")
@@ -309,51 +581,89 @@ class StatRewrite(Operator):
             f"Rewrite the user's query so that its {axis.stat} lands "
             f"{band}.{current_note} Preserve the information need exactly: "
             "expand only with need-neutral elaboration, restatement, or "
-            "context the answer does not depend on. Add NO new facts, "
-            "names, numbers, dates, identifiers — and no greetings or "
-            "politeness phrases (any of those changes the query's feature "
-            "profile and fails the check). Use the verify tool to measure, "
-            "iterate until the target passes."
+            "context the answer does not depend on."
         )
 
-    def targets(self, floor: str, parent: pd.Series) -> Targets:
-        axis, low, high = self._band(floor)
+    @staticmethod
+    def _cut_instruction(axis: StatAxis, high: float, parent: pd.Series) -> str:
+        """The destructive move (d53). Cutting drops the words the parent's gold
+        document was judged against, so the document itself is the brief: keep
+        what keeps it answering, and say so when nothing can."""
+        gold = str(parent.get("gold_text") or "")
+        grounding = (
+            "This document is the answer that must still be found:\n"
+            f"---\n{gold}\n---\n"
+            "Keep the words that tie the query to THAT document — its rare and "
+            "specific terms — and drop everything else: filler, politeness, "
+            "restatement, context the document does not depend on. "
+            if gold
+            else "Keep the query's rarest, most specific words and drop filler. "
+        )
+        return (
+            f"Shorten the user's query so that its {axis.stat} falls below "
+            f"{high:g}, keeping every inserted surface character for character. "
+            f"{grounding}If no wording under that limit can still be answered "
+            "by the document, reply with the shortest version that can, and "
+            "say nothing else."
+        )
+
+    def targets(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> Targets:
+        axis, low, high = self._band(floor, requirement)
         return Targets(stats=(StatTarget(
             stat=axis.stat,
             min_value=float(low),
             max_value=None if high == float("inf") else float(high) - 1e-9,
         ),))
 
-    def structural(self, parent: pd.Series, text: str) -> list[str]:
-        """Zero-span parents must stay zero-span — smuggled constraints
-        and register markers are span-visible (d43b)."""
-        found = _regex_extractor().resolve(text)
-        gained = [
-            f"{group.value}.{name}"
-            for group, by_type in found.spans.items()
-            for name, spans in by_type.items()
-            if spans
-        ]
-        if gained:
-            return [f"child gained spans: {gained}"]
+    def structural(
+        self, parent: pd.Series, text: str, targets: Targets
+    ) -> list[str]:
+        """No span the parent lacked and the request did not ask for —
+        smuggled constraints and register markers are span-visible (d43b),
+        while a composed mint's own span is authorised (d52d). A gained span
+        every occurrence of which sits inside a literal Inject already
+        authorised (`parent["surfaces"]`) is not smuggled either — the model
+        chose none of those characters, a different bank just has its own
+        name for some of them (2026-08 follow-up)."""
+        authorised = {target.feature for target in targets.spans}
+        gained = (
+            _span_names(text) - _span_names(str(parent["query"])) - authorised
+        )
+        if not gained:
+            return []
+        surfaces = parent.get("surfaces") or ()
+        child_spans = _spans_by_name(text)
+        smuggled = {
+            name for name in gained
+            if not _explained_by_surfaces(child_spans.get(name, []), text, surfaces)
+        }
+        if smuggled:
+            return [f"child gained spans: {sorted(smuggled)}"]
         return []
 
 
 class InjectOperator(Operator):
-    """Weave a DOC-COPIED identifier surface into the query (d42d/f).
-    The query narrows by design — the answer key is minted against the
-    grounding doc the surface came from, never inherited. One surface per
-    row. Credit is gated by the d40e coherence pilot."""
+    """Weave DOC-COPIED identifier surfaces into the query (d42d/f). The query
+    narrows by design — the answer key is minted against the one document every
+    surface came from, never inherited; credit is gated by the d40e pilot."""
 
     declaration: ClassVar[Declaration] = Declaration(
         operator="inject",
-        floors="id:<domain> and id:<general-bank> identifier floors",
-        grounding=Grounding.DOC_COPIED,
+        floors=(
+            "id:<domain> and id:<general-bank> identifier floors, plus the "
+            "cells declaring inject — those resolve to their required banks"
+        ),
+        surface_origin=SurfaceOrigin.DOC_COPIED,
         answer_key=AnswerKeyPath.MINTED,
         meaning_preserved=False,
         verifiable_by=(
-            "target bank span present + copied surface literally in the "
-            "text + no other identifier floor gained (structural)"
+            "target bank span present at the demanded COUNT + every copied "
+            "surface literally in the text + no other identifier floor gained "
+            "(structural). A demand for n surfaces takes all n from ONE "
+            "document of ONE bank, so the minted key stays single-valued and "
+            "the widened claim is still 'this document answers this query'"
         ),
         credit_gate=CreditGate.COHERENCE_GATE,
         tool_loop=False,
@@ -366,96 +676,274 @@ class InjectOperator(Operator):
         self._order_seed = config.seed
         self._supply = SupplyIndex(config.paths)
 
+    def mints(self, band: AxisBand) -> bool:
+        """Any identifier span asking for more — whether a corpus actually
+        supplies it is the rung test, not the declaration (d51d)."""
+        return band.demands_presence and band.column.startswith(
+            f"{FeatureGroup.STRUCTURED_IDENTIFIERS.value}."
+        )
+
     def serves(self, floor: str) -> bool:
         return floor.startswith("id:")
 
+    def drawable(self, surfaces: pd.DataFrame, floor: str) -> pd.DataFrame:
+        """The surface rows this demand can draw from — an id: floor names
+        its own supply rows, a cell name resolves to its required banks (the
+        index is keyed per bank and carries no cell names)."""
+        if floor in CELLS_BY_NAME:
+            return surfaces[surfaces["bank"].isin(CELL_TO_BANKS[floor])]
+        return surfaces[surfaces["floor"] == floor]
+
+    @staticmethod
+    def wanted(floor: str) -> int:
+        """How many surfaces of one bank the demand needs. A cell asking for two
+        code identifiers is a symbol PILE — one injection cannot make it, and
+        offering one while forbidding a second is a request nothing satisfies
+        (d54)."""
+        cell = CELLS_BY_NAME.get(floor)
+        counts = [
+            int(band.at_least)
+            for band in (cell.bands if cell else ())
+            if band.demands_presence
+        ]
+        return max(counts, default=1)
+
     def eligible(self, selection: pd.DataFrame, floor: str) -> pd.DataFrame:
-        """Rung-1 pairs (d43f): checkable parents lacking the floor whose
-        own gold doc carries a surface of it — joined per lane from the
-        supply index + lane qrels. One deterministic (doc, surface) per
-        parent rides along as `grounding_doc_id` / `surface` / `bank`."""
+        """Rung-1 pairs (d43f): checkable parents the demand does not already
+        cover, whose own JUDGED docs carry enough surfaces of it — joined per
+        lane from the supply index + lane qrels (relevance at the lane's own
+        `min_relevance`, so a graded lane's below-threshold docs are not
+        counted). Its `wanted` surfaces and one primary `grounding_doc_id` ride
+        along, plus `grounding_doc_ids` — EVERY judged doc the surfaces still
+        occur in. Only parents with >= 2 such docs survive: a single-doc key
+        scores 1.0 for every route that finds it (a fake tie at ceiling), so a
+        shallower pair would mint pure waste (d43d fix)."""
+        from hybrid_search_rrf_dataset.lanes import LANES
+
         pool = self.parent_pool(selection)
+        wanted = self.wanted(floor)
         frames: list[pd.DataFrame] = []
         for key, lane in lane_dirs().items():
             surfaces = self._supply.load(lane)
             qrels_path = self._paths.lane_qrels(lane)
             if surfaces.empty or not qrels_path.exists():
                 continue
-            floor_surfaces = surfaces[surfaces["floor"] == floor]
-            if floor_surfaces.empty:
-                continue
-            lane_pool = pool[(pool["dataset"] == key) & pool["checkable"]]
-            lane_pool = lane_pool[
-                ~lane_pool["floors"].map(lambda floors: floor in floors)
-            ]
+            lane_pool = self.unsatisfied(
+                pool[(pool["dataset"] == key) & pool["checkable"]], floor
+            )
             if lane_pool.empty:
                 continue
+            min_rel = LANES[key].min_relevance if key in LANES else 1
             qrels = pd.read_parquet(qrels_path)
-            qrels = qrels[qrels["relevance"] >= 1].astype(
+            qrels = qrels[qrels["relevance"] >= min_rel].astype(
                 {"query_id": str, "doc_id": str}
             )
-            # one deterministic surface per doc, then one doc per parent
-            per_doc = (
-                floor_surfaces.astype({"doc_id": str})
-                .sort_values(["doc_id", "bank", "surface"], kind="stable")
-                .drop_duplicates("doc_id")
-            )
-            pairs = (
-                qrels.merge(per_doc, on="doc_id")
-                .sort_values(["query_id", "doc_id"], kind="stable")
-                .drop_duplicates("query_id")
-                .rename(columns={"doc_id": "grounding_doc_id"})
-            )
+            # only a JUDGED doc can ever ground a pair — `_grounded_pairs`
+            # merges on qrels and reads `doc_surf` solely for docs it drew from
+            # them — so an unjudged doc's surfaces cannot reach any output.
+            # Dropping them here is what keeps the claimability filter off
+            # ~99% of the mined supply on most lanes.
+            drawable = self.drawable(surfaces, floor)
+            drawable = drawable[
+                drawable["doc_id"].astype(str).isin(set(qrels["doc_id"]))
+            ]
+            # claimability still precedes `_offers`: a surface the bank no
+            # longer claims must not count toward the `wanted` threshold
+            floor_surfaces = self._supply.claimable(drawable, lane)
+            if floor_surfaces.empty:
+                continue
+            offers = self._offers(floor_surfaces, wanted)
+            if offers.empty:
+                continue
+            pairs = self._grounded_pairs(qrels, floor_surfaces, offers)
+            if pairs.empty:
+                continue
             matched = lane_pool.assign(
                 query_id=lane_pool["query_id"].astype(str)
             ).merge(
-                pairs[["query_id", "grounding_doc_id", "bank", "surface"]],
+                pairs[
+                    ["query_id", "grounding_doc_id", "grounding_doc_ids",
+                     "bank", "surfaces"]
+                ],
                 on="query_id",
             )
             if not matched.empty:
                 frames.append(matched)
         if not frames:
             return pool.iloc[0:0]
-        return pd.concat(frames, ignore_index=True).sample(
-            frac=1.0, random_state=self._order_seed
-        )
+        return self._keeps_headroom(
+            pd.concat(frames, ignore_index=True), floor
+        ).sample(frac=1.0, random_state=self._order_seed)
 
-    def instruction(self, floor: str, parent: pd.Series) -> str:
+    @staticmethod
+    def _keeps_headroom(matched: pd.DataFrame, floor: str) -> pd.DataFrame:
+        """Parents whose natural-language share still clears the cell's floor
+        once the surfaces land. The share is function words over all words, and
+        an identifier is neither, so k injected tokens move it from `s` to
+        `s*n/(n+k)` — arithmetic on two columns the catalog already carries.
+        Nobody instructs this band, so a parent without the headroom fails a
+        constraint it was never told about; it is cheaper never to pick it."""
+        cell = CELLS_BY_NAME.get(floor)
+        floors = [
+            band.at_least
+            for band in (cell.bands if cell else ())
+            if not band.is_span
+            and band.member == "natural_language_share"
+            and band.at_least is not None
+        ]
+        needed = {SHARE_COLUMN, WORDS_COLUMN}
+        if not floors or matched.empty or not needed <= set(matched.columns):
+            return matched
+        added = matched["surfaces"].map(
+            lambda offered: sum(len(_WORD_TOKEN.findall(str(s))) for s in offered)
+        )
+        words = matched[WORDS_COLUMN]
+        after = matched[SHARE_COLUMN] * words / (words + added).replace(0, np.nan)
+        return matched[after >= max(floors)]
+
+    @staticmethod
+    def _grounded_pairs(
+        qrels: pd.DataFrame, floor_surfaces: pd.DataFrame, offers: pd.DataFrame
+    ) -> pd.DataFrame:
+        """One (query, surfaces) pair per parent whose injected surfaces occur
+        in >= 2 of its judged docs. `grounding_doc_ids` carries all of them (the
+        mint writes the key against every one); `grounding_doc_id` is the
+        primary doc the surfaces were read from, kept for the gold-text cut.
+        Parents whose surfaces reach only one judged doc are dropped, not
+        minted: their key would be a single doc at ceiling — a fake tie no route
+        can break (d43d fix)."""
+        # a dict, not the Series: this is looked up once per (candidate row x
+        # judged doc), and Series.get pays index machinery every time
+        doc_surf = (
+            floor_surfaces.astype({"doc_id": str})
+            .groupby("doc_id")["surface"].agg(frozenset)
+            .to_dict()
+        )
+        rel_docs = qrels.groupby("query_id")["doc_id"].agg(list).to_dict()
+        cand = qrels.merge(offers, on="doc_id")
+        if cand.empty:
+            return cand
+        empty: frozenset[str] = frozenset()
+
+        def grounded(row: pd.Series) -> tuple[str, ...]:
+            wanted = frozenset(row["surfaces"])   # once per row, not per doc
+            return tuple(sorted(
+                doc for doc in rel_docs.get(row["query_id"], ())
+                if wanted <= doc_surf.get(doc, empty)
+            ))
+
+        grounding = cand.apply(grounded, axis=1)
+        cand = cand.assign(grounding_doc_ids=grounding, __depth=grounding.map(len))
+        cand = cand[cand["__depth"] >= 2]
+        if cand.empty:
+            return cand
+        # one pair per query: the deepest grounding set, then stable by doc/bank
         return (
-            "Weave the exact text "
-            f"{str(parent['surface'])!r} into the user's search query as a "
-            "natural constraint or reference. The query may narrow — it no "
-            "longer has to mean exactly what it meant — but it must read as "
-            "one coherent request a real person would type, on the same "
-            "topic. Insert ONLY this one surface, character for character: "
-            "add no other identifiers, names, numbers, or dates, and do not "
-            "alter the inserted text."
+            cand.sort_values(
+                ["query_id", "__depth", "doc_id", "bank"],
+                ascending=[True, False, True, True], kind="stable",
+            )
+            .drop_duplicates("query_id")
+            .drop(columns="__depth")
+            .rename(columns={"doc_id": "grounding_doc_id"})
         )
 
-    def targets(self, floor: str, parent: pd.Series) -> Targets:
-        return Targets(spans=(SpanTarget(feature=str(parent["bank"]), min_count=1),))
+    @staticmethod
+    def _offers(floor_surfaces: pd.DataFrame, wanted: int) -> pd.DataFrame:
+        """Each (doc, bank) that can supply `wanted` DISTINCT surfaces, as one
+        row carrying them. Distinct because two copies of the same token are one
+        span to the banks, so they would never satisfy a count of two."""
+        distinct = (
+            floor_surfaces.astype({"doc_id": str})
+            .drop_duplicates(["doc_id", "bank", "surface"])
+            .sort_values(["doc_id", "bank", "surface"], kind="stable")
+        )
+        grouped = (
+            distinct.groupby(["doc_id", "bank"], sort=False)["surface"]
+            .apply(tuple)
+            .reset_index(name="surfaces")
+        )
+        enough = grouped[grouped["surfaces"].map(len) >= wanted]
+        return enough.assign(surfaces=enough["surfaces"].map(lambda s: s[:wanted]))
 
-    def structural(self, parent: pd.Series, text: str) -> list[str]:
+    def apply(
+        self,
+        parent: pd.Series,
+        floor: str,
+        text: str,
+        requirement: tuple = (),
+    ) -> str | None:
+        """Append the copied surfaces verbatim, and hand the row back to the
+        model when the bank does not CLAIM them where they land. Containment
+        and claimability are different properties: version_string is
+        keyword-gated, so a bare `17.2` appended to a query is literally
+        present and still measures zero — only a rewrite that supplies the
+        gate word can satisfy that target."""
+        missing = [str(s) for s in parent["surfaces"] if str(s) not in text]
+        placed = f"{text.rstrip()} {' '.join(missing)}" if missing else text
+        claimed = _regex_extractor().resolve(
+            placed, groups=[FeatureGroup.STRUCTURED_IDENTIFIERS]
+        ).spans.get(FeatureGroup.STRUCTURED_IDENTIFIERS, {})
+        if len(claimed.get(str(parent["bank"]), ())) < len(parent["surfaces"]):
+            return None
+        return placed
+
+    def instruction(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> str:
+        offered = tuple(parent["surfaces"])
+        listed = ", ".join(repr(surface) for surface in offered)
+        each = (
+            f"all {len(offered)} of these exact texts ({listed})"
+            if len(offered) > 1
+            else f"the exact text {listed}"
+        )
+        return (
+            f"Weave {each} into the user's search query, on the same topic. The "
+            "query may narrow — it no longer has to mean exactly what it meant. "
+            "Insert them character for character, and do not alter them."
+        )
+
+    def targets(
+        self, floor: str, parent: pd.Series, requirement: tuple = ()
+    ) -> Targets:
+        return Targets(spans=(SpanTarget(
+            feature=str(parent["bank"]), min_count=len(parent["surfaces"])
+        ),))
+
+    def structural(
+        self, parent: pd.Series, text: str, targets: Targets
+    ) -> list[str]:
         problems: list[str] = []
-        surface = str(parent["surface"])
-        if surface not in text:
-            problems.append(f"copied surface {surface!r} not literally present")
+        missing = [s for s in parent["surfaces"] if str(s) not in text]
+        if missing:
+            problems.append(f"copied surface(s) {missing!r} not literally present")
         found = _regex_extractor().resolve(
             text, groups=[FeatureGroup.STRUCTURED_IDENTIFIERS]
         ).spans.get(FeatureGroup.STRUCTURED_IDENTIFIERS, {})
         child_floors = {identifier_floor_key(bank) for bank in found}
         parent_floors = {f for f in parent["floors"] if f.startswith("id:")}
-        target_floor = identifier_floor_key(str(parent["bank"]))
-        extra = child_floors - parent_floors - {target_floor}
+        # the authorised floors are the request's own span targets — a marker
+        # target names no identifier bank, so it never reaches the mapping
+        authorised = {
+            identifier_floor_key(target.feature)
+            for target in targets.spans
+            if target.feature in found
+        }
+        extra = child_floors - parent_floors - authorised
         if extra:
             problems.append(f"gained other identifier floors: {sorted(extra)}")
         return problems
 
-    def candidate(self, parent, floor, text, attempts):
-        base = super().candidate(parent, floor, text, attempts)
-        return base.model_copy(
-            update={"grounding_doc_id": str(parent["grounding_doc_id"])}
-        )
+    def candidate(self, parent, floor, outcome):
+        base = super().candidate(parent, floor, outcome)
+        ids = parent.get("grounding_doc_ids")
+        return base.model_copy(update={
+            "grounding_doc_id": str(parent["grounding_doc_id"]),
+            "grounding_doc_ids": tuple(str(d) for d in ids)
+            if ids is not None
+            else (),
+        })
 
 
 OPERATOR_FAMILIES: tuple[type[Operator], ...] = (
@@ -463,6 +951,7 @@ OPERATOR_FAMILIES: tuple[type[Operator], ...] = (
     OperatorSyntaxRewrite,
     StatRewrite,
     InjectOperator,
+    CorruptOperator,
 )
 """Registry order = dispatch order: the first family that `serves()` the
 floor wins."""
@@ -481,7 +970,7 @@ def operator_for(
     floor: str, operators: tuple[Operator, ...] | None = None
 ) -> Operator | None:
     """Dispatch by floor key (d42d) — `id:` / `marker:` / `logical:` /
-    stat-axis prefixes, not the loop's grounding branches. Defaults to the
+    stat-axis prefixes, not the loop's surface_origin branches. Defaults to the
     default-config families; a floor no family serves returns None."""
     return next(
         (op for op in (operators or default_operators()) if op.serves(floor)),

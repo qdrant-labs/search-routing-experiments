@@ -9,10 +9,22 @@ count as a hit and hand a perfect score to a route that answered nothing.
 
 from __future__ import annotations
 
+import threading
 from abc import ABCMeta, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field
 from ranx import Qrels, Run, evaluate
+
+_RANX_LOCK = threading.Lock()
+"""ranx's ndcg is `@njit(parallel=True)` (numba). Numba's default 'workqueue'
+threading layer crashes ('Fatal Python error: Aborted') the moment it's
+entered from more than one Python thread at once — measured, reproducible,
+independent of JIT warm-up. Every `Objective` subclass funnels through this
+one method, so one process-wide lock here — not per-instance, since the
+conflict is with numba's own global threading layer, not with any one
+objective — is what makes `FusionBuilder.build(max_workers>1)` safe. The
+locked section is pure CPU (no network), so serializing it barely dents the
+concurrency win it protects."""
 
 
 # metaclass=ABCMeta declares the abstractness explicitly without a second
@@ -24,7 +36,9 @@ class Objective(BaseModel, metaclass=ABCMeta):
     top_k: int = Field(default=10, gt=0)
     min_relevance: int = Field(default=1, ge=1)
     """Grades below this are irrelevant. TREC-DL's 0-3 scale needs 2; qrels
-    that are already binary need 1. Set per dataset, not globally."""
+    that are already binary need 1. Set per dataset, not globally — so it
+    cannot enter `name` without splitting comparability per lane; a cache's
+    value is fingerprinted by `golden.ScoringRegime` instead."""
 
     @property
     @abstractmethod
@@ -53,6 +67,16 @@ class Objective(BaseModel, metaclass=ABCMeta):
     def score(self, ranking: dict[str, float], gold_qrel: dict[str, int]) -> float:
         return self.assess(ranking, gold_qrel)[0]
 
+    def assess_order(
+        self, order: list[str], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        """`assess` for a persisted order instead of a score dict: the stored ids
+        handed back as descending synthetic scores, the device `ndcg` already
+        uses. The one adapter, so an order and a ranking cannot score apart."""
+        return self.assess(
+            {doc: float(len(order) - i) for i, doc in enumerate(order)}, gold_qrel
+        )
+
     def relevant(self, gold_qrel: dict[str, int]) -> dict[str, int]:
         return {d: r for d, r in gold_qrel.items() if r >= self.min_relevance}
 
@@ -62,8 +86,16 @@ class Objective(BaseModel, metaclass=ABCMeta):
         ranked = sorted(ranking.items(), key=lambda kv: -kv[1])
         return [doc_id for doc_id, _ in ranked[: self.top_k]]
 
-    def ndcg(self, ranking: dict[str, float], relevant: dict[str, int]) -> float:
-        """NDCG@k over an already-thresholded relevant set.
+    def ndcg(self, ordered: list[str], relevant: dict[str, int]) -> float:
+        """NDCG@k over exactly the persisted top-k ids, best first.
+
+        Scored from the same `ordered()` list a row stores, not the raw
+        ranking dict: ranx sorts its input with numpy's unstable sort, which
+        scrambles score ties differently from `ordered()`'s stable sort, so
+        passing the dict let a tied gold doc count toward the score while
+        falling outside the stored top-k (the parquet round-trip bug). Synthetic
+        descending scores reproduce `ordered`'s order under ranx; NDCG reads
+        ranks, not score magnitudes, so non-tie values are unchanged.
 
         Shared by `NDCGObjective` and `RouterObjective`'s tie-breaker so the
         two cannot drift apart. ranx applies linear gain, so a grade-2 doc
@@ -74,15 +106,17 @@ class Objective(BaseModel, metaclass=ABCMeta):
         query and identical across routes, so it divides out and the argmax is
         unaffected — but absolute values are not comparable to published NDCG.
         """
-        if not relevant or not ranking:
+        if not relevant or not ordered:
             return 0.0
-        return float(
-            evaluate(
-                Qrels({"q": relevant}),
-                Run({"q": ranking}),
-                f"ndcg@{self.top_k}",
+        run = {doc: float(len(ordered) - i) for i, doc in enumerate(ordered)}
+        with _RANX_LOCK:
+            return float(
+                evaluate(
+                    Qrels({"q": relevant}),
+                    Run({"q": run}),
+                    f"ndcg@{self.top_k}",
+                )
             )
-        )
 
 
 class RouterObjective(Objective):
@@ -129,7 +163,7 @@ class RouterObjective(Objective):
         if not relevant:
             return 0.0, top
         hit = self.hit_weight if top and top[0] in relevant else 0.0
-        return hit + self.ndcg_weight * self.ndcg(ranking, relevant), top
+        return hit + self.ndcg_weight * self.ndcg(top, relevant), top
 
 
 class NDCGObjective(Objective):
@@ -152,7 +186,51 @@ class NDCGObjective(Objective):
     def assess(
         self, ranking: dict[str, float], gold_qrel: dict[str, int]
     ) -> tuple[float, list[str]]:
+        top = self.ordered(ranking)
+        return self.ndcg(top, self.relevant(gold_qrel)), top
+
+
+class WastedRecallObjective(Objective):
+    """`hit_weight`·HitRate@1 + `ndcg_weight`·NDCG@k² − `waste_weight`·Recall@k·(1−NDCG@k).
+
+    The penalty is proportional to Recall, so it only bites when there was
+    real recall to waste — a route with low Recall AND low NDCG is already
+    scored low by the positive terms and isn't double-punished here.
+    """
+
+    hit_weight: float = Field(default=0.7, ge=0.0)
+    ndcg_weight: float = Field(default=0.3, ge=0.0)
+    waste_weight: float = Field(default=0.3, ge=0.0)
+
+    @property
+    def name(self) -> str:
         return (
-            self.ndcg(ranking, self.relevant(gold_qrel)),
-            self.ordered(ranking),
+            f"{self.hit_weight:g}*HR@1+{self.ndcg_weight:g}*NDCG@{self.top_k}^2"
+            f"-{self.waste_weight:g}*wasted_recall"
         )
+
+    @property
+    def decisive_margin(self) -> float:
+        # unlike RouterObjective, the penalty can pull a rank-1 hit below
+        # ndcg_weight, so no fixed gap certifies a top-1 separation.
+        return float("inf")
+
+    def assess(
+        self, ranking: dict[str, float], gold_qrel: dict[str, int]
+    ) -> tuple[float, list[str]]:
+        top = self.ordered(ranking)
+        relevant = self.relevant(gold_qrel)
+        if not relevant:
+            return 0.0, top
+        hit = self.hit_weight if top and top[0] in relevant else 0.0
+        # scored from the persisted `ordered()` list, never the raw dict —
+        # the dict path re-sorts unstably and scrambles score ties (the
+        # parquet round-trip bug the notebook version still carries)
+        ndcg = self.ndcg(top, relevant)
+        recall = len(set(top) & relevant.keys()) / len(relevant)
+        score = (
+            hit
+            + self.ndcg_weight * ndcg**2
+            - self.waste_weight * recall * (1 - ndcg)
+        )
+        return score, top

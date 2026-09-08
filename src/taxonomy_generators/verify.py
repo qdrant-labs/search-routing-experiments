@@ -8,6 +8,7 @@ are always re-measured on final text, never trusted from a generator).
 from pydantic import BaseModel, ConfigDict
 
 from query_taxonomy.features import FeatureExtractor
+from query_taxonomy.taxonomy import FeatureGroup
 
 
 class SpanTarget(BaseModel):
@@ -94,6 +95,16 @@ def verify(
         for values in types.values():
             for stat in values:
                 stat_values[stat.name] = stat.value
+    # the catalog derives this same total from the same parts on every read
+    # (composition.floors.with_derived), and a band asking "carries no
+    # identifier of any kind" is measured here or nowhere — text is the only
+    # thing this side has
+    stat_values["identifier_spans"] = float(sum(
+        len(matches)
+        for matches in features.spans.get(
+            FeatureGroup.STRUCTURED_IDENTIFIERS, {}
+        ).values()
+    ))
 
     checks: list[TargetCheck] = []
     for span_target in targets.spans:

@@ -14,7 +14,7 @@ Two kinds of value live here, and the difference is load-bearing:
   one entry plus its pilot.
 
 Paths resolve from the package rather than the process cwd — the convention
-`composition/compose.py` and `labels.py` already follow — so a script run
+`composition/cellfill.py` and `labels.py` already follow — so a script run
 from the repo root and a notebook run from `src/` read the same artifacts.
 """
 
@@ -26,6 +26,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hybrid_search_rrf_dataset.paths import LanePaths
+
 _DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 
 _DEFAULT_DECORATIONS = {
@@ -35,6 +37,17 @@ _DEFAULT_DECORATIONS = {
 }
 
 _DEFAULT_FORMAL_FLOORS = ("logical:math_expression", "logical:code_fragment")
+
+MAX_CHANCES = 3
+"""How many separate turns a floor gets before it is dropped for the rest of
+the run — not a timeout, a fairness budget: 3 chances x FAULT_STREAK faults
+each is the fixed, worst-case-provable ceiling on wasted spend."""
+FAULT_STREAK = 3
+"""Consecutive faulty parent attempts (an engine error, a structural
+rejection, or a measured-but-failed target all count the same) that end a
+floor's current turn and spend one chance. `AugmentationLoop.run` defaults to
+this too, so the ceiling above holds on EVERY path — the campaign used to be
+the only caller passing it, which left `--floor` unbounded."""
 
 
 class StatDirection(StrEnum):
@@ -63,6 +76,18 @@ _DEFAULT_STAT_ENTRIES = (
         rationale=(
             "expansion adds need-neutral padding; deletion-free — piloted "
             "per d42h before credit"
+        ),
+    ),
+    StatEntry(
+        axis="length_words",
+        direction=StatDirection.DOWN,
+        rationale=(
+            "compression drops words, so meaning survives only against the "
+            "corpus: the cut keeps the terms that keep the parent's gold "
+            "document answering, plus any minted surface verbatim. Where no "
+            "cut can preserve that, the row needs a document of its own and "
+            "belongs to construction, not augmentation — the audit judges "
+            "exactly that boundary before credit"
         ),
     ),
 )
@@ -98,15 +123,9 @@ class StatDeclarations(BaseModel):
         return self.model_copy(update={"entries": (*self.entries, entry)})
 
 
-class AugmentationPaths(BaseModel):
-    """Every artifact the loop touches, derived from one root."""
-
-    model_config = ConfigDict(frozen=True)
-
-    data_dir: Path = Field(
-        default=_DATA_ROOT,
-        description="Data root holding the lane dirs, composition and pool.",
-    )
+class AugmentationPaths(LanePaths):
+    """Every artifact the loop touches, derived from one root — the lane layout
+    inherited, the loop's own artifacts added."""
 
     @property
     def augmentation_dir(self) -> Path:
@@ -121,21 +140,39 @@ class AugmentationPaths(BaseModel):
         return self.augmentation_dir / "qrels.parquet"
 
     @property
+    def constructed_docs(self) -> Path:
+        """The synthetic rung's own document store — deliberately outside any
+        lane dir, because a constructed doc must never reach a collection
+        whose labels are already paid for."""
+        return self.augmentation_dir / "constructed_docs.parquet"
+
+    @property
+    def coherence_audit(self) -> Path:
+        """The coherence gate's verdicts — a row's `credit_gate` is provenance,
+        so the verdict is banked beside the pool rather than into it."""
+        return self.augmentation_dir / "coherence_audit.parquet"
+
+    @property
     def order_sheet(self) -> Path:
         return self.data_dir / "composition" / "order_sheet.parquet"
+
+    @property
+    def cell_order_sheet(self) -> Path:
+        """The cell fill's shortfalls — cell-named floors, so the loop reads
+        it by passing `sheet_path`; the slice sheet above stays the default
+        until its artifact retires."""
+        return self.data_dir / "composition" / "cell_order_sheet.parquet"
 
     @property
     def catalog(self) -> Path:
         return self.data_dir / "feature_table" / "catalog.parquet"
 
-    def lane_qrels(self, lane: str) -> Path:
-        return self.data_dir / lane / "qrels.parquet"
+    @property
+    def corruption_census(self) -> Path:
+        """Per-lane natural corruption rates — what makes a degree a delta
+        over the lane rather than a hand-set number."""
+        return self.data_dir / "corruption_census.parquet"
 
-    def lane_corpus(self, lane: str) -> Path:
-        return self.data_dir / lane / "corpus.parquet"
-
-    def lane_surfaces(self, lane: str) -> Path:
-        return self.data_dir / lane / "surfaces.parquet"
 
 
 class EngineSettings(BaseModel):
@@ -154,6 +191,19 @@ class EngineSettings(BaseModel):
     max_rounds: int = Field(
         default=6,
         description="Tool-call rounds per attempt (tool-loop mode only).",
+    )
+    max_spend_usd: float = Field(
+        default=10.0,
+        description=(
+            "Dollar ceiling for one RUN, enforced before each call by "
+            "`engine.Budget`. Scripts expose it as --max-spend-usd."
+        ),
+    )
+    usd_per_mtok_in: float = Field(
+        default=1.0, description="Prompt price per million tokens (haiku-4-5)."
+    )
+    usd_per_mtok_out: float = Field(
+        default=5.0, description="Completion price per million tokens (haiku-4-5)."
     )
 
 
@@ -196,6 +246,22 @@ class AugmentationConfig(BaseModel):
         description=(
             "Audit-sample size for gated floors — sized by the human who "
             "reads the sample, not derived."
+        ),
+    )
+    llm_workers: int = Field(
+        default=8,
+        description=(
+            "Concurrent completion calls for the judge and the lane rung "
+            "(1 = serial). A resource dial, not a semantics one: results are "
+            "consumed in submission order either way."
+        ),
+    )
+    coherence_pass_rate: float = Field(
+        default=0.9,
+        description=(
+            "Share of a floor's judged coherence pilot that must pass before "
+            "its credit gate opens — a HAND policy dial, not derived from any "
+            "measurement: it says how much incoherence the dataset tolerates."
         ),
     )
     first_generation_only: bool = Field(

@@ -2,7 +2,7 @@ from random import Random
 
 import pytest
 
-from query_taxonomy import FEATURE_BANKS
+from query_taxonomy import FEATURE_BANKS, split_bank
 from query_taxonomy.core import AmbiguityTier, RegexBank
 from query_taxonomy.taxonomy import FeatureGroup
 
@@ -17,10 +17,14 @@ from taxonomy_generators import (
     verify,
 )
 
+# keyed the way a generator names itself (`PatternGenerator.feature` ->
+# "{group}:{name}"), not by the bare bank name — the two dialects made every
+# lookup here a KeyError and the round-trip gate vacuous
 BANKS_BY_FEATURE = {
-    str(bank.name): bank
-    for classes in FEATURE_BANKS.values()
-    for cls in classes
+    f"{bank.group}:{bank.name}": bank
+    for specs in FEATURE_BANKS.values()
+    for spec in specs
+    for cls, _kwargs in (split_bank(spec),)
     if issubclass(cls, RegexBank)
     for bank in (cls(),)
 }
@@ -52,7 +56,7 @@ def test_every_regex_span_bank_has_a_generator() -> None:
 class _UuidOverride(SurfaceGenerator):
     @property
     def feature(self) -> str:
-        return "uuid"
+        return "structured_identifiers:uuid"
 
     @property
     def group(self) -> FeatureGroup:
@@ -79,7 +83,9 @@ class _InventedOverride(_UuidOverride):
 def test_override_shadows_default_by_feature_name() -> None:
     registry = build_registry(overrides=(_UuidOverride,))
     generators = registry[FeatureGroup.STRUCTURED_IDENTIFIERS]
-    shadowed = next(g for g in generators if g.feature == "uuid")
+    shadowed = next(
+        g for g in generators if g.feature == "structured_identifiers:uuid"
+    )
     assert isinstance(shadowed, _UuidOverride)
 
 
@@ -109,7 +115,8 @@ def test_verify_absent_stat_fails_with_none() -> None:
 
 def test_generate_surface_tool_is_seed_deterministic() -> None:
     tools = {spec.name: spec for spec in build_tools(seed=1)}
-    first = tools["generate_surface"].run(feature="uuid", n=3, seed=7)
-    second = tools["generate_surface"].run(feature="uuid", n=3, seed=7)
+    key = "structured_identifiers:uuid"
+    first = tools["generate_surface"].run(feature=key, n=3, seed=7)
+    second = tools["generate_surface"].run(feature=key, n=3, seed=7)
     assert first == second
     assert len(first["surfaces"]) == 3

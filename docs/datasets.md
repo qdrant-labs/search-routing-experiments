@@ -15,6 +15,10 @@ Backends: `irds` = `IRDatasetsBacked` subclass (one-liner), `hf` =
 HF `load_dataset(..., streaming=True)` fetcher (MiraclDev pattern), `url` =
 jsonl over HTTP via the HF `json` loader (still streaming, still cached once).
 
+Acquisition standing is one question, **publication** standing is another:
+what we may redistribute is in "Licensing and publication standing" at the
+end of this file — the source of truth for that, nowhere else.
+
 ## Already registered
 
 | dataset             | card                              | backend | notes                                                          |
@@ -189,7 +193,211 @@ only — no ambiguity (user assessment 2026-07-20).
 calibration* contrast — what LLM-written queries look like vs real logs
 (feature-distribution diff against ORCAS).
 
+## Wave 3 — query-distribution expansion
+
+Wave 3 deliberately adds query distributions that the earlier roadmap
+undersampled: product search, finance, conversational context, enterprise
+support, argument retrieval, and claim retrieval. Six sources are implemented
+in `LANES`; the remaining pilot candidates stay proposals. A pilot is
+promoted only after it demonstrates decisive dense/sparse/hybrid rows; qrels
+alone do not justify a lane if most sampled queries become ties or all-zero
+rows. CAsT / TechQA / Touché were promoted alongside the build-next three to
+extend the agentic-flavored (multi-turn, long-form troubleshooting,
+comparative argument) query mix — measure them next.
+
+### Implemented
+
+#### Amazon Shopping Queries / ESCI — `amazon-esci-en-hard`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · url, official GitHub LFS media over
+`amazon-science/esci-data` · Apache-2.0 repository
+
+The reduced Task 1 English split has 29,844 authentic customer queries and
+601,354 query-product judgments. It adds a major missing distribution:
+short, attribute-heavy product search with model numbers, units, brands,
+comparatives, negation, and substitution intent.
+
+- **Query:** the original customer query.
+- **Corpus:** one document per product, concatenating title, brand, color,
+  bullet points, description, and other searchable attributes while retaining
+  the product ID as `doc_id`.
+- **Qrels:** map ESCI labels `E=2`, `S=1`, `C=0`, `I=0`; minimum relevant
+  grade is 1. Exact and substitute are grades in one lane, not separate lanes.
+- **Harvest:** SKU/BARCODE-like identifiers, VALUE_WITH_UNIT, NUMBER, proper
+  nouns, acronyms, comparative and negation markers, coordination, short
+  keyword queries, and high-OOV queries.
+- **First cut:** English reduced/hard only. Spanish and Japanese stay deferred
+  until multilingual labeling is in place.
+- **Materialization:** the full hard set has 394,057 unique E/S products, so
+  metadata must first narrow to the composition's query IDs; the standard
+  corpus recipe then force-includes their relevant products and samples
+  distractors. An unscoped full-catalog build is intentionally rejected.
+
+#### WANDS — `wands`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · url fetcher over
+`wayfair/WANDS` · MIT
+
+480 genuine historical Wayfair queries over 42,994 products with 233,448
+human relevance judgments. Its unusually deep judgments (roughly 486 per
+query) make it a calibration lane for distinguishing real strategy ties from
+shallow-qrel artifacts.
+
+- **Query:** the original customer query.
+- **Corpus:** product name, product class, category hierarchy, description,
+  and structured features, keyed by product ID.
+- **Qrels:** `Exact=2`, `Partial=1`, `Irrelevant=0`; use the full product
+  corpus, including judged and unjudged products.
+- **Harvest:** furniture dimensions, materials, styles, colors, product types,
+  coordination, and short commercial keyword queries.
+
+#### FinDER — `finder`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · hf
+`Linq-AI-Research/FinDER` · CC-BY-NC-4.0
+
+5,703 professional finance queries grounded in evidence from 490 companies'
+10-K filings. This adds ticker symbols, filing terminology, fiscal periods,
+currency, percentages, and quantitative comparison questions.
+
+- **Query:** the `text` field; retain reasoning/category metadata.
+- **Corpus:** deduplicate every passage in `references` by normalized content;
+  generate stable content-derived `doc_id` values and preserve source metadata.
+- **Qrels:** every referenced passage for a query is relevant. Preserve any
+  upstream relevance distinctions if the schema exposes them; otherwise use
+  binary relevance 1.
+- **Publication:** pointer-only unless the non-commercial license is explicitly
+  accepted for the intended artifact.
+
+#### TREC CAsT 2020 — `trec-cast-2020-history`
+`(QQ, LLM-0, G, NT-1, i18-0, MM-0)` · irds
+`trec-cast/v1/2020/judged` · mixed upstream terms
+
+208 judged conversational turns over the MS MARCO passage and TREC CAR
+corpora. The lane is valuable only if the production router receives dialogue
+history, so both the registry and the retrieval lane serialize each turn as
+`prior_utterances [CURRENT] current_utterance`, grouped by `topic_number` and
+ordered by `turn_number`. The manual/automatic rewrites remain upstream and
+are not composed into the query text. Use the official passage qrels unchanged.
+
+#### TechQA — `techqa`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · hf `rojagtap/tech-qa` (unofficial
+mirror; `IBM/TechQA` is not on the Hub) · repository Apache-2.0; content
+terms need verification
+
+Real technical-support forum questions linked to Technote passages: 600
+train, 310 validation, 490 test rows in the mirror. Query text is the full
+forum question; each row's `document` becomes a corpus entry keyed by
+`techqa-<sha256(24)>`, deduplicated across splits; qrels bind the query to
+its linked document with binary relevance 1. The mirror ships the linked
+Technote text per row rather than the full ~802K IBM Technote catalog, so
+this is a pilot substrate, not the full-corpus lane the routing measurement
+would ultimately want. Expected harvest includes error strings, product and
+version identifiers, log fragments, and long troubleshooting language.
+
+#### Touché 2020 — `beir-touche-2020`
+`(QQ, LLM-0, G, NT-1, i18-0, MM-0)` · irds
+`beir/webis-touche2020/v2` · verify redistribution terms
+
+49 comparative or controversial decision topics over roughly 383K argument
+passages with deep judgments. Use the topic title/text as the query, argument
+passages as the corpus, and the official graded qrels. Its small topic count
+makes it better suited to evaluation/calibration unless profiling finds a
+clear decisive stratum.
+
+### Pilot before promotion
+
+#### SciFact — `beir-scifact`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · irds `beir/scifact/test` (optionally
+train after leakage review) · CC-BY-NC-2.0
+
+Expert-written scientific claims retrieve evidence from about 5.2K abstracts.
+The declarative-claim query form is distinct from ordinary search and should
+therefore earn promotion through measured routing value. Preserve official
+qrels and support/contradiction metadata; index the complete abstract corpus,
+not only cited abstracts.
+
+#### TREC Fair Ranking 2020 — `trec-fair-2020`
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` · irds/custom · verify corpus access
+
+About 200 production academic-search query sequences over a multi-million
+document Semantic Scholar corpus. It adds real paper-seeking shorthand that
+differs from CRUMB's generated academic tasks. Use the production query text,
+paper title+abstract documents, and official relevance judgments; ignore the
+fair-exposure objective for routing labels. Pilot because the corpus is large
+relative to the number of unique topics.
+
 ## Gated / deferred
+
+### TripClick
+`(QQ, LLM-0, S, NT-0, i18-0, MM-0)` · irds `tripclick/val` · RESTRICTED
+(source dataset must be requested)
+Real health-search logs: the validation collection alone has about 3.5K
+queries, 82K click-derived qrels, and 1.52M documents. This is a valuable
+consumer-health distribution, but access terms, user-data/privacy review,
+medical-domain overlap, and noisy behavioral qrels gate it.
+
+### QReCC
+`(QQ, LLM-0, G, NT-1, i18-0, MM-0)` · custom/HF · CC-BY-SA-3.0
+14K conversations, 81K question-answer pairs, and a roughly 54M-passage web
+corpus. It offers rich conversational rewriting, but is expensive and
+share-alike; run the smaller CAsT history pilot before taking on QReCC. If
+admitted, use serialized history as the query and the official retrieval
+labels rather than treating answer strings as qrels.
+
+### KuaiSearch
+`(QQ, LLM-0, S, NT-1, i18-1, MM-0)` · hf
+`benchen4395/KuaiSearch` · MIT
+Large Chinese e-commerce search data: 2.57M authentic queries and 18.6M
+products in the full release; the Lite variant still has about 556K queries
+and 6.63M items. It includes recall, ranking, and relevance signals and would
+be a strong commerce lane after multilingual dense labeling is supported.
+Running it through the current English labeler would manufacture sparse wins.
+
+### KuaiSAR
+`(QQ, LLM-0, S, NT-1, i18-1, MM-0)` · custom · CC-BY-NC-SA-4.0
+Chinese short-video search/recommendation logs with about 454K queries, 3.0M
+search items, and 5.1M search actions. It adds authentic behavioral queries,
+but non-commercial/share-alike terms, Chinese labeling support, and the design
+of interaction-derived qrels must be resolved first.
+
+### TREC Product Search 2023
+`(QQ, LLM-1, S, NT-1, i18-0, MM-0)` · custom/NIST + ESCI corpus · mixed terms
+1.66M products, about 30.7K train/dev queries, and 926 test queries, only 182
+of which are judged. Because the topics were generated with GPT-4 or extracted
+from product title/description spans, this is an evaluation stress set rather
+than a new authentic commerce distribution; ESCI and WANDS come first. Use
+official qrels and text fields only—images remain out of scope for text v0.
+
+### JDsearch
+`(QQ, LLM-0, S, NT-1, i18-1, MM-0)` · custom · CC-BY-NC-SA-4.0 data
+171,728 test queries, 12.87M items, and 26.7M interactions from Chinese
+e-commerce. Query and product text is anonymized into token IDs, which defeats
+taxonomy feature harvesting; keep it out unless a future experiment targets
+retrieval behavior independent of readable query features.
+
+### Amazon Reviews / MAVE
+Not lane-ready. Amazon Reviews supplies product/review text but no authentic
+query-to-corpus qrels. MAVE (`google-research-datasets/MAVE`) supplies
+attribute labels over 2.2M Amazon product profiles, but likewise has no search
+queries or relevance judgments. Treat either as an augmentation source for
+commerce documents/features, never as a standalone lane without an explicit
+query-and-qrels provenance design.
+
+### TREC CrisisFACTS
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` candidate · custom/NIST · mixed social
+media terms
+Disaster questions over time-ordered Twitter, Reddit, news, and Facebook
+streams. The task is temporal fact extraction/summarization rather than plain
+ad-hoc retrieval, and source-post redistribution is problematic. Defer until
+there is a principled document unit, timestamp-aware query representation,
+and qrels conversion.
+
+### TREC Health Misinformation 2020/2021
+`(QQ, LLM-0, S, NT-1, i18-0, MM-0)` candidate · custom/NIST +
+Common Crawl/C4 · mixed terms
+Consumer-health questions and keyword queries judged for relevance,
+correctness, and credibility. It could add decision and credibility language,
+but has few topics and a multi-aspect objective. A future pilot must define
+whether routing utility uses relevance alone or a correctness/credibility
+filter; those choices must not be silently collapsed into ordinary qrels.
 
 ### LMSYS-Chat-1M
 `(QO, LLM-0, G, NT-1, i18-1, MM-0)` · hf `lmsys/lmsys-chat-1m` · GATED
@@ -230,3 +438,124 @@ LLM-generated answers + expert faithfulness/relevance judgments. **Not a
 query source** — its queries are MIRACL's, already registered. Its value
 (human judgments for LLM-as-judge) belongs to the deferred strategy-labeling
 / judge stage; revisit there.
+
+## Licensing and publication standing
+
+Verified 2026-08-20 against primary sources (HF dataset cards, upstream
+repos, the program's own terms page) for the 42 pre-Wave-3 lanes, which
+collapse to 18 upstream source families. `LANES` now contains 45 lanes; the
+three implemented Wave-3 families retain the initial standing below until a
+release-focused verification. Re-verify before any release: upstream cards
+get retagged.
+
+Wave 3 and the newly deferred candidates above are **not** part of that
+verified 42-lane matrix. Their initial standing, to be reverified before
+publication, is:
+
+| candidate family | initial license/access standing | ids | query | docs |
+| -----------------| --------------------------------| -----| -------| ------|
+| Amazon ESCI | repository Apache-2.0; product-content provenance needs review | ok | check | check |
+| WANDS | MIT | ok | ok | ok |
+| FinDER | CC-BY-NC-4.0 | ok | no | no |
+| TREC CAsT 2020 | NIST topics/qrels over MS MARCO + TREC CAR | ok | check | no |
+| TechQA | repository Apache-2.0; forum/Technote content needs review | ok | check | check |
+| Touché 2020 | redistribution terms not yet verified | check | check | check |
+| SciFact | CC-BY-NC-2.0 | ok | no | no |
+| TREC Fair Ranking 2020 | topic and Semantic Scholar corpus terms need review | check | check | check |
+| TripClick | request-only source dataset and user-log terms | terms | no | no |
+| QReCC | CC-BY-SA-3.0 compilation; underlying web corpus needs review | ok | SA | check |
+| KuaiSearch | MIT | ok | ok | ok |
+| KuaiSAR | CC-BY-NC-SA-4.0 | ok | no | no |
+| TREC Product Search 2023 | NIST topics/qrels + Amazon product corpus | ok | check | check |
+| JDsearch | CC-BY-NC-SA-4.0 data | ok | no | no |
+| Amazon Reviews / MAVE | product-profile/review provenance needs review | check | no | no |
+| TREC CrisisFACTS | NIST task + mixed social/news source terms | ok | check | no |
+| TREC Health Misinformation | NIST topics/qrels + Common Crawl/C4 corpus | ok | check | no |
+
+**What decides everything is the shape of the artifact, not the lane.**
+`select_v3_prototype.py` writes `(dataset, query_id, route_class, certified)`
+— pointers plus our own measurement. IDs are facts and `route_class` is ours,
+so that shape is the TREC-qrels / `ir_datasets` pattern and carries almost no
+upstream copyright. The `query` column (already in `catalog_v3.parquet`)
+redistributes their text and per-source licenses bind. Document text binds
+share-alike and the scraped-content problems on top.
+
+Columns below: standing for the pointer artifact / + query text / + doc text.
+`ok` = permitted, `attrib` = attribution required, `SA` = share-alike
+propagates to whatever file it ships in, `terms` = permitted but the upstream
+terms restrict *our* use, `no` = do not ship, `check` = unresolved.
+
+| lanes | family | license (verified) | ids | query | docs |
+| ------| --------| --------------------| -----| -------| ------|
+| 8 | CRUMB `jfkback/crumb` | **CC-BY-NC-4.0** | ok | no | no |
+| 1 | msmarco-passage-dev | **non-commercial research only** | terms | no | no |
+| 1 | trec-dl-2022 | MS MARCO v2 terms; NIST qrels terms unstated | terms | no | no |
+| 1 | orcas | MS MARCO terms; also a real Bing click log | terms | no | no |
+| 1 | antique | **none stated**; from Yahoo Webscope L6, whose DUA forbids reposting the data on the web | terms | no | no |
+| 2 | RAR-b pools | **no license, no dataset card** on either pooled repo | terms | no | no |
+| 12 | BRIGHT `xlangai/BRIGHT` | CC-BY-4.0 (HF tag + repo badge) | ok | attrib | check |
+| 5 | FreshStack | **CC-BY-SA-4.0** (Stack Overflow derived) | ok | SA | SA |
+| 2 | LoTTE | repo apache-2.0; content is StackExchange CC-BY-SA | ok | attrib | SA |
+| 1 | beir-nfcorpus | **CC-BY-SA-4.0** | ok | SA | SA |
+| 1 | dbpedia-entity | **CC-BY-SA-4.0** | ok | SA | SA |
+| 1 | quest | apache-2.0 | ok | ok | ok |
+| 1 | miracl-en-dev | apache-2.0 (topics/qrels repo); corpus is Wikipedia, CC-BY-SA | ok | ok | SA |
+| 1 | limit | data CC-BY-4.0, code apache-2.0 | ok | ok | ok |
+| 1 | webfaq-eng | CC-BY-4.0; Common Crawl derived, card defers to source-site ToS | ok | ok | check |
+| 1 | scirgen-geo-en | CC-BY-4.0 | ok | ok | ok |
+| 1 | clerc | underlying Caselaw Access Project is CC0; the HF repo shows **no license tag** | ok | ok | check |
+| 1 | gooaq | apache-2.0 on the compilation; the answers are scraped Google answer-box text Allen AI never owned | ok | ok | no |
+
+### The three constraints that bite
+
+**Non-commercial contaminates 11 of 42 lanes.** CRUMB (8) is CC-BY-NC.
+MS MARCO, TREC-DL and ORCAS (3) are "non-commercial research purposes only
+… without extending any license or other intellectual property rights."
+A router dataset published by Qdrant is not obviously non-commercial
+research. This is contract/terms, not copyright — it restricts our use, not
+only redistribution, so it reaches the derived artifact.
+
+**Share-alike is viral into our own file.** 9 lanes (beir-nfcorpus,
+dbpedia-entity, freshstack x5, lotte x2) are CC-BY-SA-4.0. Their *text* in
+the same file as CC-BY material forces the whole file to CC-BY-SA, including
+our labels. Separate parquet, separate license — that is the only reason to
+partition rather than concatenate.
+
+**Two unknowns need an email, not an assumption.** The RAR-b pooled repos
+state no license at all (the upstream MATH / GSM8K / HumanEvalPack / MBPP
+components are individually permissive, unverified here — permissive parents
+do not license a silent repackaging). ANTIQUE states none while sitting on a
+Yahoo agreement that forbids reposting; its authors distribute it publicly
+anyway, which is their risk position, not a license to us.
+
+Also non-copyright: ORCAS and msmarco-passage-dev query text is real user
+search traffic. Republishing raw user-log text is a privacy question
+independent of licensing — a second reason those two stay pointer-only.
+
+### Proposed release shape — NOT ratified
+
+A proposal in the sense of the header above: a human ratifies before release.
+
+- **Pointer artifact, the 42 verified pre-Wave-3 lanes** — `selected.parquet`,
+  `eval_reserve.parquet`, numeric feature columns, our annotations under
+  CC-BY-4.0, plus a per-lane attribution table and a loader that rebuilds
+  text from upstream. Precedent: BEIR, MTEB, `ir_datasets`.
+- **`queries_permissive.parquet`** — query text for the 18 CC-BY / apache
+  lanes (BRIGHT 12, quest, miracl-en-dev, limit, webfaq-eng, scirgen-geo-en,
+  clerc, gooaq).
+- **`queries_sharealike.parquet`** — the 9 SA lanes, marked CC-BY-SA-4.0.
+- **Pointer-only, no text** — the 13 NC / unlicensed lanes (CRUMB 8,
+  MS MARCO family 3, antique, RAR-b 2).
+
+Cheap because the artifact is already ID-keyed: the partition is a filter on
+`dataset` at write time. The eval reserve stays 42-lane complete either way
+— reserves are IDs — so ablations and later versions remain comparable even
+for lanes whose text we cannot ship.
+
+### Open items
+
+- `jhu-clsp/CLERC` shows no license tag; CC0 is inferred from CAP upstream.
+- Whether NIST asserts terms over the TREC DL-2022 qrels.
+- BRIGHT is CC-BY-4.0 as a whole, but its leetcode and aops splits carry
+  third-party problem statements the authors cannot license; document text
+  from those two splits is the one BRIGHT exposure.

@@ -1,7 +1,7 @@
 from collections.abc import Iterable, Iterator
 
 import pandas as pd
-from query_taxonomy.features import FeatureExtractor, CorpusFeatures
+from query_taxonomy.features import CorpusFeatures, FeatureExtractor
 from tqdm.auto import tqdm
 
 from dataset_registry.core import (
@@ -10,7 +10,19 @@ from dataset_registry.core import (
     Query,
     RegistryDataset,
 )
+from dataset_registry.wave2 import (
+    FRESHSTACK_TOPICS,
+    Antique,
+    Clerc,
+    FreshStackTopic,
+    Gooaq,
+    LotteSubset,
+    ScirgenGeo,
+    WebFaq,
+)
+
 from dataset_registry.hf import (
+    BRIGHT_SPLITS,
     CRUMB_TASKS,
     BrightSplit,
     CrumbTask,
@@ -26,6 +38,14 @@ from dataset_registry.irds import (
     TrecDL2022,
 )
 from dataset_registry.url import Limit
+from dataset_registry.wave3 import (
+    AmazonEsci,
+    BeirTouche2020,
+    Finder,
+    TechQa,
+    TrecCast2020History,
+    Wands,
+)
 
 # Configured instances, not classes: parameterized datasets (MiraclDev per
 # language) register several entries from one class.
@@ -36,14 +56,26 @@ DATASETS: tuple[RegistryDataset, ...] = (
     MiraclDev("en"),
     Orcas(),
     DBPediaEntity(),
-    BrightSplit("leetcode"),
-    BrightSplit("aops"),
-    BrightSplit("theoremqa_questions"),
+    *(BrightSplit(split) for split in sorted(BRIGHT_SPLITS)),
     Quest(),
     *(CrumbTask(task) for task in sorted(CRUMB_TASKS)),
     RarbPool("math"),
     RarbPool("code"),
     Limit(),
+    *(FreshStackTopic(topic) for topic in sorted(FRESHSTACK_TOPICS)),
+    Antique(),
+    LotteSubset("technology", "search"),
+    LotteSubset("technology", "forum"),
+    WebFaq(),
+    ScirgenGeo(),
+    Clerc(),
+    Gooaq(),
+    AmazonEsci(),
+    Wands(),
+    Finder(),
+    TrecCast2020History(),
+    TechQa(),
+    BeirTouche2020(),
 )
 
 

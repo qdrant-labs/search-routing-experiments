@@ -1,0 +1,605 @@
+"""Leg-2: relabel pilot lanes with an alternative dense encoder and diff the
+result against leg-1. Two readouts from one pass — how many `all_zero` rows a
+stronger stack rescues, and whether any decisive label is stack-specific.
+
+The encoder is the ONLY thing that changes: separate `<lane>_legb_<model>_routes`
+collections, labels in their own `data/legb_pilot/` dir, scores under the same
+three route names in a different file — so a leg-2 score can never reach the
+selection surface (guarded by test_wasted_recall_objective). Notebook
+`leg2_encoder_pilot.ipynb` drives this; the machinery lives here so the flag
+policy and the collection guard stay unit-tested.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Literal
+
+import pandas as pd
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance
+from tqdm.auto import tqdm
+
+from composition.pool_v3 import CEILING, CLASSES, LabelledPool, native_mask
+from hybrid_search_rrf_dataset.fusion import (
+    DenseOnlyStrategy,
+    PureRRFStrategy,
+    SparseOnlyStrategy,
+)
+from hybrid_search_rrf_dataset.indexer import (
+    CorpusDocument,
+    CorpusIndexer,
+    EmbeddingConfig,
+)
+from hybrid_search_rrf_dataset.labels import (
+    ALL_TIED,
+    ALL_ZERO,
+    ROUTES_DIFFER,
+    RouteLabels,
+)
+from hybrid_search_rrf_dataset.lanes import LANES
+from hybrid_search_rrf_dataset.objective import RouterObjective
+from hybrid_search_rrf_dataset.retrieval import SnapshotDataset
+from scripts.label_routes import DATA_DIR, _collection, _source_name
+
+Supply = Literal["native", "v2", "both"]
+"""Which rows to relabel: v3-native supply (the dataset), v2-origin control, or
+both. The pool merges the two, so this must be chosen, not assumed."""
+
+SHAPES = frozenset({ROUTES_DIFFER, ALL_TIED, ALL_ZERO})
+"""`sample`'s population matches `shape` for these, `kind` otherwise. Note
+`all_zero` is BOTH a shape and a kind, and they agree on it, so the branch is
+unambiguous."""
+
+Band = Literal["at_ceiling", "below"] | None
+"""Restrict the draw by leg-1 `oracle` against `pool_v3.CEILING`. At ceiling
+every route already ranks the judged doc first, so there is no score left for a
+better encoder to win — the only movement available is dense LOSING the doc.
+Measured on the 3 pilot lanes: 93.0% of native ties are at ceiling, so an
+unbanded tie draw spends most of its budget on rows that cannot move up.
+`below` targets the addressable slice; `at_ceiling` draws a regression control."""
+
+LEGB_DIR = DATA_DIR / "legb_pilot"
+PILOT_LANES = ("scirgen-geo-en", "crumb-legal-qa", "antique")
+"""Native v3 supply only (native_mask), spanning the idf bands that native
+supply actually has and three distinct domains: scirgen (mid, geoscience —
+73% of all_zero), crumb-legal-qa (mid, legal), antique (high, non-factoid QA).
+Banded over the full pool, gooaq read as high-idf and got picked — but it is
+v2-origin control (4 native rows of 7,079), so relabelling it teaches nothing
+about the shipped dataset. Native supply has no usable low-idf lane."""
+
+SPARSE_CFG = EmbeddingConfig(name="sparse_base", model_id="Qdrant/bm25", kind="sparse")
+"""Identical to leg-1's sparse leg — only the dense encoder is under test, so
+BM25+IDF stays fixed and the fusion leg differs solely through its dense half."""
+
+INDEX_SLICE = 2000
+"""Docs per `upload` call. `upload` embeds its WHOLE item list before the first
+upsert, so one call per lane holds every vector of that lane in RAM at once —
+quest's 72,080 copied dense vectors do not fit. Measured at this slice: 243MB
+for the copied vectors (a 3072-float Python list costs ~98KB), ~1.1GB peak on
+quest with the corpus frame and points alongside. Slicing also uploads as it
+goes, which is what lets a killed lane resume."""
+
+
+def indexable(corpus: pd.DataFrame) -> int:
+    """Points a finished lane actually holds. `upload` drops docs whose embed
+    text is blank — unembeddable, and a cloud encoder 400s on them — and uuid5
+    ids collapse duplicate doc_ids onto one point, so `len(corpus)` overstates
+    the target: scirgen-geo-en's 3,354 rows carry 5 blanks and finish at 3,349."""
+    title = corpus["title"].fillna("") if "title" in corpus else ""
+    embedded = (title + " " + corpus["text"].fillna("")).str.strip()
+    return int(corpus.loc[embedded != "", "doc_id"].nunique())
+
+CERTIFIABLE = ("decisive", "genuine_tie")
+"""A row is only evidence about a *label* when both legs certified one; a row
+that was never supply in leg-1 cannot show a label became stack-specific."""
+
+
+def e5_dense_cfg() -> EmbeddingConfig:
+    """multilingual-e5-large: in fastembed, MIT, the popular open step up from
+    bge-small. e5 needs its role prefixes or retrieval collapses (measured:
+    fastembed does not add them).
+
+    `parallel` deliberately left at its None default: e5-large is 2.24GB
+    (bge-small is 0.067GB), and fastembed's `parallel=N` loads N FULL model
+    copies in N worker processes — `parallel=4` here means ~9GB of model
+    weights alone. None uses onnxruntime's own intra-op threading against the
+    one already-loaded model instead."""
+    return EmbeddingConfig(
+        name="dense_legb",
+        model_id="intfloat/multilingual-e5-large",
+        kind="dense",
+        size=1024,
+        distance=Distance.COSINE,
+        query_prompt="query: ",
+        doc_prompt="passage: ",
+    )
+
+
+QWEN_MODEL_ID = "openrouter/qwen/qwen3-embedding-8b"
+QWEN_DIM = 4096
+QWEN_INSTRUCTION = (
+    "Instruct: Given a web search query, retrieve relevant passages that "
+    "answer the query.\nQuery: "
+)
+"""Qwen3-Embedding's own documented convention (its model card / usage guide):
+task instruction on the query only, nothing on documents. This is the generic
+default retrieval instruction — the three pilot lanes are different enough
+domains (geoscience, legal, non-factoid QA) that a task-specific instruction
+tuned to one would bias the comparison against the other two."""
+
+
+def qwen_dense_cfg() -> EmbeddingConfig:
+    """qwen/qwen3-embedding-8b via Qdrant Cloud Inference -> OpenRouter.
+    Embeds server-side, so this has none of e5's local RAM/model-copy cost —
+    the reason to run this leg first. Sparse defaults to SPARSE_CFG (local,
+    unpaid round trip) unless overridden via `LegBPilot(sparse_cfg=...)` —
+    `cloud` is per-slot, so mixing is safe (see EmbeddingConfig).
+
+    Requires `OPEN_ROUTER_API_KEY` in the environment and the Qdrant client
+    constructed with `cloud_inference=True`."""
+    key = os.environ.get("OPEN_ROUTER_API_KEY")
+    if not key:
+        raise RuntimeError(
+            "OPEN_ROUTER_API_KEY is not set — add it to .env before building "
+            "the Qwen3 leg-2 config."
+        )
+    return EmbeddingConfig(
+        name="dense_legb",
+        model_id=QWEN_MODEL_ID,
+        kind="dense",
+        size=QWEN_DIM,
+        distance=Distance.COSINE,
+        cloud=True,
+        provider_options={"openrouter-api-key": key, "dimensions": QWEN_DIM},
+        query_prompt=QWEN_INSTRUCTION,
+    )
+
+
+def _hosted_dense_cfg(model_id: str, size: int, *, query_prompt: str = "",
+                      max_input_chars: int | None = None) -> EmbeddingConfig:
+    """A non-Qwen hosted dense leg via the same Qdrant Cloud Inference -> OpenRouter
+    path as `qwen_dense_cfg`. `model_id` MUST carry the `openrouter/` prefix (e.g.
+    `openrouter/openai/text-embedding-3-large`) so Qdrant routes to OpenRouter with the
+    `openrouter-api-key`; without it Qdrant treats it as a native provider and demands
+    that provider's own key. The underlying models were verified live on OpenRouter's
+    embeddings endpoint (dim 3072). No query instruction by default — neither exposes
+    asymmetric query/doc task-typing through this endpoint, so the dense bake-off stays
+    a clean one-variable comparison. `dimensions` mirrors the working Qwen shape; if a
+    model rejects it, drop it from provider_options and rely on `size` alone (test the
+    cheapest lane first, per `index_and_label`)."""
+    key = os.environ.get("OPEN_ROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("OPEN_ROUTER_API_KEY is not set — add it to .env")
+    return EmbeddingConfig(
+        name="dense_legb", model_id=model_id, kind="dense", size=size,
+        distance=Distance.COSINE, cloud=True,
+        provider_options={"openrouter-api-key": key, "dimensions": size},
+        query_prompt=query_prompt,
+        max_input_chars=max_input_chars,
+    )
+
+
+def openai3_dense_cfg() -> EmbeddingConfig:
+    """openai/text-embedding-3-large (dim 3072) — strong general hosted encoder, a
+    capacity step up from bge-small but not retrieval-specialized (symmetric, no
+    query/doc asymmetry). Non-Qwen dense candidate for the leg-2 bake-off."""
+    return _hosted_dense_cfg("openrouter/openai/text-embedding-3-large", 3072, max_input_chars=20000)
+
+
+def gemini_dense_cfg() -> EmbeddingConfig:
+    """google/gemini-embedding-001 (dim 3072) — recent strong general hosted encoder.
+    Non-Qwen dense candidate for the leg-2 bake-off."""
+    return _hosted_dense_cfg("openrouter/google/gemini-embedding-001", 3072, max_input_chars=20000)
+
+
+SPLADE_MODEL_ID = "prithivida/Splade_PP_en_v1"
+
+
+def splade_sparse_cfg() -> EmbeddingConfig:
+    """SPLADE++ (fastembed, local) — the A1 fix: `SPARSE_CFG` (BM25) is fixed
+    across every leg-2 run, so sparse carries zero variance and every
+    `stack_specific` flag actually means dense-specific (measured: at ceiling
+    the only movement is dense LOSING, 21 tied_backwards / 0 wins). Pair with
+    `qwen_dense_cfg()` via `LegBPilot(sparse_cfg=splade_sparse_cfg())` so both
+    routes move under a stack swap.
+
+    `modifier=None`, not the `EmbeddingConfig` default (`Modifier.IDF`): IDF
+    re-weights a raw bag-of-words vector at query time, which is what BM25
+    needs and SPLADE does not — SPLADE's weights are already learned, and
+    layering IDF on top double-counts term importance the model already
+    encoded. English-only (fastembed's own model card) — invalid on
+    `miracl-en-dev`'s non-English pairs or `webfaq`, same constraint the plan
+    already flags for English-only rerankers."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=SPLADE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+    )
+
+
+MINICOIL_MODEL_ID = "Qdrant/minicoil-v1"
+
+
+def minicoil_sparse_cfg(avg_len: float = 272.0) -> EmbeddingConfig:
+    """miniCOIL v1 (fastembed, local) — contextual sparse: per-token 4-dim
+    vectors that disambiguate the same surface term across senses ("river bank"
+    vs. "savings bank"), with no vocabulary expansion. Keeps the `EmbeddingConfig`
+    default `Modifier.IDF`, which Qdrant's miniCOIL guide requires. Fills the slot
+    between bm25 (IDF, no context) and SPLADE (learned, expanded), so
+    `bm25 → minicoil` isolates contextual weighting and `minicoil → splade`
+    isolates expansion.
+
+    `max_input_chars` is not optional here: miniCOIL truncates at 8192 tokens where
+    SPLADE truncates at 512, and pads each batch to its longest member, so one
+    66k-char legal doc measured 11.45GB alone and OOM-kills a batch of 64. 2000 chars
+    (~500 tokens) both survives and matches SPLADE's window, keeping the sparse
+    comparison one-variable. `avg_len` is miniCOIL's BM25 length normalizer and is
+    corpus-specific — 272 is crumb-legal-qa's mean word count AFTER that cap; pass
+    the measured value when running another lane (fastembed's 150 default assumes
+    much shorter documents)."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=MINICOIL_MODEL_ID,
+        kind="sparse",
+        max_input_chars=2000,
+        model_options={"avg_len": avg_len},
+    )
+
+
+OPENSEARCH_SPARSE_MODEL_ID = "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte"
+
+
+def opensearch_sparse_cfg() -> EmbeddingConfig:
+    """OpenSearch neural-sparse doc-v3-gte via sentence-transformers `SparseEncoder`
+    (`engine="sentence_transformers"`) — a learned-sparse leg fastembed does not ship,
+    added so the sparse bake-off can measure its coverage against SPLADE/bm42/miniCOIL
+    (the number the colleague's +6.9-vs-BM25 didn't give). `modifier=None` like SPLADE
+    (learned weights, no IDF re-weight); the encoder handles doc/query asymmetry itself,
+    so no prompts. First use downloads + loads a full transformer — heavy, run under
+    memguard on a machine that can hold it."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=OPENSEARCH_SPARSE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+        engine="sentence_transformers",
+    )
+
+
+OPENSEARCH_DISTILL_SPARSE_MODEL_ID = (
+    "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill"
+)
+
+
+def opensearch_distill_sparse_cfg(*, batch_size: int = 16) -> EmbeddingConfig:
+    """OpenSearch neural-sparse doc-v3-distill — the document-only family's small
+    representative (67M distilbert vs gte's ~137M + custom code): doc-side expansion
+    with an inference-free query side (tokenizer + baked-in IDF lookup, no model
+    forward), so query weights already carry IDF and `modifier=None` is correct.
+    Same 512-token window as SPLADE, keeping the sparse comparison one-variable.
+    Heavy doc-side indexing only. ``batch_size`` bounds one SparseEncoder call,
+    independently of Qdrant's upload/checkpoint slice, so lower it on a memory-constrained
+    machine rather than allowing MPS to accumulate a whole indexing slice."""
+    return EmbeddingConfig(
+        name="sparse_legb",
+        model_id=OPENSEARCH_DISTILL_SPARSE_MODEL_ID,
+        kind="sparse",
+        modifier=None,
+        engine="sentence_transformers",
+        sentence_transformers_batch_size=batch_size,
+    )
+
+
+def stack_flags(merged: pd.DataFrame) -> pd.Series:
+    """Per-row stack verdict from the two legs' kinds and classes. Flags on the
+    class, not the route: dense_only->dense is a supply change, a within-class
+    route wobble is not. `uncertifiable` unless BOTH legs certified a row."""
+    certifiable = merged["kind_leg1"].isin(CERTIFIABLE) & merged["kind_legb"].isin(
+        CERTIFIABLE
+    )
+    specific = merged["route_class_leg1"] != merged["route_class_legb"]
+    return pd.Series(
+        pd.NA, index=merged.index, dtype="object"
+    ).mask(certifiable & specific, "stack_specific").mask(
+        certifiable & ~specific, "stack_robust"
+    ).fillna("uncertifiable")
+
+
+class LegBPilot:
+    """Owns one leg-2 encoder's pilot: index the pilot lanes into their own
+    collections, relabel, and diff against leg-1. One instance per encoder."""
+
+    def __init__(
+        self,
+        client: QdrantClient,
+        dense_cfg: EmbeddingConfig,
+        lanes: tuple[str, ...] = PILOT_LANES,
+        out_dir=LEGB_DIR,
+        supply: Supply = "native",
+        max_workers: int | None = None,
+        sample: tuple[str, int] | None = None,
+        natural_only: bool = True,
+        band: Band = None,
+        sparse_cfg: EmbeddingConfig = SPARSE_CFG,
+    ) -> None:
+        self._client = client
+        self._dense = dense_cfg
+        self._sparse = sparse_cfg
+        self._lanes = lanes
+        self._out_dir = out_dir
+        self._supply = supply
+        # (population, n): n rows PER LANE, fixed-seed so a rerun draws the
+        # SAME rows. `population` matches either `shape` ("routes_differ" |
+        # "all_tied" | "all_zero") or `kind` ("decisive" | "fake_tie" |
+        # "genuine_tie" | "undecisive" | "all_zero") — the kind populations
+        # cannot be reached through `shape` alone, and shape=="routes_differ"
+        # is only ~19% decisive, so it buys ~4 useless rows per useful one.
+        self._sample = sample
+        self._natural_only = natural_only
+        self._band = band
+        self._pool = LabelledPool()
+        self._labels: pd.DataFrame | None = None
+        # network-bound (a cloud slot over OpenRouter) benefits from overlap;
+        # local fastembed is CPU/GIL-bound and gains nothing from threads —
+        # matches augmentation/config.py's own llm_workers default of 8
+        self._max_workers = max_workers if max_workers is not None else (
+            8 if dense_cfg.cloud else 1
+        )
+
+    def _leg1_labels(self) -> pd.DataFrame:
+        """`pool.labels()` re-reads and re-merges several parquet files on
+        every call; this pilot calls it once per lane plus once in `compare`,
+        so cache the one merge each instance actually needs.
+
+        Classified, not raw: `kind`/`route_class`/`oracle` are what the sample
+        bands on, and `classify` is the only sanctioned way to derive them."""
+        if self._labels is None:
+            self._labels = self._pool.classify(self._pool.labels())
+        return self._labels
+
+    def _supply_mask(self, frame: pd.DataFrame) -> pd.Series:
+        """Rows matching the chosen supply — default v3-native, the population
+        the dataset is built from."""
+        nat = native_mask(frame)
+        if self._supply == "native":
+            return nat
+        if self._supply == "v2":
+            return ~nat
+        return pd.Series(True, index=frame.index)
+
+    def collection(self, lane: str) -> str:
+        """The isolated leg-2 collection — asserted distinct from the paid
+        leg-1 one, because reusing it would overwrite labels already bought.
+
+        Namespaced by the dense model too, not just the lane: `dense_legb` is
+        one fixed-size vector slot, so switching `LegBPilot`'s config (e.g.
+        e5's 1024-dim -> Qwen's 4096-dim) against an already-created
+        `<lane>_legb_routes` used to no-op on `ensure_collection` (it only
+        creates when the collection is absent) and fail at upload with
+        Qdrant's own "expected dim: 1024, got 4096" — silently, since nothing
+        here diffed the live schema. A different model now gets a different,
+        untouched collection instead of colliding with the last one's.
+
+        Sparse joins the slug too, once it can vary (A1): two sparse variants
+        on the SAME dense model (e.g. Qwen + BM25 vs Qwen + SPLADE) would
+        otherwise silently share one collection and corrupt each other's
+        `sparse_legb` vectors — the default BM25 keeps today's names
+        unchanged so existing collections stay valid."""
+        slug = self._dense.model_id.rsplit("/", 1)[-1]
+        if self._sparse.model_id != SPARSE_CFG.model_id:
+            slug += f"_{self._sparse.model_id.rsplit('/', 1)[-1]}"
+        name = f"{_source_name(lane)}_legb_{slug}_routes"
+        assert name != _collection(lane), f"{lane}: would reuse the paid collection"
+        return name
+
+    def _selection(self, lane: str) -> pd.DataFrame:
+        """leg-1's own rows for this lane — relabel the same query_ids so the
+        diff is row-for-row.
+
+        `natural_only` drops `supplemented` rows: they are scored against a
+        corpus carrying constructed docs, so an encoder effect there is
+        confounded with the augmentation. It also removes the augmented
+        query_ids that `QuerySubset` silently discards (they are absent from
+        the lane's `queries.parquet`), which is what made a 30-row draw label
+        only 24. `band` and `sample` then narrow to the addressable slice.
+        `n` is PER LANE — `_selection` is called once per lane."""
+        labels = self._leg1_labels()
+        mine = labels[(labels["dataset"] == lane) & self._supply_mask(labels)]
+        if self._natural_only and "scored_against" in mine.columns:
+            mine = mine[mine["scored_against"] == "natural"]
+        if self._band is not None:
+            at = mine["oracle"] >= CEILING
+            mine = mine[at if self._band == "at_ceiling" else ~at]
+        if self._sample is not None:
+            population, n = self._sample
+            column = "shape" if population in SHAPES else "kind"
+            mine = mine[mine[column] == population]
+            if len(mine) > n:
+                mine = mine.sample(n, random_state=0)
+            elif len(mine) < n:
+                tqdm.write(
+                    f"[{lane}] sample asked {n} {population} rows, drew "
+                    f"{len(mine)} — that is the whole available population"
+                )
+        return mine[["dataset", "query_id", "query"]].astype(str)
+
+    def plan(self) -> pd.DataFrame:
+        live = {c.name for c in self._client.get_collections().collections}
+        rows = []
+        for lane in self._lanes:
+            corpus = SnapshotDataset(_source_name(lane), path=str(DATA_DIR)).corpus()
+            rows.append({
+                "lane": lane,
+                "to_label": len(self._selection(lane)),
+                "corpus_docs": len(corpus),
+                "collection": self.collection(lane),
+                "indexed": self.collection(lane) in live,
+            })
+        return pd.DataFrame(rows)
+
+    def dense_source(self, lane: str) -> str | None:
+        """The sibling collection whose already-paid dense vectors this lane's
+        collection copies by point id instead of re-embedding through the
+        provider — uuid5 ids are content-derived, so same lane + same docs
+        means the same ids there. `None` is the expensive answer: nothing has
+        paid for this lane yet, and indexing it will."""
+        base = f"{_source_name(lane)}_legb_{self._dense.model_id.rsplit('/', 1)[-1]}_routes"
+        if not self._dense.cloud or base == self.collection(lane):
+            return None
+        return base if self._client.collection_exists(base) else None
+
+    def index(self, lane: str, *, allow_paid_dense: bool = False) -> str:
+        """Index one lane's corpus into its leg-2 collection, without
+        labelling. A corpus pass over a large lane runs for hours and the
+        labels it feeds are minutes, so the two halves of `index_and_label`
+        are worth running on separate nights.
+
+        Refuses a lane with no `dense_source` unless the spend is authorised:
+        a cloud dense slot embeds every document through the provider from
+        inside the upsert, so the difference between a copied lane and a paid
+        one is silent at the call site and arrives on an invoice."""
+        if self._dense.cloud and not allow_paid_dense and self.dense_source(lane) is None:
+            raise RuntimeError(
+                f"{lane}: no collection holds paid {self._dense.model_id} vectors "
+                f"to copy, so indexing embeds the whole corpus through the "
+                f"provider. Pass allow_paid_dense=True to authorise it."
+            )
+        corpus = SnapshotDataset(_source_name(lane), path=str(DATA_DIR)).corpus()
+        return self._index(lane, corpus)
+
+    def _index(self, lane: str, corpus: pd.DataFrame) -> str:
+        collection = self.collection(lane)
+        reuse = self.dense_source(lane)
+        if reuse:
+            tqdm.write(f"[{lane}] dense vectors copied from {reuse} — no inference spend")
+        indexer = CorpusIndexer(
+            self._client, collection,
+            embeddings=[self._dense, self._sparse],
+            # No EmbeddingCache: a slice uploads the moment it is embedded, so
+            # `missing` already resumes at slice granularity and the pickle
+            # would only duplicate Qdrant — at learned-sparse volume that is
+            # gigabytes, rewritten in full on every checkpoint.
+            reuse_cloud_from=reuse,
+        )
+        indexer.ensure_collection()
+        # No count short-circuit: a lane's finished point count is `indexable`,
+        # not `len(corpus)`, so a count test either rescans a complete lane
+        # forever or calls a stale collection done. `missing` settles it by id,
+        # one slice at a time, which is the question that was being asked.
+        tqdm.write(f"[{lane}] indexing {indexable(corpus):,} docs -> {collection}")
+        for start in tqdm(range(0, len(corpus), INDEX_SLICE),
+                          desc=f"slice:{lane}", unit="slice"):
+            rows = corpus.iloc[start : start + INDEX_SLICE].to_dict("records")
+            fresh = indexer.missing([CorpusDocument(**r) for r in rows])
+            if fresh:
+                indexer.upload(fresh, batch_size=64, parallel=self._max_workers)
+        return collection
+
+    def index_and_label(
+        self, lane: str | None = None, *, force: bool = False
+    ) -> list[str]:
+        """Index one lane's corpus into its leg-2 collection and relabel — or
+        every configured lane when `lane` is omitted. Test on the cheapest
+        lane first: `compare()` reads only the lanes actually present in
+        `labels.parquet`, so a one-lane smoke test is never silently read as
+        the full pilot's verdict. The compute+network step — user-initiated.
+        Returns lanes that failed."""
+        lanes = self._lanes if lane is None else (lane,)
+        unknown = set(lanes) - set(self._lanes)
+        if unknown:
+            raise ValueError(
+                f"{sorted(unknown)} not in this pilot's lanes {self._lanes}"
+            )
+        failed: list[str] = []
+        for i, lane_idx in enumerate(lanes, 1):
+            tqdm.write(
+                f"=== [{i}/{len(lanes)}] {lane_idx} ({self._dense.model_id}, "
+                f"max_workers={self._max_workers}) ==="
+            )
+            corpus = SnapshotDataset(_source_name(lane_idx), path=str(DATA_DIR)).corpus()
+            collection = self._index(lane_idx, corpus)
+            min_rel = LANES[lane_idx].min_relevance if lane_idx in LANES else 1
+            labels = RouteLabels(
+                self._selection(lane_idx), out_dir=self._out_dir,
+                objective=RouterObjective(min_relevance=min_rel),
+            )
+            args = (self._client, collection, self._dense, self._sparse)
+            source = SnapshotDataset(_source_name(lane_idx), path=str(DATA_DIR))
+            try:
+                out = labels.label(
+                    source,
+                    DenseOnlyStrategy(*args), PureRRFStrategy(*args),
+                    SparseOnlyStrategy(*args),
+                    dataset=lane_idx, force=force, max_workers=self._max_workers,
+                )
+            except ValueError as error:
+                failed.append(lane_idx)
+                tqdm.write(f"[{lane_idx}] SKIPPED: {error}")
+                continue
+            shape = out["shape"].value_counts() if not out.empty else {}
+            tqdm.write(
+                f"[{lane_idx}] +{len(out):,} leg-2 labels  "
+                f"differ {shape.get('routes_differ', 0):,} | "
+                f"tied {shape.get('all_tied', 0):,} | zero {shape.get('all_zero', 0):,}"
+            )
+        return failed
+
+    def compare(self) -> pd.DataFrame:
+        """Classify both legs, join row-for-row, and attach the stack flag +
+        the dense-score delta. Writes `stack_flag.parquet`; also the input to
+        the rescue and manipulation readouts.
+
+        Scoped to the lanes actually IN `labels.parquet`, not to every
+        configured lane — a one-lane `index_and_label` run must compare only
+        that lane, never silently read the other, untested lanes as if they
+        agreed or disagreed."""
+        legb = pd.read_parquet(self._out_dir / "labels.parquet")
+        tested = set(legb["dataset"].unique()) & set(self._lanes)
+        leg1 = self._leg1_labels()
+        leg1 = leg1[leg1["dataset"].isin(tested) & self._supply_mask(leg1)]
+
+        # leg1 arrives already classified from `_leg1_labels`; classifying it
+        # again collides on `depth` (both sides of `_qrels_depth`'s merge carry
+        # it, so pandas suffixes it to depth_x/depth_y and the lookup raises).
+        # legb is raw from its own labels.parquet, so it still needs the pass.
+        a = leg1.astype({"query_id": str})
+        b = self._pool.classify(legb).astype({"query_id": str})
+        keep = ["dataset", "query_id", "kind", "route_class", "route", "margin",
+                "score_dense_only"]
+        merged = a[keep].merge(
+            b[keep], on=["dataset", "query_id"], suffixes=("_leg1", "_legb")
+        )
+        merged["flag"] = stack_flags(merged)
+        merged["dense_delta"] = (
+            merged["score_dense_only_legb"] - merged["score_dense_only_leg1"]
+        )
+        merged["legb_model"] = self._dense.model_id
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        merged.to_parquet(self._out_dir / "stack_flag.parquet", index=False)
+        return merged
+
+    def readout(self, merged: pd.DataFrame) -> None:
+        """Print the two decisions this pilot exists to inform."""
+        tested = sorted(merged["dataset"].unique())
+        untested = [lane for lane in self._lanes if lane not in tested]
+        print(f"COVERAGE  tested: {tested}")
+        if untested:
+            print(f"          NOT YET TESTED: {untested} — this is a partial "
+                  f"readout, not the full pilot's verdict.\n")
+        else:
+            print()
+        az = merged[merged["kind_leg1"] == "all_zero"]
+        rescued = az[az["kind_legb"] != "all_zero"]
+        print(f"RESCUE  all_zero rows: {len(az):,}  ->  moved off zero: {len(rescued):,} "
+              f"({len(rescued) / max(len(az), 1):.1%})")
+        if len(rescued):
+            print(rescued["kind_legb"].value_counts().to_string())
+        certifiable = merged[merged["flag"] != "uncertifiable"]
+        print(f"\nFLAG    certifiable rows: {len(certifiable):,}")
+        print(certifiable["flag"].value_counts().to_string())
+        certified_class = merged[merged["route_class_legb"].isin(CLASSES)]
+        print("\nDELTA   dense_delta over rows certified by leg-2 "
+              "(centred on 0 => encoder did nothing, a bug not a null):")
+        print(certified_class["dense_delta"].describe()[["mean", "50%", "max"]].to_string())

@@ -49,14 +49,16 @@ class SupplyIndex:
     ) -> None:
         self._paths = paths or AugmentationPaths()
         self._extractor = extractor or FeatureExtractor()
+        self._verdicts: dict[tuple[str, str], bool] = {}
+        """Memoized claimability per (bank, surface) — instance-scoped because
+        the verdict depends on the injected extractor, and per PAIR rather
+        than per frame so floors drawing the same bank share the work."""
 
     def path(self, lane: str) -> Path:
         return self._paths.lane_surfaces(lane)
 
     def lanes_on_disk(self) -> list[str]:
-        return sorted(
-            p.parent.name for p in self._paths.data_dir.glob("*/corpus.parquet")
-        )
+        return self._paths.lanes_with_corpus()
 
     def build(self, lane: str, *, force: bool = False) -> pd.DataFrame:
         """Scan one lane corpus (full text, no truncation) and persist its
@@ -102,6 +104,52 @@ class SupplyIndex:
         if not self.path(lane).exists():
             return pd.DataFrame(columns=_COLUMNS)
         return pd.read_parquet(self.path(lane))
+
+    def _claims(self, bank: str, surface: str) -> bool:
+        """Whether the surface ALONE still resolves to the bank that mined it
+        and to no other identifier floor — the two ways a mined row fails the
+        target it was selected for."""
+        if (bank, surface) in self._verdicts:
+            return self._verdicts[bank, surface]
+        found = self._extractor.resolve(
+            surface, groups=[FeatureGroup.STRUCTURED_IDENTIFIERS]
+        ).spans.get(FeatureGroup.STRUCTURED_IDENTIFIERS, {})
+        claimed = {name for name, spans in found.items() if spans}
+        verdict = bank in claimed and {
+            identifier_floor_key(b) for b in claimed
+        } == {identifier_floor_key(bank)}
+        self._verdicts[bank, surface] = verdict
+        return verdict
+
+    def claimable(self, surfaces: pd.DataFrame, lane: str = "") -> pd.DataFrame:
+        """The mined rows that can still serve the target they get selected
+        for. A bank repair invalidates every artifact mined with the old bank
+        and nothing else in the pipeline notices, so the rate is printed: a
+        lane losing most of one bank is a re-mine signal, not bad luck.
+
+        Called on a demand's OWN slice, never the whole lane — resolving every
+        mined surface costs seconds per lane, and a floor only ever draws from
+        the banks it named."""
+        if surfaces.empty:
+            return surfaces
+        kept = surfaces[
+            [
+                self._claims(str(bank), str(surface))
+                for bank, surface in zip(surfaces["bank"], surfaces["surface"])
+            ]
+        ]
+        dropped = len(surfaces) - len(kept)
+        if not dropped:
+            return kept
+        mined = surfaces.groupby("bank").size()
+        share = kept.groupby("bank").size().reindex(mined.index, fill_value=0) / mined
+        rotten = sorted(share[share < 0.5].index)
+        note = f" — mostly {', '.join(rotten)}" if rotten else ""
+        print(
+            f"[{lane}] supply: dropped {dropped:,}/{len(surfaces):,} rows "
+            f"({dropped / len(surfaces):.1%}) their bank no longer claims{note}"
+        )
+        return kept
 
     def readout(
         self,

@@ -1,0 +1,122 @@
+name: router-service
+
+# Secrets: GCP_SA_KEY (read on gs://qdrant-hybrid-search-rrf), RAILWAY_TOKEN (a Railway
+#   project token). query-taxonomy is public, so the test job fetches it without a token.
+# Variables: RAILWAY_SERVICE, ROUTER_ARM (default no_branches), ROUTER_URL (optional smoke).
+
+on:
+  push:
+    branches: [main]
+    # Anchors/aliases are undocumented in Actions YAML, so both lists stay spelled out.
+    paths:
+      - src/**
+      - pyproject.toml
+      - requirements-serve.txt
+      - models.dvc
+      - Dockerfile
+      - .dockerignore
+      - railway.toml
+      - .github/workflows/router-service.yml
+  pull_request:
+    paths:
+      - src/**
+      - pyproject.toml
+      - requirements-serve.txt
+      - models.dvc
+      - Dockerfile
+      - .dockerignore
+      - railway.toml
+      - .github/workflows/router-service.yml
+  workflow_dispatch:
+
+concurrency:
+  group: router-service-${{ github.ref }}
+  # Never cancel a deploy mid-`railway up`; superseded PR checks are fine to drop.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ARM_ROOT: models/classifiers_union_200k
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # actions/checkout persists submodule creds with `git submodule foreach --recursive`,
+      # which aborts on query-taxonomy's nested .claude/skills gitlink (no .gitmodules entry).
+      # So init only query-taxonomy, non-recursively. query-taxonomy is public, so no token —
+      # just rewrite its SSH url to HTTPS (the runner has no SSH key) for this one command.
+      - name: Check out query-taxonomy (non-recursive)
+        run: |
+          git -c 'url.https://github.com/.insteadOf=git@github.com:' \
+            submodule update --init src/query-taxonomy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6,<3"
+      - run: pip install ./src/query-taxonomy . 'ruff>=0.15.20,<0.16.0' pytest
+      - run: ruff check src/router_service
+      - run: pytest tests/test_router_service.py tests/test_router.py tests/test_fusion.py -q
+
+  serve-deps:
+    # The image installs requirements-serve.txt, not the project's dependencies. This job
+    # installs the same set and imports the app, so a serving import the list cannot
+    # satisfy fails here instead of at deploy time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4          # no submodules: serving must not need them
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6,<3"
+      - run: pip install -r requirements-serve.txt pytest
+      - run: pip install --no-deps .
+      - run: python -c "import router_service.api; print('serving imports resolve')"
+      - run: pytest tests/test_router_service.py -q
+
+  deploy:
+    needs: [test, serve-deps]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      ARM: ${{ vars.ROUTER_ARM || 'no_branches' }}
+    steps:
+      - uses: actions/checkout@v4          # no submodules: the image does not carry one
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'dvc[gs]'
+      - name: GCS credentials
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          printf '%s' "$GCP_SA_KEY" > "$RUNNER_TEMP/gcp.json"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp.json" >> "$GITHUB_ENV"
+      - name: Pull one arm from the models output — 33 MB, no dataset involved
+        run: dvc pull --force "$ARM_ROOT/$ARM"
+      - name: Stage the arm where the build context can reach it
+        run: |
+          mkdir -p arm
+          cp -p "$ARM_ROOT/$ARM"/* arm/     # -p: plain cp resets mtime, which /health reports
+          test -s arm/meta.json && test -s arm/svd.joblib && test -s arm/thresholds.npy || {
+            echo "::error::$ARM is not in the DVC remote — run 'dvc add models && dvc push models' after training"
+            exit 1
+          }
+          python -c "import json; m = json.load(open('arm/meta.json')); \
+          assert m['serve_safe'], f\"{m['arm']} needs the taxonomy extractor at inference\"; \
+          print('serving', m['arm'], 'trained', m['trained_at'])"
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          npm install -g @railway/cli
+          railway up --service "${{ vars.RAILWAY_SERVICE }}"
+      - name: Smoke the live deployment
+        if: vars.ROUTER_URL != ''
+        run: |
+          curl -fsS --retry 20 --retry-all-errors --rAlsetry-delay 6 "${{ vars.ROUTER_URL }}/health"
+          curl -fsS -X POST "${{ vars.ROUTER_URL }}/classify/pure" \
+            -H 'content-type: application/json' \
+            -d '{"queries":["CVE-2021-44228 log4j remote code execution","why do cats purr"]}'

@@ -34,6 +34,15 @@ class DatasetName(StrEnum):
     BRIGHT_LEETCODE = "bright-leetcode"
     BRIGHT_AOPS = "bright-aops"
     BRIGHT_THEOREMQA_QUESTIONS = "bright-theoremqa-questions"
+    BRIGHT_BIOLOGY = "bright-biology"
+    BRIGHT_EARTH_SCIENCE = "bright-earth-science"
+    BRIGHT_ECONOMICS = "bright-economics"
+    BRIGHT_PONY = "bright-pony"
+    BRIGHT_PSYCHOLOGY = "bright-psychology"
+    BRIGHT_ROBOTICS = "bright-robotics"
+    BRIGHT_STACKOVERFLOW = "bright-stackoverflow"
+    BRIGHT_SUSTAINABLE_LIVING = "bright-sustainable-living"
+    BRIGHT_THEOREMQA_THEOREMS = "bright-theoremqa-theorems"
     QUEST = "quest"
     CRUMB_CLINICAL_TRIAL = "crumb-clinical-trial"
     CRUMB_CODE_RETRIEVAL = "crumb-code-retrieval"
@@ -46,6 +55,26 @@ class DatasetName(StrEnum):
     RARB_MATH = "rarb-math"
     RARB_CODE = "rarb-code"
     LIMIT = "limit"
+    # acquisition wave 2, catalog in docs/datasets.md
+    FRESHSTACK_ANGULAR = "freshstack-angular"
+    FRESHSTACK_GODOT = "freshstack-godot"
+    FRESHSTACK_LANGCHAIN = "freshstack-langchain"
+    FRESHSTACK_LARAVEL = "freshstack-laravel"
+    FRESHSTACK_YOLO = "freshstack-yolo"
+    ANTIQUE = "antique"
+    LOTTE_TECHNOLOGY_SEARCH = "lotte-technology-search"
+    LOTTE_TECHNOLOGY_FORUM = "lotte-technology-forum"
+    WEBFAQ_ENG = "webfaq-eng"
+    SCIRGEN_GEO_EN = "scirgen-geo-en"
+    CLERC = "clerc"
+    GOOAQ = "gooaq"
+    # acquisition wave 3 — query-distribution expansion
+    AMAZON_ESCI_EN_HARD = "amazon-esci-en-hard"
+    WANDS = "wands"
+    FINDER = "finder"
+    TREC_CAST_2020_HISTORY = "trec-cast-2020-history"
+    TECHQA = "techqa"
+    BEIR_TOUCHE_2020 = "beir-touche-2020"
 
 
 class Grounding(StrEnum):
@@ -80,6 +109,24 @@ class Availability(StrEnum):
     """Manual approval: email the authors, institutional agreement."""
 
 
+class QueryProvenance(StrEnum):
+    """Who wrote the source's queries — orthogonal to `llm_target`, which is
+    about the retrieval task's orientation and says nothing about authorship."""
+
+    HUMAN = "human"
+    """Real users, crowdworkers, forum posters."""
+
+    LLM = "llm"
+    """A model generated them, however heavily filtered afterwards."""
+
+    TEMPLATE = "template"
+    """Constructed programmatically from a schema, no author at all."""
+
+    UNKNOWN = "unknown"
+    """Not ratified yet. A state, never a default — the field has none, so a
+    new dataset cannot pass silently as human-written."""
+
+
 class SourceKind(StrEnum):
     IR_DATASETS = "ir_datasets"
     HUGGINGFACE = "huggingface"
@@ -101,6 +148,7 @@ class DatasetCard(BaseModel):
     source: SourceKind
     grounding: Grounding
     llm_target: bool
+    query_provenance: QueryProvenance
     scope: Scope
     non_trivial: bool
     multilingual: bool

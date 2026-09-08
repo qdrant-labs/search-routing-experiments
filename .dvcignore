@@ -2,3 +2,4 @@
 # the performance. Learn more at
 # https://dvc.org/doc/user-guide/dvcignore
 .claude
+*_backup-*

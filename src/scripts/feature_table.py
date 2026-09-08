@@ -14,10 +14,10 @@ query), stat scalars as `<bank>.<stat>` (e.g.
 "coordination.widest_list_size"). Identity columns: dataset, query_id,
 checkable.
 
-`checkable` is card-level for now — True when the dataset ships qrels
-(grounding == QQ), same value for every row of a dataset. The registry is
-queries-only, so the per-query ">=1 judged doc" flag of d30(c) waits on
-the deferred qrels decision.
+`checkable` is card-level for now — True when the dataset ships any usable
+relevance signal, same value for every row of a dataset. The registry is
+queries-only, so a per-query ">=1 judged doc" flag waits on the deferred
+qrels decision.
 
     poetry run python src/scripts/feature_table.py                  # all registered
     poetry run python src/scripts/feature_table.py --only beir-nfcorpus
@@ -30,11 +30,28 @@ from pathlib import Path
 import pandas as pd
 from tqdm.auto import tqdm
 
-from dataset_registry.core import DatasetName, Grounding, Query, RegistryDataset
+from dataset_registry.core import (
+    DatasetCard,
+    DatasetName,
+    Grounding,
+    Query,
+    RegistryDataset,
+)
 from dataset_registry.registry import DatasetRegistry
 from query_taxonomy.features import FeatureExtractor, QueryFeatures
 
 DEFAULT_TABLE_DIR = Path(__file__).resolve().parent.parent / "data" / "feature_table"
+
+SIGNAL_WITHOUT_QRELS: frozenset[DatasetName] = frozenset(
+    {DatasetName.ORCAS, DatasetName.GOOAQ}
+)
+"""Datasets whose relevance signal is not shipped qrels: ORCAS has clicks,
+GooAQ's answer passage doubles as the gold doc."""
+
+
+def is_checkable(card: DatasetCard) -> bool:
+    """Whether a dataset ships any relevance signal we can label against."""
+    return card.grounding is Grounding.QQ or card.name in SIGNAL_WITHOUT_QRELS
 
 
 class FeatureTable:
@@ -124,7 +141,7 @@ class FeatureTable:
     def _extract(self, dataset: RegistryDataset) -> pd.DataFrame:
         """One extraction pass over the dataset's (capped) query sample."""
         card = dataset.card
-        checkable = card.grounding is Grounding.QQ
+        checkable = is_checkable(card)
         queries = tqdm(
             dataset.sample_queries(),
             desc=f"extract {card.name.value}",

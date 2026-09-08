@@ -17,11 +17,12 @@ from augmentation.core import (
     AugmentedCandidate,
     CreditGate,
     Declaration,
-    Grounding,
+    SurfaceOrigin,
     Operator,
 )
 from augmentation.campaign import AugmentationCampaign
 from augmentation.engine import AugmentationOutcome, Augmenter
+from augmentation.judge import CoherenceJudge
 from augmentation.loop import AugmentationLoop
 from augmentation.operators import (
     OPERATOR_FAMILIES,
@@ -47,12 +48,13 @@ __all__ = [
     "AugmentationQrels",
     "AugmentedCandidate",
     "Augmenter",
+    "CoherenceJudge",
     "CreditGate",
     "Declaration",
     "DecorateOperator",
     "EngineSettings",
     "GeneratedPool",
-    "Grounding",
+    "SurfaceOrigin",
     "InjectOperator",
     "Operator",
     "OperatorSyntaxRewrite",

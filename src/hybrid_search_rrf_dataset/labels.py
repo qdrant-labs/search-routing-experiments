@@ -1,6 +1,6 @@
 """Route labels for the composition's rows — the golden set.
 
-`TargetComposition` decides *which* queries the dataset contains; this decides
+`CellFill` decides *which* queries the dataset contains; this decides
 *which route* each of them should take. One row per labelled (dataset,
 query_id), appended dataset by dataset as each source's corpus and qrels become
 available. Rows whose dataset has no usable corpus stay unlabelled and are
@@ -11,27 +11,51 @@ trainable rows a 50K pool actually yields.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 from hybrid_search_rrf_dataset.fusion import (
+    SERVING_COST,
     TIE_TOLERANCE,
     FusionStrategy,
+    StrategyName,
     derive_route,
 )
-from hybrid_search_rrf_dataset.golden import GoldenRoutingBuilder
+from hybrid_search_rrf_dataset.golden import (
+    GoldenRoutingBuilder,
+    GoldenRoutingDataset,
+)
 from hybrid_search_rrf_dataset.lanes import LANES
+from hybrid_search_rrf_dataset.paths import LanePaths
 from hybrid_search_rrf_dataset.objective import Objective, RouterObjective
 from hybrid_search_rrf_dataset.qrels import QrelStore
-from hybrid_search_rrf_dataset.retrieval import QuerySubset, RetrievalDataset
+from hybrid_search_rrf_dataset.retrieval import (
+    QuerySubset,
+    QuerySupplement,
+    RetrievalDataset,
+)
+
+if TYPE_CHECKING:
+    from augmentation.config import AugmentationPaths
 
 DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "route_labels"
+
+Generation = Literal["floor_based", "cell_based"]
 
 ROUTES_DIFFER = "routes_differ"
 ALL_TIED = "all_tied"
 ALL_ZERO = "all_zero"
+
+
+def oracle_dir(out_dir: Path, dataset: str) -> Path:
+    """Where a lane's oracle rows live, beside the labels they produced —
+    the shape `rederive_labels` and `cell_divergence` already read."""
+    return LanePaths().oracle_lane_dir(dataset, under=out_dir)
 
 
 def outcome_shape(scores: dict[str, float], tolerance: float = TIE_TOLERANCE) -> str:
@@ -62,22 +86,76 @@ def route_label(scores: dict[str, float]) -> str | None:
     return str(derive_route(scores))
 
 
+def _augmented_rows(
+    pool: pd.DataFrame,
+    wanted: pd.DataFrame,
+    home_lane: str,
+    generation: Generation,
+    *,
+    include_gated: bool = False,
+) -> pd.DataFrame:
+    """This lane's augmentation-pool rows admissible for evaluation: `floor_based`
+    unconditionally once ungated, `cell_based` only once `wanted` already admits
+    them (SPEC d61). A gated row has no human-audited credit yet regardless of
+    generation — the d42h gate applies to both (2026-08-10 fix: `floor_based`
+    originally skipped this check, leaking 240 unaudited rows). `include_gated`
+    is the deliberate override for labelling gated rows anyway: a label is a
+    measurement, credit is what the audit gates, and the synthetic rung's rows
+    are unreachable without it — every caller passing True is making the same
+    explicit call the 2026-08-10 batch made."""
+    # lazy: composition/__init__ pulls in hybrid_search_rrf_dataset.router, which
+    # imports this module — a top-level import here would be circular (same
+    # reason augmentation/supply.py's lane_dirs() defers its own).
+    from composition.cells import CELLS_BY_NAME
+
+    rows = pool[pool["home_lane"] == home_lane]
+    if not include_gated:
+        rows = rows[rows["credit_gate"].fillna("none") == "none"]
+    if generation == "floor_based":
+        return rows[~rows["floor"].isin(CELLS_BY_NAME)]
+    admitted = set(wanted["query_id"].astype(str))
+    return rows[rows["query_id"].astype(str).isin(admitted)]
+
+
+class _Chunk(QuerySubset):
+    """One batch of a labelling run's queries. Overrides `provenance` because
+    `QuerySubset` drops it, which would restamp every augmented row natural."""
+
+    def provenance(self) -> pd.DataFrame:
+        return self._source.provenance()
+
+
 class RouteLabels:
     """Builds and owns `data/route_labels/labels.parquet`."""
 
-    CARRIED = ["slice", "checkable", "label_lane"]
-    """Selection columns copied onto every label, so outcome shapes can be read
-    per composition slice rather than only in aggregate."""
+    CARRIED = ["slice", "checkable", "label_lane", "cell", "stage", "route"]
+    """Selection columns copied onto every label where the selection has them,
+    so outcome shapes can be read per group rather than only in aggregate."""
+
+    @property
+    def carried(self) -> list[str]:
+        """The carried columns this selection actually has."""
+        return [column for column in self.CARRIED if column in self.selection.columns]
 
     def __init__(
         self,
         selection: pd.DataFrame,
         out_dir: Path | None = None,
         objective: Objective | None = None,
+        *,
+        augmentation_paths: AugmentationPaths | None = None,
+        scored_against: str = "natural",
     ) -> None:
+        from augmentation.config import AugmentationPaths  # lazy: see _augmented_rows
+
         self.selection = selection
         self.objective = objective or RouterObjective()
         self._out_dir = out_dir if out_dir is not None else DEFAULT_OUT_DIR
+        self._aug_paths = augmentation_paths or AugmentationPaths()
+        # measurement conditions, not query origin: "supplemented" marks rows
+        # scored against a corpus carrying constructed docs, whatever their
+        # provenance says about the query text itself
+        self.scored_against = scored_against
 
     @property
     def labels_path(self) -> Path:
@@ -101,13 +179,20 @@ class RouteLabels:
         dataset: str | None = None,
         qrels: QrelStore | None = None,
         force: bool = False,
+        generation: Generation = "cell_based",
+        include_gated: bool = False,
+        chunk_size: int = 500,
+        max_workers: int = 1,
     ) -> pd.DataFrame:
-        """Label this dataset's selection rows and merge into the artifact.
+        """Label this dataset's query_ids not already in the artifact, and
+        append. Already-labelled query_ids (natural or augmented) are never
+        rescored — `force` is the only way to redo one that already has a
+        row. `dataset` names the selection's key for `source` when the two
+        differ — the composition calls BEIR NFCorpus `beir-nfcorpus` while
+        the retrieval class calls it `nfcorpus`.
 
-        `dataset` names the selection's key for `source` when the two differ —
-        the composition calls BEIR NFCorpus `beir-nfcorpus` while the retrieval
-        class calls it `nfcorpus`. Re-labelling replaces that dataset's rows
-        only; every other dataset's labels are left untouched.
+        `max_workers` overlaps one chunk's queries on a thread pool — see
+        `FusionBuilder.build`. Default 1 keeps every existing caller serial.
         """
         key = dataset or source.name
         wanted = self.rows_for(key)
@@ -115,8 +200,13 @@ class RouteLabels:
             raise ValueError(f"No selection rows for dataset {key!r}.")
 
         existing = self.load()
-        if not force and (existing.get("dataset") == key).any():
-            return existing[existing["dataset"] == key]
+        already = (
+            set()
+            if force
+            else set(
+                existing.loc[existing.get("dataset") == key, "query_id"].astype(str)
+            )
+        )
 
         subset = QuerySubset(source, wanted["query_id"])
         excluded_df = subset.excluded()
@@ -128,10 +218,115 @@ class RouteLabels:
             if not excluded_df.empty
             else None
         )
-        rows = GoldenRoutingBuilder(
-            dense, hybrid, sparse, objective=self.objective, excluded=exclusions
-        ).build(subset, qrels=qrels)
 
+        from augmentation.pool import GeneratedPool  # lazy: see _augmented_rows
+        from augmentation.qrels import AugmentationQrels
+
+        aug_rows = _augmented_rows(
+            GeneratedPool(self._aug_paths).load(), wanted, key, generation,
+            include_gated=include_gated,
+        )
+        if aug_rows.empty:
+            eval_dataset, eval_qrels = subset, qrels
+        else:
+            aug_ids = set(aug_rows["query_id"].astype(str))
+            matched = AugmentationQrels(self._aug_paths).load()
+            matched = matched[matched["query_id"].astype(str).isin(aug_ids)]
+            eval_dataset = QuerySupplement(
+                subset,
+                aug_rows[["query_id", "query", "provenance"]].rename(
+                    columns={"query": "text"}
+                ),
+                matched[["query_id", "doc_id", "relevance"]],
+            )
+            eval_qrels = QrelStore.concat([
+                qrels or QrelStore.from_dataset(source),
+                QrelStore(matched.assign(dataset=key)[QrelStore.COLUMNS]),
+            ])
+
+        queued = [
+            query_id
+            for query_id in eval_dataset.queries()["query_id"].astype(str)
+            if query_id not in already
+        ]
+        if not queued:
+            return existing.iloc[:0]
+
+        # one label per (dataset, query_id): a query in several cells appears
+        # once in wanted per cell, so dedup before the merge or it fans out.
+        # Per-cell readouts join labels back to the selection on query_id.
+        carry = (
+            wanted[["query_id", *self.carried]]
+            .astype({"query_id": str})
+            .drop_duplicates("query_id")
+        )
+        builder = GoldenRoutingBuilder(
+            dense, hybrid, sparse, objective=self.objective, excluded=exclusions
+        )
+
+        merged, written = existing, []
+        # the artifact is rewritten per chunk, not per call: retrieval is the
+        # expensive, crash-prone part, so a lane that dies at query 90,000
+        # loses one chunk of work instead of all of it.
+        total_chunks = -(-len(queued) // chunk_size)  # ceiling division
+        chunks = tqdm(
+            range(0, len(queued), chunk_size), total=total_chunks,
+            desc=f"label:{key}", unit="chunk",
+        )
+        # the three-way split available AT LABEL TIME — routes_differ is the
+        # only shape that teaches the router anything; the qrels-depth-aware
+        # kind taxonomy (decisive/undecisive/fake_tie/genuine_tie) needs the
+        # whole lane's qrels and is computed downstream, not per chunk here
+        shapes: Counter[str] = Counter()
+        for start in chunks:
+            batch = queued[start : start + chunk_size]
+            oracle_rows = builder.build(
+                _Chunk(eval_dataset, batch), qrels=eval_qrels, max_workers=max_workers
+            )
+            labelled = self._labelled(oracle_rows, key, carry)
+            if labelled.empty:  # a chunk the qrels cover none of
+                continue
+            self._persist_rankings(builder, key, oracle_rows)
+            # keep every row this call didn't touch — force only replaces the
+            # query_ids it actually rescored, never the rest of the dataset
+            stale = (merged.get("dataset") == key) & (
+                merged["query_id"].astype(str).isin(batch)
+            )
+            merged = pd.concat([merged[~stale], labelled], ignore_index=True)
+            self.labels_path.parent.mkdir(parents=True, exist_ok=True)
+            merged.to_parquet(self.labels_path, index=False)
+            written.append(labelled)
+            shapes.update(labelled["shape"])
+            chunks.set_postfix(
+                labelled=sum(len(w) for w in written),
+                differ=shapes[ROUTES_DIFFER], tied=shapes[ALL_TIED],
+                zero=shapes[ALL_ZERO], refresh=False,
+            )
+
+        if not written:
+            raise ValueError(
+                f"{key!r}: no rows produced for the {len(queued):,} new "
+                f"query_ids — check that the qrels cover them."
+            )
+        return pd.concat(written, ignore_index=True)
+
+    def _persist_rankings(
+        self,
+        builder: GoldenRoutingBuilder,
+        key: str,
+        rows: list[GoldenRoutingDataset],
+    ) -> None:
+        """The per-route top-k doc ids behind each score, banked in the lane's
+        own oracle dir — the tail judge's evidence, which the v2 oracle caches
+        never learn for additive rows, so each out_dir owns its own."""
+        if rows:
+            builder.append(rows, oracle_dir(self.labels_path.parent, key))
+
+    def _labelled(
+        self, rows: list[GoldenRoutingDataset], key: str, carry: pd.DataFrame
+    ) -> pd.DataFrame:
+        """One chunk's oracle rows as label rows, with the selection's carried
+        columns joined on."""
         labelled = pd.DataFrame(
             [
                 {
@@ -144,27 +339,21 @@ class RouteLabels:
                     "shape": outcome_shape(row.route_scores),
                     "metric_name": row.metric_name,
                     "min_relevance": self.objective.min_relevance,
+                    "provenance": row.provenance,
+                    "scored_against": self.scored_against,
                 }
                 for row in rows
             ]
         )
         if labelled.empty:
-            raise ValueError(
-                f"{key!r}: no rows produced. Every selected query lacked "
-                f"judgments — check that the qrels cover this selection."
-            )
-        labelled = labelled.merge(
-            wanted[["query_id", *self.CARRIED]].astype({"query_id": str}),
-            on="query_id",
-            how="left",
+            return labelled
+        # a carried selection column can share a name with a label column
+        # (cell_selection's planned `route` vs the labelled `route`): keep the
+        # label authoritative and suffix the selection's copy.
+        clash = {c: f"{c}_selected" for c in self.carried if c in labelled.columns}
+        return labelled.merge(
+            carry.rename(columns=clash), on="query_id", how="left"
         )
-
-        merged = pd.concat(
-            [existing[existing.get("dataset") != key], labelled], ignore_index=True
-        )
-        self.labels_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(self.labels_path, index=False)
-        return labelled
 
     def rederive(self) -> pd.DataFrame:
         """Recompute `route` and `shape` for every stored row from the score
@@ -293,38 +482,49 @@ class RouteLabels:
     def coverage(self) -> pd.DataFrame:
         """Per-dataset progress: selected rows vs labelled, and the shape split.
 
-        `qrels_ready` counts selected rows whose lane has qrels on disk but no
-        label yet — the corpus-pending state between pass 1 and pass 2 (SPEC
-        d39b). `unlabelled` is just `selected - labelled`; it asserts no
-        cause. In practice a row is unlabelled because its lane's qrels are
-        not fetched, its corpus is not indexed, or the source never judged it.
+        Every column counts SELECTED rows only, via a key join —
+        labels.parquet keeps rows from earlier, larger selections (measured
+        scores are never deleted when a row leaves the selection), so a bare
+        per-dataset label count overstates progress and once drove
+        `unlabelled` negative. `qrels_ready` counts selected rows whose lane
+        has qrels on disk but no label yet — the corpus-pending state between
+        pass 1 and pass 2 (SPEC d39b). A row is unlabelled because its lane's
+        qrels are not fetched, its corpus is not indexed, or the source never
+        judged it.
         """
         labels = self.load()
-        counts = (
-            labels.groupby(["dataset", "shape"]).size().unstack(fill_value=0)
+        shapes = (
+            labels[["dataset", "query_id", "shape"]]
+            .drop_duplicates(["dataset", "query_id"])
             if "shape" in labels.columns and not labels.empty
-            else pd.DataFrame()
+            else pd.DataFrame(columns=["dataset", "query_id", "shape"])
         )
-        none_yet: pd.Series = pd.Series(dtype=int)
+        merged = self.selection[["dataset", "query_id"]].merge(
+            shapes, on=["dataset", "query_id"], how="left"
+        )
         rows = []
-        for dataset, selected in self.selection["dataset"].value_counts().items():
-            shapes = counts.loc[dataset] if dataset in counts.index else none_yet
-            done = int(shapes.sum())
+        for dataset, picked in merged.groupby("dataset", sort=False):
+            done = int(picked["shape"].notna().sum())
+            counts = picked["shape"].value_counts()
             rows.append(
                 {
                     "dataset": dataset,
-                    "selected": int(selected),
+                    "selected": len(picked),
                     "labelled": done,
                     "qrels_ready": self._qrels_ready(dataset, done),
-                    "unlabelled": int(selected) - done,
-                    ROUTES_DIFFER: int(shapes.get(ROUTES_DIFFER, 0)),
-                    ALL_TIED: int(shapes.get(ALL_TIED, 0)),
-                    ALL_ZERO: int(shapes.get(ALL_ZERO, 0)),
+                    "unlabelled": len(picked) - done,
+                    ROUTES_DIFFER: int(counts.get(ROUTES_DIFFER, 0)),
+                    ALL_TIED: int(counts.get(ALL_TIED, 0)),
+                    ALL_ZERO: int(counts.get(ALL_ZERO, 0)),
                 }
             )
         return pd.DataFrame(rows).sort_values(
             ["labelled", "selected"], ascending=False, ignore_index=True
         )
+
+    def acceptability(self, tolerance: float | None = None) -> AcceptabilityLabels:
+        """The d60 view over the stored labels."""
+        return AcceptabilityLabels(self.load(), tolerance=tolerance)
 
     def _qrels_ready(self, dataset: str, labelled: int) -> int:
         """Selected rows joinable against the lane's on-disk qrels, minus the
@@ -344,3 +544,50 @@ class RouteLabels:
             ].astype(str)
         )
         return max(len(selected_ids & judged) - labelled, 0)
+
+
+class AcceptabilityLabels:
+    """The d60 view over a labelled frame: per-route `ok_*` booleans, the
+    cost-aware `serve` decision, and `shape`, derived from the stored score
+    vector at read time and never materialized. Default tolerance is hit
+    parity — the objective's own `ndcg_weight`, the widest gap that cannot
+    involve a top-1 flip."""
+
+    def __init__(
+        self, labels: pd.DataFrame, tolerance: float | None = None
+    ) -> None:
+        self.labels = labels
+        self.tolerance = (
+            RouterObjective().ndcg_weight if tolerance is None else tolerance
+        )
+
+    def frame(self) -> pd.DataFrame:
+        """The input frame plus `ok_<route>` (nullable boolean), `serve`, and
+        `shape`; all-zero rows carry nulls in every added column (d41
+        upheld)."""
+        out = self.labels.copy()
+        score_cols = [c for c in out.columns if c.startswith("score_")]
+        routes = [c.removeprefix("score_") for c in score_cols]
+        scores = out[score_cols].to_numpy(dtype=np.float64)
+        oracle = scores.max(axis=1)
+        answerable = oracle > TIE_TOLERANCE
+        # floored at TIE_TOLERANCE so tolerance=0 means "exact ties", exactly
+        # as derive_route counts them — the must-pass reproduction property.
+        effective = max(self.tolerance, TIE_TOLERANCE)
+        ok = scores >= (oracle - effective)[:, None]
+
+        for i, route in enumerate(routes):
+            column = pd.array(ok[:, i], dtype="boolean")
+            column[~answerable] = pd.NA
+            out[f"ok_{route}"] = column
+
+        out["shape"] = [
+            outcome_shape(dict(zip(routes, row))) for row in scores
+        ]
+
+        cost = np.array([SERVING_COST[StrategyName(r)] for r in routes])
+        cheapest_ok = np.where(ok, cost[None, :], np.inf).argmin(axis=1)
+        out["serve"] = pd.Series(
+            [routes[i] for i in cheapest_ok], index=out.index
+        ).where(answerable)
+        return out
