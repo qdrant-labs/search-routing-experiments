@@ -55,7 +55,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.6,<3"
-      - run: pip install ./src/query-taxonomy . ruff pytest
+      - run: pip install ./src/query-taxonomy . 'ruff>=0.15.20,<0.16.0' pytest
       - run: ruff check src/router_service
       - run: pytest tests/test_router_service.py tests/test_router.py tests/test_fusion.py -q
 
