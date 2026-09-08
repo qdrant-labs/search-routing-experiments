@@ -44,7 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # not recursive: query-taxonomy carries a nested .claude/skills gitlink with no
+          # .gitmodules entry, which aborts a recursive checkout — and we don't need it.
+          submodules: true
           token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
       - uses: actions/setup-python@v5
         with:
