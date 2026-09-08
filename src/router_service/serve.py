@@ -13,6 +13,8 @@ import pandas as pd
 from encoder_router.model import EncoderRouter
 from encoder_router.table import (
     HEAD_ROUTES,
+    MODELS_DIR,
+    LexicalShape,
     NgramSvd,
     ZipfStats,
     serve_from_probabilities,
@@ -21,11 +23,13 @@ from encoder_router.table import (
 DEFAULT_RRF_DELTA = 0.15
 """|p_dense - p_sparse| below this -> serve pure_rrf (hedge overlaid on threshold serving)."""
 
+DEFAULT_ARM_DIR = MODELS_DIR / "classifiers_union_200k" / "zipf_shape_nocorpus"
+
 
 class SavedRouter:
     """A loaded arm: raw query text -> route. The exact serving path the notebook uses."""
 
-    def __init__(self, meta, svd, thresholds, prob_fn, encoder, prefix, zstat) -> None:
+    def __init__(self, meta, svd, thresholds, prob_fn, encoder, prefix, zstat, sstat) -> None:
         self.meta = meta
         self._svd = svd
         self._thr = thresholds
@@ -33,6 +37,7 @@ class SavedRouter:
         self._enc = encoder
         self._prefix = prefix
         self._zstat = zstat
+        self._sstat = sstat
 
     @classmethod
     def load(cls, arm_dir: str | Path) -> "SavedRouter":
@@ -59,7 +64,11 @@ class SavedRouter:
             (np.load(p / "zipf_mean.npy"), np.load(p / "zipf_std.npy"))
             if meta.get("zipf_inputs") else None
         )
-        return cls(meta, svd, thresholds, prob, encoder, meta.get("prefix", ""), zstat)
+        sstat = (
+            (np.load(p / "shape_mean.npy"), np.load(p / "shape_std.npy"))
+            if meta.get("shape_inputs") else None
+        )
+        return cls(meta, svd, thresholds, prob, encoder, meta.get("prefix", ""), zstat, sstat)
 
     def _inputs(self, queries: list[str]) -> np.ndarray:
         blocks = [
@@ -71,6 +80,9 @@ class SavedRouter:
         if self._zstat is not None:
             z = ZipfStats().frame(pd.Series(queries)).to_numpy(np.float32)
             blocks.append((z - self._zstat[0]) / self._zstat[1])
+        if self._sstat is not None:
+            sh = LexicalShape().frame(pd.Series(queries)).to_numpy(np.float32)
+            blocks.append((sh - self._sstat[0]) / self._sstat[1])
         return np.concatenate(blocks, axis=1).astype(np.float32)
 
     def classify(self, queries: str | list[str], delta: float = DEFAULT_RRF_DELTA) -> list[dict]:
@@ -92,9 +104,7 @@ class SavedRouter:
 if __name__ == "__main__":  # runnable check against a saved arm
     import sys
 
-    arm = sys.argv[1] if len(sys.argv) > 1 else (
-        "src/data/encoder_router/classifiers_union_200k/no_branches"
-    )
+    arm = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_ARM_DIR
     r = SavedRouter.load(arm)
     out = r.classify(["CVE-2021-44228 log4j remote code execution", "why do cats purr"])
     assert {o["route"] for o in out} <= {"dense_only", "sparse_only", "pure_rrf"}

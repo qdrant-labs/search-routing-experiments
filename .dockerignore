@@ -1,0 +1,17 @@
+.git
+.venv
+.dvc/cache
+src/data
+models
+notebooks
+tests
+docs
+*.log
+.env
+.claude
+.agents
+**/__pycache__
+**/.embedding_cache
+.pytest_cache
+.ruff_cache
+src/query-taxonomy
