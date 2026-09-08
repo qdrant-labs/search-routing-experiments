@@ -135,6 +135,26 @@ def test_a_learned_sparse_model_can_still_opt_out():
     assert client.created["sparse_vectors_config"]["sparse"].modifier is None
 
 
+def test_learned_sparse_embedding_receives_its_configured_encoder_batch_size(monkeypatch):
+    cfg = EmbeddingConfig(
+        name="sparse", model_id="unused", kind="sparse", modifier=None,
+        engine="sentence_transformers", sentence_transformers_batch_size=8,
+    )
+    seen = {}
+
+    def _vectors(model_id, texts, **kwargs):
+        seen.update(model_id=model_id, texts=texts, **kwargs)
+        return ["vector"]
+
+    monkeypatch.setattr(indexer_module, "st_sparse_vectors", _vectors)
+    got = CorpusIndexer(None, "lane", embeddings=[cfg])._embed(cfg, ["doc"], batch_size=64)
+
+    assert got == ["vector"]
+    assert seen == {
+        "model_id": "unused", "texts": ["doc"], "is_query": False, "batch_size": 8,
+    }
+
+
 class _TextEmbedder(CorpusIndexer):
     """Embeds from the text, so a vector served for the wrong document is
     visible as a value rather than only as a missing call."""
@@ -403,3 +423,71 @@ def test_without_reuse_a_cloud_slot_still_embeds_as_documents():
         CLOUD_DENSE, [_point_id("a")], ["ta"], batch_size=8
     )
     assert all(isinstance(v, Document) for v in vectors)
+
+
+class _FlakyStoringClient:
+    """Fails the first upsert with a 429 but keeps the points it received —
+    Qdrant Cloud embedding a batch, storing it, then losing the response."""
+
+    def __init__(self) -> None:
+        self.stored: set[str] = set()
+        self.sent: list[int] = []
+
+    def upsert(self, *, points, **kwargs):
+        del kwargs
+        self.sent.append(len(points))
+        self.stored.update(str(p.id) for p in points)
+        if len(self.sent) == 1:
+            raise UnexpectedResponse(429, "Too Many Requests", b"{}", httpx.Headers())
+
+    def retrieve(self, *, ids, **kwargs):
+        del kwargs
+        return [SimpleNamespace(id=i) for i in ids if str(i) in self.stored]
+
+
+def test_a_retry_does_not_re_embed_points_the_server_already_stored(monkeypatch):
+    """The regression this exists for: a cloud slot embeds INSIDE the upsert, so
+    a 429 after the server did the work still carries a bill. Blind resends of
+    the same Documents buy the same embeddings up to four times — measured
+    exposure on the 1.19M-doc leg-2 run was ~$53 becoming ~$213."""
+    monkeypatch.setattr("hybrid_search_rrf_dataset.indexer.time.sleep", lambda *_: None)
+    client = _FlakyStoringClient()
+    points = [
+        indexer_module.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_DNS, str(i))),
+                                   vector={}, payload={})
+        for i in range(4)
+    ]
+    CorpusIndexer(client, "lane", embeddings=[DENSE])._upsert_with_retry(points)
+    assert client.sent == [4], "the retry re-sent points the server already had"
+
+
+class _WriteTimeoutClient:
+    """Fails the first `fails` upserts with a transport-level write timeout
+    (ResponseHandlingException — no status_code), then succeeds and keeps the
+    points. `retrieve` reports what it stored, for the uncommitted check."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails, self.calls = fails, 0
+        self.stored: set[str] = set()
+
+    def upsert(self, *, points, **kwargs):
+        del kwargs
+        self.calls += 1
+        if self.calls <= self.fails:
+            from qdrant_client.http.exceptions import ResponseHandlingException
+            raise ResponseHandlingException("The write operation timed out")
+        self.stored.update(str(p.id) for p in points)
+
+    def retrieve(self, *, ids, **kwargs):
+        del kwargs
+        return [SimpleNamespace(id=i) for i in ids if str(i) in self.stored]
+
+
+def test_a_transport_write_timeout_is_retried_not_fatal(monkeypatch):
+    """The regression this exists for: a heavy upsert stalling the socket raises
+    ResponseHandlingException, which carries no HTTP status — the status-only
+    retry let it kill a multi-hour run on one transient stall."""
+    monkeypatch.setattr("hybrid_search_rrf_dataset.indexer.time.sleep", lambda *_: None)
+    client = _WriteTimeoutClient(fails=2)
+    CorpusIndexer(client, "lane", embeddings=[DENSE])._upsert_with_retry([])
+    assert client.calls == 3, "two timeouts then success — must not raise"

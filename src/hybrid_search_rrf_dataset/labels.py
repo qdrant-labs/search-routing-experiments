@@ -547,11 +547,11 @@ class RouteLabels:
 
 
 class AcceptabilityLabels:
-    """The d60 view over a labelled frame: per-route `ok_*` booleans plus the
-    cost-aware `serve` decision, derived from the stored score vector at read
-    time and never materialized. Default tolerance is hit parity — the
-    objective's own `ndcg_weight`, the widest gap that cannot involve a
-    top-1 flip."""
+    """The d60 view over a labelled frame: per-route `ok_*` booleans, the
+    cost-aware `serve` decision, and `shape`, derived from the stored score
+    vector at read time and never materialized. Default tolerance is hit
+    parity — the objective's own `ndcg_weight`, the widest gap that cannot
+    involve a top-1 flip."""
 
     def __init__(
         self, labels: pd.DataFrame, tolerance: float | None = None
@@ -562,8 +562,9 @@ class AcceptabilityLabels:
         )
 
     def frame(self) -> pd.DataFrame:
-        """The input frame plus `ok_<route>` (nullable boolean) and `serve`;
-        all-zero rows carry nulls in every added column (d41 upheld)."""
+        """The input frame plus `ok_<route>` (nullable boolean), `serve`, and
+        `shape`; all-zero rows carry nulls in every added column (d41
+        upheld)."""
         out = self.labels.copy()
         score_cols = [c for c in out.columns if c.startswith("score_")]
         routes = [c.removeprefix("score_") for c in score_cols]
@@ -579,6 +580,10 @@ class AcceptabilityLabels:
             column = pd.array(ok[:, i], dtype="boolean")
             column[~answerable] = pd.NA
             out[f"ok_{route}"] = column
+
+        out["shape"] = [
+            outcome_shape(dict(zip(routes, row))) for row in scores
+        ]
 
         cost = np.array([SERVING_COST[StrategyName(r)] for r in routes])
         cheapest_ok = np.where(ok, cost[None, :], np.inf).argmin(axis=1)

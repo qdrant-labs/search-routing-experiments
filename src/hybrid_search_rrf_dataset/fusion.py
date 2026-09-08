@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from fastembed import SparseTextEmbedding, TextEmbedding
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
     Document,
     Fusion,
@@ -15,36 +16,28 @@ from qdrant_client.models import (
     ScoredPoint,
     SparseVector,
 )
+from tqdm.auto import tqdm
 
-from hybrid_search_rrf_dataset.indexer import EmbeddingConfig, st_sparse_vectors
+from hybrid_search_rrf_dataset.indexer import (
+    _RETRYABLE_STATUS,
+    EmbeddingConfig,
+    st_sparse_vectors,
+)
 
+from hybrid_search_rrf_dataset.routes import (  # re-exported: fusion stays the public spelling
+    SERVING_COST,
+    TIE_TOLERANCE,
+    StrategyName,
+)
 
-class StrategyName(StrEnum):
-    """The router's decision surface — exactly three routes.
+_QUERY_MAX_ATTEMPTS = 4
+_QUERY_BACKOFF_S = 5.0
+"""Searches share the upsert path's failure modes — a saturated cluster returns
+500 'Operation Search timed out' rather than queueing, and cloud-inference
+embeds ride inside the request — so they get the same transient-only retry
+with doubling backoff (5s, 10s, 20s). The sleep also drains concurrent
+pressure, which is usually what caused the timeout."""
 
-    Weighted variants (weighted_rrf, weighted_dbsf) were removed 2026-07-28
-    per SPEC d37: a continuous dense/sparse weight is not a label the router
-    can emit, so tuning one served no downstream consumer.
-    """
-
-    DENSE_ONLY = "dense_only"
-    PURE_RRF = "pure_rrf"
-    SPARSE_ONLY = "sparse_only"
-
-
-TIE_TOLERANCE = 1e-9
-"""Two route scores within this are the same score (SPEC d41e: ties are
-exact; near-ties stay `routes_differ` with a thin margin)."""
-
-SERVING_COST: dict[StrategyName, int] = {
-    StrategyName.SPARSE_ONLY: 0,
-    StrategyName.DENSE_ONLY: 1,
-    StrategyName.PURE_RRF: 2,
-}
-"""Relative query-time cost (SPEC d41c). pure_rrf above each component is
-structural — it runs both plus fusion; sparse < dense (no query-side
-transformer pass) is an assumption until the latency benchmark lands. A flip
-re-derives the route column in seconds via `RouteLabels.rederive`."""
 
 
 def derive_route(
@@ -109,7 +102,10 @@ class FusionStrategy(ABC):
                 options=self.sparse_cfg.provider_options,
             )
         if self.sparse_cfg.engine == "sentence_transformers":  # learned-sparse query side
-            return st_sparse_vectors(self.sparse_cfg.model_id, [text], is_query=True)[0]
+            # cpu: the query encode is tokenizer + IDF weights, and keeping MPS
+            # out of the search path means a wedged GPU can't stall a labelling run
+            return st_sparse_vectors(self.sparse_cfg.model_id, [text],
+                                     is_query=True, device="cpu")[0]
         if self._sparse_model is None:
             self._sparse_model = SparseTextEmbedding(
                 self.sparse_cfg.model_id, providers=self.sparse_cfg.providers,
@@ -118,23 +114,44 @@ class FusionStrategy(ABC):
         s = next(iter(self._sparse_model.embed([text])))
         return SparseVector(indices=s.indices.tolist(), values=s.values.tolist())
 
+    def _query_with_retry(self, **kwargs: Any) -> list[ScoredPoint]:
+        for attempt in range(_QUERY_MAX_ATTEMPTS):
+            try:
+                return self.client.query_points(
+                    collection_name=self.collection_name, **kwargs
+                ).points
+            except (UnexpectedResponse, ResponseHandlingException) as exc:
+                status = getattr(exc, "status_code", None)
+                transient = (
+                    isinstance(exc, ResponseHandlingException)
+                    or status in _RETRYABLE_STATUS
+                )
+                if not transient or attempt == _QUERY_MAX_ATTEMPTS - 1:
+                    raise
+                delay = _QUERY_BACKOFF_S * (2**attempt)
+                tqdm.write(
+                    f"{self.collection_name}: search {status or type(exc).__name__} "
+                    f"(attempt {attempt + 1}/{_QUERY_MAX_ATTEMPTS}), "
+                    f"retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # the loop returns or raises
+
     def _dense_hits(self, query: str) -> list[ScoredPoint]:
-        return self.client.query_points(
-            collection_name=self.collection_name,
+        return self._query_with_retry(
             query=self._dense(query),
             using=self.dense_cfg.name,
             limit=self.fetch_limit,
             with_payload=["doc_id"],
-        ).points
+        )
 
     def _sparse_hits(self, query: str) -> list[ScoredPoint]:
-        return self.client.query_points(
-            collection_name=self.collection_name,
+        return self._query_with_retry(
             query=self._sparse(query),
             using=self.sparse_cfg.name,
             limit=self.fetch_limit,
             with_payload=["doc_id"],
-        ).points
+        )
 
     def _prefetch_pair(self, query: str) -> list[Prefetch]:
         return [
@@ -187,11 +204,10 @@ class PureRRFStrategy(FusionStrategy):
     name: ClassVar[StrategyName] = StrategyName.PURE_RRF
 
     def rank(self, query: str) -> dict[str, float]:
-        hits = self.client.query_points(
-            collection_name=self.collection_name,
+        hits = self._query_with_retry(
             prefetch=self._prefetch_pair(query),
             query=FusionQuery(fusion=Fusion.RRF),
             limit=self.fetch_limit,
             with_payload=["doc_id"],
-        ).points
+        )
         return self._ranking(hits)

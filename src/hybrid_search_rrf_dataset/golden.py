@@ -4,7 +4,7 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -292,15 +292,18 @@ class FusionBuilder(ABC, Generic[T]):
         Pointless for local fastembed, which is CPU/GIL-bound and serializes
         regardless. Default 1 keeps every existing caller's behaviour and
         exact row order unchanged. Note: with workers>1 `_iter_queries`'s own
-        bar tracks queries SUBMITTED, not completed — `ThreadPoolExecutor.map`
-        drains the generator up front to schedule work, so it fills almost
-        immediately; the outer per-chunk bar (`RouteLabels.label`) is what
-        still reflects real completion."""
+        bar tracks queries SUBMITTED, not completed — it fills the moment work
+        is scheduled; the `done:` bar below is the one that reflects real
+        completions, ticking as each row's three searches finish."""
         contexts = self._iter_queries(dataset, start_id, qrels)
         if max_workers <= 1:
             return [self.build_row(ctx) for ctx in contexts]
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            return list(pool.map(self.build_row, contexts))
+            futures = [pool.submit(self.build_row, ctx) for ctx in contexts]
+            for _ in tqdm(as_completed(futures), total=len(futures),
+                          desc=f"done:{dataset.name}", unit="row", leave=False):
+                pass
+            return [f.result() for f in futures]  # submission order preserved
 
     def save(self, rows: list[T], path: Path | str | None = None) -> Path:
         out = Path(path or self.default_dir)

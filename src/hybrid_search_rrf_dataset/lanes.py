@@ -76,7 +76,12 @@ LANES: dict[str, Lane] = {
     "bright-stackoverflow": Lane(BrightLane("stackoverflow")),
     "bright-sustainable-living": Lane(BrightLane("sustainable_living")),
     "bright-theoremqa-theorems": Lane(BrightLane("theoremqa_theorems")),
-    "crumb-clinical-trial": Lane(CrumbLane("clinical_trial")),
+    # min_relevance=2: grades 0/1/2 present; grade-1 partials are the
+    # topical-adjacent "trial for a related condition" a strict judge correctly
+    # rejects (SPEC d71, three-agent triangulation). Scoring against grade≥2
+    # only stops counting those rejections as false negatives — same judge,
+    # honest metric.
+    "crumb-clinical-trial": Lane(CrumbLane("clinical_trial"), min_relevance=2),
     # exception: 108,782 relevant (median 23 relevant docs/query — the
     # benchmark's design) > recipe ceiling. Floor-plus-pad: every answer
     # force-included + ~11K distractors. Was full-232K; shrunk 2026-07-29
@@ -95,7 +100,10 @@ LANES: dict[str, Lane] = {
     # exception: full 50K by design — 46 relevant docs would compute to the
     # floor and delete the stress test the dataset exists for
     "limit": Lane(LimitLane(), corpus_target=50_000),
-    "dbpedia-entity": Lane(DBPediaLane()),
+    # min_relevance=2: BEIR DBpedia grade 1 = "partially relevant" (topically
+    # adjacent entity, not THE entity), which a strict identity judge rejects;
+    # scoring against grade 2 alone measures against the identity standard.
+    "dbpedia-entity": Lane(DBPediaLane(), min_relevance=2),
     "miracl-en-dev": Lane(MiraclLane()),
     "orcas": Lane(OrcasLane()),
     "freshstack-angular": Lane(FreshStackLane("angular")),
@@ -115,7 +123,11 @@ LANES: dict[str, Lane] = {
     # ceiling, so LaneCorpora narrows metadata to composition query ids first.
     "amazon-esci-en-hard": Lane(AmazonEsciLane()),
     # deep-judged calibration lane; retain all candidate products.
-    "wands": Lane(WandsLane(), corpus_target=42_994),
+    # min_relevance=2: WANDS grade 1 = "partial" (same category, wrong function
+    # or missing attribute — "glam standard recliner" for "accent chair
+    # recliner"). A strict attribute-match judge rejects those correctly; the
+    # 5-lane paired A/B saw a card TRY to loosen for them and go UNSAFE.
+    "wands": Lane(WandsLane(), corpus_target=42_994, min_relevance=2),
     "finder": Lane(FinderLane()),
     # conversational multi-turn: query = prior turns + [CURRENT] + utterance
     "trec-cast-2020-history": Lane(TrecCast2020HistoryLane()),

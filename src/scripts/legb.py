@@ -29,7 +29,6 @@ from hybrid_search_rrf_dataset.fusion import (
 from hybrid_search_rrf_dataset.indexer import (
     CorpusDocument,
     CorpusIndexer,
-    EmbeddingCache,
     EmbeddingConfig,
 )
 from hybrid_search_rrf_dataset.labels import (
@@ -72,6 +71,24 @@ about the shipped dataset. Native supply has no usable low-idf lane."""
 SPARSE_CFG = EmbeddingConfig(name="sparse_base", model_id="Qdrant/bm25", kind="sparse")
 """Identical to leg-1's sparse leg — only the dense encoder is under test, so
 BM25+IDF stays fixed and the fusion leg differs solely through its dense half."""
+
+INDEX_SLICE = 2000
+"""Docs per `upload` call. `upload` embeds its WHOLE item list before the first
+upsert, so one call per lane holds every vector of that lane in RAM at once —
+quest's 72,080 copied dense vectors do not fit. Measured at this slice: 243MB
+for the copied vectors (a 3072-float Python list costs ~98KB), ~1.1GB peak on
+quest with the corpus frame and points alongside. Slicing also uploads as it
+goes, which is what lets a killed lane resume."""
+
+
+def indexable(corpus: pd.DataFrame) -> int:
+    """Points a finished lane actually holds. `upload` drops docs whose embed
+    text is blank — unembeddable, and a cloud encoder 400s on them — and uuid5
+    ids collapse duplicate doc_ids onto one point, so `len(corpus)` overstates
+    the target: scirgen-geo-en's 3,354 rows carry 5 blanks and finish at 3,349."""
+    title = corpus["title"].fillna("") if "title" in corpus else ""
+    embedded = (title + " " + corpus["text"].fillna("")).str.strip()
+    return int(corpus.loc[embedded != "", "doc_id"].nunique())
 
 CERTIFIABLE = ("decisive", "genuine_tie")
 """A row is only evidence about a *label* when both legs certified one; a row
@@ -256,19 +273,22 @@ OPENSEARCH_DISTILL_SPARSE_MODEL_ID = (
 )
 
 
-def opensearch_distill_sparse_cfg() -> EmbeddingConfig:
+def opensearch_distill_sparse_cfg(*, batch_size: int = 16) -> EmbeddingConfig:
     """OpenSearch neural-sparse doc-v3-distill — the document-only family's small
     representative (67M distilbert vs gte's ~137M + custom code): doc-side expansion
     with an inference-free query side (tokenizer + baked-in IDF lookup, no model
     forward), so query weights already carry IDF and `modifier=None` is correct.
     Same 512-token window as SPLADE, keeping the sparse comparison one-variable.
-    Heavy doc-side indexing only — run under memguard."""
+    Heavy doc-side indexing only. ``batch_size`` bounds one SparseEncoder call,
+    independently of Qdrant's upload/checkpoint slice, so lower it on a memory-constrained
+    machine rather than allowing MPS to accumulate a whole indexing slice."""
     return EmbeddingConfig(
         name="sparse_legb",
         model_id=OPENSEARCH_DISTILL_SPARSE_MODEL_ID,
         kind="sparse",
         modifier=None,
         engine="sentence_transformers",
+        sentence_transformers_batch_size=batch_size,
     )
 
 
@@ -419,35 +439,62 @@ class LegBPilot:
             })
         return pd.DataFrame(rows)
 
+    def dense_source(self, lane: str) -> str | None:
+        """The sibling collection whose already-paid dense vectors this lane's
+        collection copies by point id instead of re-embedding through the
+        provider — uuid5 ids are content-derived, so same lane + same docs
+        means the same ids there. `None` is the expensive answer: nothing has
+        paid for this lane yet, and indexing it will."""
+        base = f"{_source_name(lane)}_legb_{self._dense.model_id.rsplit('/', 1)[-1]}_routes"
+        if not self._dense.cloud or base == self.collection(lane):
+            return None
+        return base if self._client.collection_exists(base) else None
+
+    def index(self, lane: str, *, allow_paid_dense: bool = False) -> str:
+        """Index one lane's corpus into its leg-2 collection, without
+        labelling. A corpus pass over a large lane runs for hours and the
+        labels it feeds are minutes, so the two halves of `index_and_label`
+        are worth running on separate nights.
+
+        Refuses a lane with no `dense_source` unless the spend is authorised:
+        a cloud dense slot embeds every document through the provider from
+        inside the upsert, so the difference between a copied lane and a paid
+        one is silent at the call site and arrives on an invoice."""
+        if self._dense.cloud and not allow_paid_dense and self.dense_source(lane) is None:
+            raise RuntimeError(
+                f"{lane}: no collection holds paid {self._dense.model_id} vectors "
+                f"to copy, so indexing embeds the whole corpus through the "
+                f"provider. Pass allow_paid_dense=True to authorise it."
+            )
+        corpus = SnapshotDataset(_source_name(lane), path=str(DATA_DIR)).corpus()
+        return self._index(lane, corpus)
+
     def _index(self, lane: str, corpus: pd.DataFrame) -> str:
         collection = self.collection(lane)
-        # A sibling collection with the SAME dense model (the default-sparse one,
-        # no sparse slug) already paid for these dense vectors — copy them by
-        # point id instead of re-embedding through the provider. uuid5 point ids
-        # are content-derived, so same lane + same docs => same ids there.
-        base = f"{_source_name(lane)}_legb_{self._dense.model_id.rsplit('/', 1)[-1]}_routes"
-        reuse = (
-            base
-            if self._dense.cloud and base != collection
-            and self._client.collection_exists(base)
-            else None
-        )
+        reuse = self.dense_source(lane)
         if reuse:
             tqdm.write(f"[{lane}] dense vectors copied from {reuse} — no inference spend")
         indexer = CorpusIndexer(
             self._client, collection,
             embeddings=[self._dense, self._sparse],
-            # bge-small and e5 keep separate cache files (keyed by model_id), so
-            # sharing the lane namespace is safe and reuses nothing wrongly
-            cache=EmbeddingCache(namespace=_source_name(lane)),
+            # No EmbeddingCache: a slice uploads the moment it is embedded, so
+            # `missing` already resumes at slice granularity and the pickle
+            # would only duplicate Qdrant — at learned-sparse volume that is
+            # gigabytes, rewritten in full on every checkpoint.
             reuse_cloud_from=reuse,
         )
         indexer.ensure_collection()
-        if self._client.count(collection, exact=True).count < len(corpus):
-            docs = [CorpusDocument(**r) for r in corpus.to_dict("records")]
-            fresh = indexer.missing(docs)
-            tqdm.write(f"[{lane}] indexing {len(fresh):,}/{len(docs):,} -> {collection}")
-            indexer.upload(fresh, batch_size=64)
+        # No count short-circuit: a lane's finished point count is `indexable`,
+        # not `len(corpus)`, so a count test either rescans a complete lane
+        # forever or calls a stale collection done. `missing` settles it by id,
+        # one slice at a time, which is the question that was being asked.
+        tqdm.write(f"[{lane}] indexing {indexable(corpus):,} docs -> {collection}")
+        for start in tqdm(range(0, len(corpus), INDEX_SLICE),
+                          desc=f"slice:{lane}", unit="slice"):
+            rows = corpus.iloc[start : start + INDEX_SLICE].to_dict("records")
+            fresh = indexer.missing([CorpusDocument(**r) for r in rows])
+            if fresh:
+                indexer.upload(fresh, batch_size=64, parallel=self._max_workers)
         return collection
 
     def index_and_label(

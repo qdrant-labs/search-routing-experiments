@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -6,6 +8,9 @@ from scripts.legb import (
     QWEN_INSTRUCTION,
     LegBPilot,
     e5_dense_cfg,
+    gemini_dense_cfg,
+    indexable,
+    opensearch_distill_sparse_cfg,
     qwen_dense_cfg,
     stack_flags,
 )
@@ -315,3 +320,112 @@ def test_readout_reports_untested_lanes(capsys):
     pilot.readout(merged)
     out = capsys.readouterr().out
     assert "crumb-legal-qa" in out and "NOT YET TESTED" in out
+
+
+class _IndexClient:
+    """Answers the three calls `_index` makes of a client: which collections
+    exist, how many points one holds, and (through the stub indexer) nothing
+    else."""
+
+    def __init__(self, live: set[str] | None = None, count: int = 0) -> None:
+        self.live, self._count = live or set(), count
+
+    def collection_exists(self, name: str) -> bool:
+        return name in self.live
+
+    def count(self, name, exact=True):
+        del name, exact
+        return SimpleNamespace(count=self._count)
+
+
+class _StubIndexer:
+    """Records the size of every upload; treats every doc as absent."""
+
+    uploads: list[int] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        del args, kwargs
+
+    def ensure_collection(self) -> None: ...
+
+    def missing(self, docs):
+        return docs
+
+    def upload(self, docs, **kwargs):
+        del kwargs
+        _StubIndexer.uploads.append(len(docs))
+
+
+def _corpus(n: int) -> pd.DataFrame:
+    return pd.DataFrame({
+        "doc_id": [str(i) for i in range(n)],
+        "title": [""] * n,
+        "text": [f"doc {i}" for i in range(n)],
+    })
+
+
+def _gemini_pilot(client) -> LegBPilot:
+    return LegBPilot(client, gemini_dense_cfg(),
+                     sparse_cfg=opensearch_distill_sparse_cfg())
+
+
+@pytest.fixture
+def openrouter_key(monkeypatch):
+    monkeypatch.setenv("OPEN_ROUTER_API_KEY", "sk-test")
+
+
+def test_dense_source_is_none_until_a_sibling_has_paid(openrouter_key):
+    """`None` is the expensive answer — it is what the spend guard reads."""
+    base = "antique_legb_gemini-embedding-001_routes"
+    assert _gemini_pilot(_IndexClient()).dense_source("antique") is None
+    pilot = _gemini_pilot(_IndexClient(live={base}))
+    assert pilot.dense_source("antique") == base
+    assert pilot.dense_source("antique") != pilot.collection("antique")
+
+
+def test_a_local_dense_leg_never_claims_a_paid_source():
+    """e5 embeds locally, so there is no provider bill to avoid and no cloud
+    vector to copy — `dense_source` must not point at a sibling collection."""
+    assert LegBPilot(_IndexClient(), e5_dense_cfg()).dense_source("antique") is None
+
+
+def test_index_refuses_an_unpaid_lane_without_authorisation(openrouter_key):
+    """The regression this exists for: a cloud dense slot embeds every document
+    through the provider from inside the upsert, so `index("orcas")` and
+    `index("quest")` look identical at the call site and differ by an invoice."""
+    with pytest.raises(RuntimeError, match="allow_paid_dense"):
+        _gemini_pilot(_IndexClient()).index("antique")
+
+
+def test_index_uploads_in_slices(monkeypatch, openrouter_key):
+    """The regression this exists for: `upload` embeds its whole item list
+    before the first upsert, so one call per lane held every copied 3072-dim
+    vector at once — measured 243MB per 2,000, which quest's 72,080 docs do
+    not survive."""
+    monkeypatch.setattr("scripts.legb.CorpusIndexer", _StubIndexer)
+    _StubIndexer.uploads = []
+    _gemini_pilot(_IndexClient())._index("antique", _corpus(4500))
+    assert _StubIndexer.uploads == [2000, 2000, 500]
+
+
+def test_a_complete_lane_is_settled_by_id_not_by_count(monkeypatch, openrouter_key):
+    """The regression this exists for: the count test compared against
+    `len(corpus)`, which no lane carrying a blank doc ever reaches — scirgen-geo-en
+    finishes at 3,349 of 3,354 rows and would rescan forever, while a stale
+    collection of unrelated points would pass as done."""
+    monkeypatch.setattr("scripts.legb.CorpusIndexer", _StubIndexer)
+    _StubIndexer.uploads = []
+    client = _IndexClient(count=10_000)  # count says done, ids say otherwise
+    _gemini_pilot(client)._index("antique", _corpus(10))
+    assert _StubIndexer.uploads == [10]
+
+
+def test_indexable_counts_the_points_a_lane_will_hold():
+    """`upload` drops blank embed text and uuid5 collapses duplicate doc_ids,
+    so neither is part of the target a run verifies against."""
+    corpus = pd.DataFrame({
+        "doc_id": ["a", "b", "c", "c"],
+        "title": ["", "  ", "t", "t"],
+        "text": ["real", "", "x", "x"],
+    })
+    assert indexable(corpus) == 2

@@ -132,6 +132,14 @@ def test_tolerance_zero_reproduces_stored_route(shaped_frame):
         assert (pd.isna(served) and stored is None) or served == stored, row_name
 
 
+def test_shape_derived_from_scores(shaped_frame):
+    # the cascade artifact stores no `shape` column; the view derives it
+    view = AcceptabilityLabels(shaped_frame).frame()
+    assert view.loc["all_zero", "shape"] == "all_zero"
+    assert view.loc["all_tied", "shape"] == "all_tied"
+    assert view.loc["sparse_wins", "shape"] == "routes_differ"
+
+
 def test_hit_parity_default_tolerance(shaped_frame):
     view = AcceptabilityLabels(shaped_frame)
     assert view.tolerance == pytest.approx(RouterObjective().ndcg_weight)

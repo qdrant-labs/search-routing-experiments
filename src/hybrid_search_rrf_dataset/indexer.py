@@ -1,5 +1,6 @@
 import logging
 import pickle
+import threading
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -12,7 +13,7 @@ import numpy as np
 from fastembed import SparseTextEmbedding, TextEmbedding
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client import QdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import (
     Distance,
     Document,
@@ -160,6 +161,11 @@ class EmbeddingConfig(BaseModel):
     `SparseEncoder` — for learned-sparse models fastembed does not ship (e.g.
     `opensearch-project/opensearch-neural-sparse-encoding-doc-v3-gte`), whose
     doc/query asymmetry the encoder handles itself, so leave `doc_prompt` empty."""
+    sentence_transformers_batch_size: int = Field(default=16, ge=1)
+    """Documents per learned-sparse ``SparseEncoder`` call. This is deliberately
+    separate from upload batching: an encoder call retains its sparse tensors until it
+    returns, so a conservative default bounds MPS/unified-memory use even when Qdrant
+    checkpoints thousands of documents at a time. Ignored by fastembed and cloud slots."""
     max_input_chars: int | None = None
     """Truncate each text to this many chars before embedding — hosted models with a hard
     context limit (openai/text-embedding-3-large caps at 8192 tokens, and a 66k-char legal
@@ -171,10 +177,19 @@ class EmbeddingConfig(BaseModel):
 
 
 _ST_SPARSE_MODELS: dict[str, Any] = {}
+_ST_SPARSE_LOCK = threading.Lock()
+"""Serializes st_sparse_vectors end to end. Callers reach it from thread pools
+(labelling at max_workers>1), and neither half of the function survives that:
+the check-then-set cache races into N full transformer loads on MPS, and one
+thread's `torch.mps.empty_cache()` fires while another is mid-forward — a
+native abort that kills the process without a traceback. Cheap to hold: the
+query-side encode is tokenizer-bound, and the win from workers is the cloud
+dense round-trips, which stay outside this function."""
 
 
 def st_sparse_vectors(model_id: str, texts: list[str], *, is_query: bool,
-                      max_seq_length: int = 512, batch_size: int = 16) -> list[SparseVector]:
+                      max_seq_length: int = 512, batch_size: int = 16,
+                      device: str | None = None) -> list[SparseVector]:
     """sentence-transformers `SparseEncoder` -> Qdrant `SparseVector`s, honouring the
     doc/query asymmetry (`encode_query` vs `encode_document`) that learned-sparse models
     fastembed does not ship carry. The model is a full transformer: the first call
@@ -184,24 +199,63 @@ def st_sparse_vectors(model_id: str, texts: list[str], *, is_query: bool,
     `max_seq_length` caps the tokens per text: a GTE backbone defaults to ~8k, and the
     sparse head's `[batch, seq, vocab]` projection over long docs (legal corpora hit tens
     of thousands of chars) blows to tens of GiB. 512 also matches fastembed SPLADE's
-    truncation, keeping the bake-off fair; raise it if you have the RAM."""
+    truncation, keeping the bake-off fair; raise it if you have the RAM.
+
+    The encoder call must also be bounded, not merely its internal forward batch. Its
+    implementation retains every batch's sparse tensor in ``all_embeddings`` until the
+    call returns; passing an indexing slice of 2,000 documents left those tensors on MPS
+    and its caching allocator eventually consumed tens of GB of unified memory. Encode
+    one small batch per call and move it to CPU before converting it to Qdrant objects.
+    ``batch_size=16`` is measured-optimal on MPS for doc-v3-distill: 32 is slightly
+    slower and 64 collapses ~6x. Do not increase it without re-measuring."""
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
     from sentence_transformers import SparseEncoder  # heavy; imported only when used
 
-    model = _ST_SPARSE_MODELS.get(model_id)
-    if model is None:
-        # trust_remote_code: GTE-backboned models (opensearch-...-gte -> Alibaba-NLP/new-impl)
-        # ship custom modeling code. This engine is opt-in per config, so `model_id` is a
-        # deliberate, trusted choice, not arbitrary input.
-        model = _ST_SPARSE_MODELS[model_id] = SparseEncoder(model_id, trust_remote_code=True)
-        model.max_seq_length = max_seq_length
-    encode = model.encode_query if is_query else model.encode_document
-    rows = encode(texts, batch_size=batch_size, convert_to_tensor=False,
-                  convert_to_sparse_tensor=True, show_progress_bar=False)
-    return [
-        SparseVector(indices=t.coalesce().indices()[0].tolist(),
-                     values=t.coalesce().values().tolist())
-        for t in rows
-    ]
+    with _ST_SPARSE_LOCK:
+        # `device` joins the key: the query side runs on "cpu" (an IDF lookup —
+        # and a wedged MPS op inside this lock froze a whole 24-worker labelling
+        # run silently), while doc-side indexing keeps the default (MPS) device.
+        key = (model_id, device)
+        model = _ST_SPARSE_MODELS.get(key)
+        if model is None:
+            # trust_remote_code: GTE-backboned models (opensearch-...-gte -> Alibaba-NLP/new-impl)
+            # ship custom modeling code. This engine is opt-in per config, so `model_id` is a
+            # deliberate, trusted choice, not arbitrary input.
+            model = _ST_SPARSE_MODELS[key] = SparseEncoder(
+                model_id, trust_remote_code=True, device=device
+            )
+            model.max_seq_length = max_seq_length
+        encode = model.encode_query if is_query else model.encode_document
+        vectors: list[SparseVector] = []
+        try:
+            for texts_batch in _chunked(texts, batch_size):
+                rows = encode(
+                    texts_batch,
+                    batch_size=len(texts_batch),
+                    convert_to_tensor=False,
+                    convert_to_sparse_tensor=True,
+                    save_to_cpu=True,
+                    show_progress_bar=False,
+                )
+                vectors.extend(
+                    SparseVector(
+                        indices=t.coalesce().indices()[0].tolist(),
+                        values=t.coalesce().values().tolist(),
+                    )
+                    for t in rows
+                )
+        finally:
+            # The batches above leave no live MPS tensors, so this releases only allocator
+            # cache. It prevents long indexing runs from keeping prior batches' unified
+            # memory and forcing macOS to compress/swap it. A CPU-pinned model never
+            # touched MPS — skip entirely so a wedged GPU can't hang this call.
+            if device != "cpu":
+                import torch
+
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+        return vectors
 
 
 class BaseIndexer(ABC, Generic[T]):
@@ -391,19 +445,55 @@ class BaseIndexer(ABC, Generic[T]):
                     wait=True,
                 )
                 return
-            except UnexpectedResponse as exc:
+            except (UnexpectedResponse, ResponseHandlingException) as exc:
+                # ResponseHandlingException wraps a transport failure — a write
+                # timeout or dropped connection, which has no status_code and is
+                # always worth another try (a heavy upsert stalling the socket is
+                # the one that actually kills a long unattended run). An
+                # UnexpectedResponse carries an HTTP status: retry the transient
+                # ones, fail fast on the rest (a 403 exhausted key no backoff can
+                # fix, retried 4x is 4x the wasted calls).
                 status = getattr(exc, "status_code", None)
-                # fail fast on non-transient errors (e.g. 403 exhausted key) — no
-                # backoff can fix them, and retrying floods 4x the wasted calls.
-                if status not in _RETRYABLE_STATUS or attempt == _UPSERT_MAX_ATTEMPTS - 1:
+                transient = isinstance(exc, ResponseHandlingException) or status in _RETRYABLE_STATUS
+                if not transient or attempt == _UPSERT_MAX_ATTEMPTS - 1:
                     raise
                 delay = _UPSERT_BACKOFF_S * (2**attempt)
                 tqdm.write(
-                    f"{self.collection_name}: upsert HTTP {status} "
+                    f"{self.collection_name}: upsert {status or type(exc).__name__} "
                     f"(attempt {attempt + 1}/{_UPSERT_MAX_ATTEMPTS}), "
                     f"retrying in {delay:.0f}s"
                 )
                 time.sleep(delay)
+                remaining = self._uncommitted(points)
+                if points and not remaining:
+                    return
+                points = remaining
+
+    def _uncommitted(self, points: list[PointStruct]) -> list[PointStruct]:
+        """The points Qdrant does not already hold. A cloud slot embeds INSIDE
+        the upsert, so the server may bill a point, store it, and still fail
+        the response — a blind retry then buys the same embedding again, up to
+        four times over a rate-limited run.
+
+        If the read itself fails (the same network trouble that triggered the
+        retry can stall this retrieve), fall back to resending everything: for a
+        local slot it costs only bandwidth, and re-billing one slice's cloud
+        embeddings beats aborting the whole run on a transient read error."""
+        if not points:
+            return []
+        try:
+            stored = {
+                str(point.id)
+                for point in self.client.retrieve(
+                    collection_name=self.collection_name,
+                    ids=[p.id for p in points],
+                    with_payload=False,
+                    with_vectors=False,
+                )
+            }
+        except (UnexpectedResponse, ResponseHandlingException):
+            return points
+        return [p for p in points if str(p.id) not in stored]
 
     def upload_points_iter(
         self,
@@ -563,7 +653,12 @@ class BaseIndexer(ABC, Generic[T]):
             return [np.asarray(v, dtype=np.float32) for v in stream]
 
         if cfg.engine == "sentence_transformers":  # learned-sparse via SparseEncoder (docs)
-            return st_sparse_vectors(cfg.model_id, texts, is_query=False)
+            return st_sparse_vectors(
+                cfg.model_id,
+                texts,
+                is_query=False,
+                batch_size=cfg.sentence_transformers_batch_size,
+            )
         model = self._sparse(cfg)
         stream = tqdm(
             model.embed(texts, batch_size=batch_size, parallel=cfg.parallel),
