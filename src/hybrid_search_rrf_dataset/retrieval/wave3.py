@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -338,3 +339,102 @@ class TechQaLane(MaterializedDataset):
                 continue
             seen.add(doc_id)
             yield {"doc_id": doc_id, "title": "", "text": text}
+
+
+HOME_DEPOT_DIR = Path(__file__).resolve().parents[2] / "data" / "home-depot"
+"""Where the user places the Kaggle CSVs (train.csv, product_descriptions.csv,
+optional attributes.csv) — nothing is fetched."""
+
+
+class HomeDepotLane(MaterializedDataset):
+    """Home Depot Product Search Relevance from local Kaggle CSVs, eval-only.
+
+    Relevance is the human mean grade (1.0-3.0) preserved as a float; the lane's
+    min_relevance binarizes it at scoring time.
+    """
+
+    name = "home-depot"
+
+    def __init__(
+        self,
+        data_dir: Path | str = HOME_DEPOT_DIR,
+        *,
+        include_attributes: bool = False,
+    ) -> None:
+        super().__init__()
+        self._dir = Path(data_dir)
+        self._include_attributes = include_attributes
+
+    def _read(self, filename: str, columns: tuple[str, ...]) -> pd.DataFrame:
+        path = self._dir / filename
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{self.name}: {path} missing. Download the Kaggle 'Home Depot "
+                "Product Search Relevance' dataset and place train.csv + "
+                f"product_descriptions.csv (+ optional attributes.csv) under {self._dir}."
+            )
+        frame = pd.read_csv(path, encoding="latin-1")
+        absent = [column for column in columns if column not in frame.columns]
+        if absent:
+            raise ValueError(f"{path}: missing {absent}; has {list(frame.columns)}")
+        return frame
+
+    @staticmethod
+    def _query_id(term: str) -> str:
+        return hashlib.sha1(term.strip().lower().encode()).hexdigest()[:16]
+
+    def load_metadata(self) -> None:
+        train = self._read("train.csv", ("product_uid", "search_term", "relevance"))
+        queries: dict[str, str] = {}
+        qrels: list[dict[str, str | float]] = []
+        for uid, term, relevance in zip(
+            train["product_uid"], train["search_term"], train["relevance"]
+        ):
+            query_id = self._query_id(str(term))
+            if self.query_ids is not None and query_id not in self.query_ids:
+                continue
+            queries.setdefault(query_id, str(term))
+            qrels.append(
+                {"query_id": query_id, "doc_id": str(uid), "relevance": float(relevance)}
+            )
+        self._queries_df = pd.DataFrame(
+            [{"query_id": query_id, "text": text} for query_id, text in queries.items()],
+            columns=QUERY_COLUMNS,
+        )
+        self._qrels_df = pd.DataFrame(qrels, columns=QREL_COLUMNS)
+
+    def _titles(self) -> dict[str, str]:
+        train = self._read("train.csv", ("product_uid", "product_title"))
+        return {
+            str(uid): str(title)
+            for uid, title in zip(train["product_uid"], train["product_title"])
+        }
+
+    def _attributes(self) -> dict[str, str]:
+        path = self._dir / "attributes.csv"
+        if not (self._include_attributes and path.exists()):
+            return {}
+        frame = pd.read_csv(path, encoding="latin-1").dropna(subset=["product_uid"])
+        lines: dict[str, list[str]] = {}
+        for uid, name, value in zip(frame["product_uid"], frame["name"], frame["value"]):
+            field = _field(str(name), value)
+            if field:
+                lines.setdefault(str(int(uid)), []).append(field)
+        return {uid: "\n".join(parts) for uid, parts in lines.items()}
+
+    def _iter_corpus(self) -> Iterator[dict[str, str]]:
+        descriptions = self._read(
+            "product_descriptions.csv", ("product_uid", "product_description")
+        )
+        titles = self._titles()
+        attributes = self._attributes()
+        for uid, description in zip(
+            descriptions["product_uid"], descriptions["product_description"]
+        ):
+            doc_id = str(uid)
+            parts = [str(description).strip(), attributes.get(doc_id, "")]
+            yield {
+                "doc_id": doc_id,
+                "title": titles.get(doc_id, ""),
+                "text": "\n".join(part for part in parts if part),
+            }

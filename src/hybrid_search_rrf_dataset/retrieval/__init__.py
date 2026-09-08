@@ -39,6 +39,7 @@ from hybrid_search_rrf_dataset.retrieval.irds import (
 from hybrid_search_rrf_dataset.retrieval.wave3 import (
     AmazonEsciLane,
     FinderLane,
+    HomeDepotLane,
     TechQaLane,
     Touche2020Lane,
     TrecCast2020HistoryLane,
@@ -60,6 +61,7 @@ __all__ = [
     "FreshStackLane",
     "FinderLane",
     "GooaqLane",
+    "HomeDepotLane",
     "IRDatasetsMaterialized",
     "LimitLane",
     "LotteLane",
