@@ -22,10 +22,10 @@ from typing import NamedTuple
 import pandas as pd
 from tqdm.auto import tqdm
 
-from augmentation.engine import Budget, windowed_map
+from augmentation.engine import Budget, Spend, windowed_map
 from hybrid_search_rrf_dataset.lanes import LANES
 from relevance_judge.config import RelevanceJudgeConfig
-from relevance_judge.judge import JudgeRunLog, RelevanceJudge
+from relevance_judge.judge import RATIONALE_FIELDS, JudgeRunLog, RelevanceJudge
 from relevance_judge.sources import Sources
 
 
@@ -118,6 +118,8 @@ class ValidationHarness:
         self.config = config or RelevanceJudgeConfig()
         self.judge = judge or RelevanceJudge(self.config)
         self.sources = sources or Sources(self.config)
+        self.last_spend_usd: float | None = None
+        self.last_spend: Spend | None = None
 
     def sample(
         self, lanes: list[str], *, per_lane: int = 200, seed: int = 0, verbose: bool = True
@@ -172,36 +174,59 @@ class ValidationHarness:
         counted, never silently passed."""
         records: list[dict] = []
         unreadable = 0
+        spend = Spend()
 
         def attempt(row):
-            relevant, reason, _hash, _spend = self.judge.judge_one(
-                str(row.query), str(row.doc_text), budget=budget
-            )
-            return relevant, reason
+            return self.judge.judge_one(str(row.query), str(row.doc_text),
+                                        dataset=str(row.dataset), budget=budget)
 
         bar = tqdm(total=len(rows), desc="validate", unit="pair")
-        for row, (relevant, reason) in windowed_map(
-            attempt, rows.itertuples(index=False), self.config.llm_workers
-        ):
-            bar.update(1)
-            if relevant is None:
-                unreadable += 1
-                continue
-            records.append({
-                "dataset": row.dataset,
-                "query_id": str(row.query_id),
-                "doc_id": str(row.doc_id),
-                "human_relevant": bool(row.human_relevant),
-                "pred_relevant": bool(relevant),
-                "reason": reason,
-            })
-            if len(records) % bank_every == 0:
-                self._persist_predictions(pd.DataFrame(records))
-        bar.close()
+        # `finally`: a budget stop arrives through windowed_map's future.result(),
+        # and the verdicts since the last bank are already PAID for.
+        try:
+            for row, verdict in windowed_map(
+                attempt, rows.itertuples(index=False), self.config.llm_workers
+            ):
+                bar.update(1)
+                relevant, reason = verdict.relevant, verdict.reason
+                spend.add(verdict.spend)
+                dropped = sum(self.judge.dropped.values()) if hasattr(self.judge, "dropped") else 0
+                cost = f"${budget.spent_usd:.2f}" if budget is not None else ""
+                bar.set_postfix_str(f"{cost} drop={dropped}" if dropped else cost)
+                if relevant is None:
+                    unreadable += 1
+                    continue
+                records.append({
+                    "dataset": row.dataset,
+                    "query_id": str(row.query_id),
+                    "doc_id": str(row.doc_id),
+                    "human_relevant": bool(row.human_relevant),
+                    "pred_relevant": bool(relevant),
+                    "reason": reason,
+                    **{f: verdict.fields.get(f, "") for f in RATIONALE_FIELDS},
+                    # random-corpus negative, not a human judgment: kept out of
+                    # every gate metric so easy negatives cannot inflate precision
+                    "pseudo": bool(getattr(row, "pseudo", False)),
+                })
+                if len(records) % bank_every == 0:
+                    self._persist_predictions(pd.DataFrame(records))
+        finally:
+            bar.close()
+            self._persist_predictions(pd.DataFrame(records))
+            # validation is the larger of the two spends and reported nothing
+            self.last_spend_usd = budget.spent_usd if budget is not None else None
+            self.last_spend = spend
+            paid = f" | ${budget.spent_usd:.2f}" if budget is not None else ""
+            print(f"  {spend.summary(len(records))}{paid}")
         preds = pd.DataFrame(records)
-        self._persist_predictions(preds)
         if unreadable:
             print(f"  {unreadable} unreadable replies dropped (not counted as agree/disagree)")
+        if getattr(self.judge, "dropped", None):
+            print(f"  dropped: {dict(self.judge.dropped)}")
+            for name, message in getattr(self.judge, "dropped_detail", {}).items():
+                print(f"    {name}: {message}")
+        for reply in getattr(self.judge, "unreadable", []):
+            print(f"    unparsed reply: {reply!r}")
         return preds
 
     def run(
@@ -211,12 +236,23 @@ class ValidationHarness:
         per_lane: int = 200,
         seed: int = 0,
         budget: Budget | None = None,
+        deploy_lanes: list[str] | None = None,
+        deploy_negatives_per_lane: int = 25,
     ) -> dict:
         """One-shot for the CLI: sample -> judge -> score -> finalize. A notebook
         should call the four stages itself (each returns an inspectable object)."""
         rows = self.sample(lanes, per_lane=per_lane, seed=seed)
+        # Unrefereed deploy lanes get random-corpus pseudo-negatives, so the
+        # report carries a false-positive signal from where the judge runs.
+        unrefereed = sorted(set(deploy_lanes or []) - set(self.sources.lanes_with_negatives()))
+        if unrefereed:
+            rows = pd.concat(
+                [rows, self.deploy_negatives(
+                    unrefereed, per_lane=deploy_negatives_per_lane, seed=seed)],
+                ignore_index=True,
+            )
         preds = self.judge_rows(rows, budget=budget)
-        return self.finalize(self.score(preds, lanes))
+        return self.finalize(self.score(preds, lanes, deploy_lanes=deploy_lanes))
 
     def finalize(self, report: dict) -> dict:
         """Write the report and, on pass, open a `judge_runs.parquet` row the
@@ -228,12 +264,24 @@ class ValidationHarness:
             self._write(report)
         return report
 
-    def score(self, preds: pd.DataFrame, lanes: list[str]) -> dict:
+    def score(
+        self, preds: pd.DataFrame, lanes: list[str], deploy_lanes: list[str] | None = None
+    ) -> dict:
         """Metrics + a confusion breakdown. False positives are called out
         explicitly — they are the errors the precision gate exists to catch."""
         if preds.empty:
             return {"passed": False, "reason": "no readable predictions"}
         cfg = self.config
+        # Pseudo-negatives are a deploy-lane diagnostic, never gate input: random
+        # docs are far easier to reject than human-judged near-misses, so pooling
+        # them would inflate precision exactly where it is least earned.
+        pseudo = (
+            preds[preds["pseudo"].fillna(False).astype(bool)]
+            if "pseudo" in preds.columns else preds.iloc[0:0]
+        )
+        preds = preds.drop(index=pseudo.index)
+        if preds.empty:
+            return {"passed": False, "reason": "no human-judged predictions"}
         overall = Confusion.of(preds)
 
         # Precision only where a false positive is POSSIBLE: negative-bearing
@@ -256,10 +304,48 @@ class ValidationHarness:
         }
         hardest = min(by_lane.items(), key=lambda kv: kv[1]) if by_lane else (None, float("nan"))
 
+        # Precision is measured on referee lanes; the judge is applied to the
+        # residual ones. When those sets are disjoint the number transfers, it
+        # does not measure — say so in the artifact rather than in a comment.
+        refereed_deploy = sorted(set(deploy_lanes or []) & set(neg_lanes))
+        unrefereed_deploy = sorted(set(deploy_lanes or []) - set(neg_lanes))
+
+        # Recall needs only POSITIVES, so unlike precision it IS measurable on the
+        # positive-only deploy lanes. Reported, never gated: it measures agreement
+        # with each corpus's OWN notion of relevant, and those differ wildly
+        # (rarb-math is answer-oriented like the judge; crumb-legal-qa counts
+        # topical precedent). A low number is the strict-vs-topical gap made
+        # visible, not a verdict on the judge.
+        on_deploy = preds[preds["dataset"].isin(deploy_lanes or [])]
+        deploy_recall = Confusion.of(on_deploy).recall if len(on_deploy) else float("nan")
+        deploy_recall_by_lane = {
+            lane: Confusion.of(group).recall
+            for lane, group in on_deploy.groupby("dataset")
+        }
+
         return {
             "passed": Gate(cfg).passed(referees, anchors),
             "gate_enforced": list(Gate.ENFORCED),
             "precision_relevant": referees.precision,
+            "precision_is_transfer_estimate": bool(deploy_lanes) and not refereed_deploy,
+            "referee_lanes": sorted(neg_lanes),
+            "deploy_lanes_refereed": refereed_deploy,
+            "deploy_lanes_unrefereed": unrefereed_deploy,
+            # DIAGNOSTIC, not gated — see the comment above `on_deploy`
+            "deploy_recall": deploy_recall,
+            "deploy_recall_by_lane": deploy_recall_by_lane,
+            "deploy_lanes_measured": int(on_deploy["dataset"].nunique()) if len(on_deploy) else 0,
+            # DIAGNOSTIC, not gated: share of random corpus docs the judge called
+            # relevant, on the lanes it is actually applied to. Bounds gross
+            # over-calling; a near-miss boundary error is invisible to it.
+            "deploy_pseudo_negatives": int(len(pseudo)),
+            "deploy_false_positive_rate": (
+                float(pseudo["pred_relevant"].mean()) if len(pseudo) else float("nan")
+            ),
+            "deploy_fp_by_lane": {
+                lane: float(group["pred_relevant"].mean())
+                for lane, group in pseudo.groupby("dataset")
+            } if len(pseudo) else {},
             "anchor_recall": anchors.recall,
             "anchor_lanes_present": sorted(set(anchor["dataset"].unique())),
             "recall_relevant": overall.recall,
@@ -275,6 +361,10 @@ class ValidationHarness:
                 lane for lane in lanes if by_lane_negatives.get(lane) is False
             ],
             "predictions_path": str(cfg.validation_predictions),
+            # what this gate cost: the run priced it and nothing recorded it
+            "spend_usd": self.last_spend_usd,
+            "llm_calls": self.last_spend.hops if self.last_spend else None,
+            "llm_tokens": self.last_spend.tokens if self.last_spend else None,
             "thresholds": {
                 "min_precision_relevant": cfg.min_precision_relevant,
                 "min_anchor_recall": cfg.min_anchor_recall,
@@ -282,6 +372,54 @@ class ValidationHarness:
                 "min_agreement_lane_DIAGNOSTIC": cfg.min_agreement_lane,
             },
         }
+
+    def deploy_negatives(
+        self, lanes: list[str], *, per_lane: int = 25, seed: int = 0
+    ) -> pd.DataFrame:
+        """Random-corpus pseudo-negatives for lanes that ship no human negatives.
+
+        The referee lanes and the lanes the judge is APPLIED to are disjoint, so
+        `precision_relevant` is a transfer estimate, never a measurement on the
+        deployment population. A doc drawn uniformly from a 10K+ corpus is
+        irrelevant to a given query with near-certainty, so calling one relevant
+        is a visible false positive on the deploy lane itself. This catches gross
+        over-calling only — random docs sit far from the query, where the real
+        boundary errors are near-misses — so it bounds the error, not measures it.
+        """
+        frames = []
+        for lane in lanes:
+            gold = self.sources.manifest_gold(lane)
+            if not gold:
+                print(f"  {lane}: no manifest gold — no pseudo-negatives")
+                continue
+            # Intersect against the ids the lane ships text for: queries.parquet
+            # is natural-only, and a lane whose gold is mostly synthetic (quest:
+            # 15,256 `lane-*` of 17,377) yields nothing if sampled blind.
+            candidates = sorted(set(gold) & self.sources.query_ids(lane))[:per_lane]
+            if not candidates:
+                print(f"  {lane}: none of {len(gold)} gold ids ship query text"
+                      f" — no pseudo-negatives")
+                continue
+            queries = self.sources.query_text(lane, set(candidates))
+            usable = [q for q in candidates if queries.get(q, "").strip()]
+            doc_ids = self.sources.sample_doc_ids(lane, len(usable) * 2, seed=seed)
+            texts = self.sources.corpus_text(lane, set(doc_ids))
+            pool = [(d, t) for d, t in texts.items() if t]
+            for i, query_id in enumerate(usable):
+                if i >= len(pool):
+                    break
+                doc_id, doc_text = pool[i]
+                if doc_id in gold.get(query_id, set()):
+                    continue     # a real gold doc is not a pseudo-negative
+                frames.append({
+                    "dataset": lane, "query_id": query_id, "doc_id": doc_id,
+                    "human_relevant": False, "query": queries[query_id],
+                    "doc_text": doc_text, "pseudo": True,
+                })
+        return pd.DataFrame(frames, columns=[
+            "dataset", "query_id", "doc_id", "human_relevant", "query", "doc_text",
+            "pseudo",
+        ])
 
     def audit_false_positives(
         self, preds: pd.DataFrame | None = None, *, per_lane: int | None = None, chars: int = 600

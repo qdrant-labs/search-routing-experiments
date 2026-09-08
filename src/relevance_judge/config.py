@@ -13,12 +13,17 @@ _DATA = Path(__file__).resolve().parent.parent / "data"
 
 
 def _judge_engine() -> EngineSettings:
-    # ponytail: luna prices are the one calibration knob — the doc's ~$0.0003/call
-    # is the anchor; set usd_per_mtok_* from luna's real card when it publishes.
+    # Rates from OpenRouter (2026-09-08). deepseek-chat-v3.1 chosen after the
+    # v4-flash family probes showed high per-call latency (~1.3-2.2s even
+    # reasoning-off) — v3.1 is the standard V3 chat model with reasoning
+    # controllable via extra_body={reasoning: {enabled: False}}. Cost per pair
+    # slightly HIGHER than luna ($0.00035 vs $0.00029) but wall-time is the
+    # binding constraint; v3 tier probed at 2.0s/call, better format compliance
+    # expected. Precision to be re-validated by the gate before any pilot spend.
     return EngineSettings(
-        model="openrouter/openai/gpt-5.6-luna",
-        usd_per_mtok_in=0.40,
-        usd_per_mtok_out=1.60,
+        model="openrouter/deepseek/deepseek-chat-v3.1",
+        usd_per_mtok_in=0.25,
+        usd_per_mtok_out=0.95,
         max_spend_usd=10.0,
     )
 
@@ -30,14 +35,50 @@ class RelevanceJudgeConfig(BaseModel):
 
     data_dir: Path = _DATA
     engine: EngineSettings = Field(default_factory=_judge_engine)
-    llm_workers: int = 8
+    llm_workers: int = 12
+    """Concurrent calls in flight. 32 provoked a steady stream of provider errors
+    (throughput swinging 7-26 pair/s with hundreds of drops), and a dropped pair
+    is PAID work discarded — so concurrency past the provider's tolerance costs
+    money rather than saving time. 12 keeps a 3,600-pair gate near 6 min at the
+    measured ~1.2s/call. The progress bar shows `drop=N` live: if it climbs,
+    come down further; if it stays 0, this can be raised again."""
+
+    max_answer_tokens: int = 256
+    """Completion cap. Was 128, which fit the two-line reply only if the model
+    honoured "at most 20 words" — it does not, and an over-long ASKED line
+    truncated the VERDICT line away, losing 249 PAID pairs (5.2%) as unparseable.
+    Output is billed per token actually produced, so a bigger cap costs nothing
+    on the replies that stay short."""
+
+    unreadable_samples: int = 5
+    """How many raw unparseable replies to keep for diagnosis. They used to be
+    discarded, which is why a format regression looked like a provider blip."""
+
+    connect_retries: int = 3
+    """Retries for a TRANSPORT failure (refused/reset/disconnected). Such a call
+    never reached the model, so it cost nothing and the pair is pure lost work —
+    one run lost 2,115 of 3,600 this way. Provider rejections of the request
+    itself are NOT retried; they would fail identically and only waste time."""
+
+    connect_backoff_s: float = 1.0
+    """Linear backoff between connection retries (1s, 2s, 3s). Linear, not
+    exponential: these faults arrive in bursts under load and clear in seconds."""
+
+    request_timeout_s: float = 120.0
+    """Per-call ceiling, set on litellm's MODULE-level `request_timeout` (see
+    judge.py): the per-call `timeout=` kwarg does not override it on the
+    OpenRouter path — measured, a `timeout=30` call still ran 60.9s against the
+    6000s default. 120s, not 30s: luna answers a yes/no in ~60s, so a tight
+    ceiling would time out work that was about to succeed. A timeout raises into
+    TRANSIENT_PROVIDER_ERRORS, counting the pair unreadable and moving on."""
 
     reasoning_effort: str | None = "none"
-    """OpenRouter reasoning effort, sent as `reasoning={"effort": ...}` (the payload
-    llm_a_judge proved works on luna). The output contract is verdict-FIRST, so a
-    leaked reasoning preamble fails the parser and silently drops the pair — a
-    binary yes/no judge needs no reasoning, so default 'none' suppresses it. Set to
-    'low'/'medium'/'high' to re-enable, or None to omit the param entirely."""
+    """Reasoning effort, sent BOTH as the top-level `reasoning_effort` param and
+    as `extra_body={"reasoning": {"effort": ...}}` — the nested form alone left
+    latency at ~60s/call, the top-level one drops it to ~1.2s. The precision cost
+    is real and measured: 'none' scores 0.932 where full reasoning scored 0.955,
+    the gap concentrated in code-documentation lanes. 'low'/'medium'/'high' are
+    the untested middle; None omits the param and restores full reasoning."""
 
     min_relevance: int = 1
     """Binary bar the objective already consumes — a graded scale would redefine

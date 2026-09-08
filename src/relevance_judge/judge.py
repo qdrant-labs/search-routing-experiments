@@ -12,48 +12,82 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
+import litellm
 import pandas as pd
 from litellm import completion
 from tqdm.auto import tqdm
 
 from augmentation.engine import (
-    TRANSIENT_PROVIDER_ERRORS,
     Budget,
+    BudgetExceeded,
     Spend,
     windowed_map,
 )
 from relevance_judge.config import RelevanceJudgeConfig
+from relevance_judge.lane_context import context_for
 
 INSTRUCTION: Final[str] = (
     "You judge whether a document contains the answer a search query needs — not "
-    "whether it shares the query's topic.\n"
-    "Say yes only if the document contains the specific fact, entity, value, "
-    "procedure, fix, ruling, argument, or explanation the query asks for — either "
-    "fully, or as a substantial part that genuinely helps answer it. A fact "
-    "equivalent in substance counts (an annulment answers whether a couple "
-    "divorced). Say no if that answer content is absent, even when the document is "
-    "closely related: same subject, same product or API, a different aspect, "
-    "background, a setup or framing that never answers, or the query's terms "
-    "repeated. Shared words and topical closeness are not evidence of relevance. A "
-    "blank, boilerplate, or title-only document is never relevant. When you cannot "
-    "confirm the answer content is actually present, say no — a wrong yes becomes "
-    "permanent gold that corrupts every score built on it, while a wrong no costs "
-    "only one missed pair.\n"
-    "Your reason must name the specific answer content you found, or the specific "
-    "gap. Never answer yes with a reason that admits the document does not answer "
-    "the query.\n"
-    "Reply with a lowercase yes or no as the very first word — no quotes, capital "
-    "letters, or punctuation before it — then a dash, then that reason in at most "
-    "12 words. Nothing before the verdict, nothing after the reason."
+    "whether it shares the query's topic, and not whether it would help someone "
+    "working on the problem. A document can be genuinely useful — right API, near "
+    "example, good background — and still never state the answer; that document "
+    "is a no.\n"
+    "First name the need. A factual query needs the exact fact, entity, value, "
+    "ruling, argument, or explanation it asks for; a product or item search needs "
+    "that item with the asked attributes; a how-to needs the procedure that "
+    "accomplishes the asked task; an error message, failing snippet, or bug "
+    "report needs the fix — the change, setting, call, or version that resolves "
+    "that specific failure. For an error, a document that shows the same API used "
+    "correctly, an analogous example, or the general mechanism is not the fix "
+    "unless its text contains the exact element whose absence or misuse causes "
+    "the error.\n"
+    "Then find the answer in the document's visible words. One line of a long "
+    "document is enough, and wording need not match — a fact equivalent in "
+    "substance counts (an annulment answers whether a couple divorced). But if "
+    "you can only describe what the document demonstrates, explains, or sets up, "
+    "and cannot copy the words that state the answer, the answer is absent. "
+    "Documents are often truncated fragments: judge only the text shown — what "
+    "the full page probably contains does not exist here. A blank, boilerplate, "
+    "or title-only document is never relevant.\n"
+    "Answer in exactly four lines:\n"
+    "ASKED: what the query needs — for an error, the fix. If the query offers "
+    "alternatives (A or B or C, or a comma-separated list), name the single one "
+    "this document could satisfy, not all of them. At most 12 words.\n"
+    "EVIDENCE: the document's own words that state it, copied, shortened with "
+    "... — or NOTHING. At most 15 words.\n"
+    "MISSING: whatever ASKED names that the document never states — or NOTHING. "
+    "Judge against ASKED, not against the whole query: an alternative ASKED did "
+    "not name is not missing. Substance counts, wording does not; name only what "
+    "was asked, never nice-to-have extras. At most 10 words.\n"
+    "VERDICT: yes or no, lowercase, then a dash, then your reason in at most 10 "
+    "words.\n"
+    "The first three lines decide the fourth: VERDICT is yes only when EVIDENCE "
+    "quotes the document and MISSING is NOTHING. EVIDENCE that only names the "
+    "document's topic or genre ('discusses X', 'is about Y', 'covers Z') counts "
+    "as NOTHING — but a copied span that carries the answer IS evidence even if "
+    "its wording differs from the query's. If EVIDENCE is NOTHING or MISSING "
+    "names anything, VERDICT is no. Hedging in YOUR OWN assessment — a gap you "
+    "would concede with 'but not', 'does not state', 'though', or 'appears "
+    "incorrect' — belongs in MISSING and makes the verdict no; those same words "
+    "appearing inside the document you quote mean nothing. When you cannot "
+    "confirm the answer is present, say no — a wrong yes becomes permanent gold "
+    "that corrupts every score built on it; a wrong no costs only one missed pair."
 )
+
+RATIONALE_FIELDS: Final[tuple[str, ...]] = ("asked", "evidence", "missing")
+"""The judge's pre-verdict reasoning fields. Stored per atom because a gold
+label is permanent: EVIDENCE is the quote that justifies it, MISSING is why a
+no was a no. Discarding them made every audit start from scratch."""
+
 
 ATOM_COLUMNS: Final[tuple[str, ...]] = (
     "dataset", "query_id", "doc_id", "relevance", "source",
-    "reason", "prompt_hash", "judged_at", "judge_run_id",
+    "reason", *RATIONALE_FIELDS, "prompt_hash", "judged_at", "judge_run_id",
 )
 RUN_COLUMNS: Final[tuple[str, ...]] = (
     "judge_run_id", "model", "opened_at", "passed",
@@ -61,18 +95,65 @@ RUN_COLUMNS: Final[tuple[str, ...]] = (
 )
 
 
+class Verdict(NamedTuple):
+    """One judged pair. `fields` carries the labelled lines the prompt asks for
+    before the verdict; empty when the reply was unreadable."""
+
+    relevant: bool | None
+    reason: str
+    prompt_hash: str
+    spend: Spend
+    fields: dict[str, str] = {}
+
+
+def parse_fields(reply: str) -> dict[str, str]:
+    """The labelled pre-verdict lines, lowercased keys. A field the model omits
+    is simply absent — never invented."""
+    out: dict[str, str] = {}
+    for name in RATIONALE_FIELDS:
+        m = re.search(rf"^{name}\s*:\s*(.*)$", reply, re.IGNORECASE | re.MULTILINE)
+        if m:
+            out[name] = " ".join(m.group(1).split())[:300]
+    return out
+
+
+_VERDICT = re.compile(r"VERDICT\s*:\s*\W*(yes|no)\b[\s\W]*(.*)", re.IGNORECASE | re.DOTALL)
+_BARE = re.compile(r"\W*(yes|no)\b[\s\W]*(.*)", re.IGNORECASE | re.DOTALL)
+
+
 def _parse(reply: str) -> tuple[bool, str] | None:
-    """The (relevant, reason) a yes/no reply carries, else None — an answer
-    nothing can read is never a silent relevant."""
-    match = re.match(r"\W*(yes|no)\b[\s\W]*(.*)", reply.strip(), re.IGNORECASE | re.DOTALL)
+    """The (relevant, reason) a reply carries, else None — an answer nothing can
+    read is never a silent relevant. Prefers the labelled VERDICT line so the
+    ASKED/EVIDENCE/MISSING lines above it cannot be mistaken for the verdict;
+    the bare verdict-first form still parses, so banked runs stay reproducible."""
+    reply = reply.strip()
+    match = _VERDICT.search(reply) or _BARE.match(reply)
     if match is None:
         return None
     return match.group(1).lower() == "yes", " ".join(match.group(2).split())[:200]
 
 
-def _prompt_hash(query: str, doc_text: str) -> str:
+_CONNECTION_FAULTS: Final[tuple[str, ...]] = (
+    "connection refused", "connection reset", "connection aborted",
+    "connection error", "server disconnected", "temporarily unavailable",
+    "broken pipe", "timed out",
+)
+"""Substrings of a transport failure that completed NO call — nothing was
+charged and the work is simply lost, so a retry is free to attempt. Matched on
+the message because litellm wraps the socket error in a provider exception
+(`OpenrouterException - [Errno 61] Connection refused`), erasing the type."""
+
+
+def _is_connection_fault(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(mark in text for mark in _CONNECTION_FAULTS)
+
+
+def _prompt_hash(query: str, doc_text: str, lane_context: str = "") -> str:
     h = hashlib.sha256()
     h.update(INSTRUCTION.encode())
+    h.update(b"\n--ctx--\n")
+    h.update(lane_context.encode())
     h.update(b"\n--q--\n")
     h.update(query.encode())
     h.update(b"\n--d--\n")
@@ -87,6 +168,24 @@ class RelevanceJudge:
     def __init__(self, config: RelevanceJudgeConfig | None = None) -> None:
         self.config = config or RelevanceJudgeConfig()
         self.model = self.config.engine.model
+        self.dropped: Counter[str] = Counter()
+        """Provider errors swallowed per exception name. Silence here is what made
+        a 60s-per-call provider look like a hung run."""
+        self.dropped_detail: dict[str, str] = {}
+        """First message seen per error name — the counter says how often, this
+        says what actually went wrong."""
+        self.unreadable: list[str] = []
+        """Raw replies the parser could not read, capped by config — the evidence
+        needed to tell a format regression from a provider fault."""
+        # The MODULE global is the binding one: litellm ships request_timeout=6000
+        # and the per-call `timeout=` kwarg did not override it on the OpenRouter
+        # path (a timeout=30 call was measured completing at 60.9s).
+        litellm.request_timeout = self.config.request_timeout_s
+        # litellm prints a "Give Feedback / Get Help" banner to stderr for EVERY
+        # provider error, before the exception reaches our handler. At 32 workers
+        # that buries the run's own output in thousands of lines while telling us
+        # nothing — `dropped` already counts the errors and keeps their messages.
+        litellm.suppress_debug_info = True
 
     @property
     def path(self) -> Path:
@@ -111,50 +210,103 @@ class RelevanceJudge:
         )
 
     def judge_one(
-        self, query: str, doc_text: str, *, budget: Budget | None = None
-    ) -> tuple[bool | None, str, str, Spend]:
+        self, query: str, doc_text: str, *, dataset: str = "",
+        budget: Budget | None = None,
+    ) -> Verdict:
         """The atomic call, shared by the harness (compare to human) and the
         banking path. Returns (relevant | None, reason, prompt_hash, spend);
         None relevance means the provider blipped or the reply was unreadable."""
-        prompt_hash = _prompt_hash(query, doc_text)
+        lane_context = context_for(dataset)
+        prompt_hash = _prompt_hash(query, doc_text, lane_context)
         spend = Spend()
         if not query.strip() or not doc_text.strip():
             # an empty doc cannot answer anything — never spend a call to "judge" it,
             # and never let a blank prompt drift to a relevant verdict.
-            return False, "empty query or document", prompt_hash, spend
+            return Verdict(False, "empty query or document", prompt_hash, spend)
+        # The lane card goes in the SYSTEM turn, after the universal rules:
+        # it narrows what counts as relevant for this collection, never loosens
+        # the standard of evidence the instruction demands.
+        system = f"{INSTRUCTION}\n\n{lane_context}" if lane_context else INSTRUCTION
         messages = [
-            {"role": "system", "content": INSTRUCTION},
+            {"role": "system", "content": system},
             {"role": "user", "content": f"Query: {query}\n\nDocument:\n{doc_text}"},
         ]
-        # ponytail: max_tokens=128 fits "yes - <clause>"; if luna reasons hidden
-        # tokens, raise it or set reasoning off per its card — one knob.
+        # The cap must clear the two-line reply even when the model overruns the
+        # word limits: a truncated VERDICT line is an unreadable, PAID pair.
         if budget is not None:
-            budget.reserve(messages, 128)
-        # OpenRouter-native reasoning control (litellm forwards extra_body verbatim);
-        # 'none' stops luna emitting a reasoning preamble that would fail the parser.
+            budget.reserve(messages, self.config.max_answer_tokens)
+        # luna is a REASONING model, and hidden reasoning is what makes a yes/no
+        # take ~60s. OpenRouter advertises two spellings for the control
+        # (`reasoning` and `reasoning_effort`); the nested extra_body form alone
+        # left latency at 60s, so send the top-level param litellm maps natively
+        # AND keep the nested one as the fallback for providers that read it.
         extra = (
-            {"extra_body": {"reasoning": {"effort": self.config.reasoning_effort}}}
+            {
+                "reasoning_effort": self.config.reasoning_effort,
+                "extra_body": {"reasoning": {"effort": self.config.reasoning_effort}},
+            }
             if self.config.reasoning_effort else {}
         )
-        try:
-            start = time.monotonic()
-            response = completion(
-                model=self.model, messages=messages, max_tokens=128,
-                temperature=0.0, **extra,
-            )
-        except TRANSIENT_PROVIDER_ERRORS:
-            return None, "", prompt_hash, spend
-        elapsed = time.monotonic() - start
-        usage = getattr(response, "usage", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
-        answer_tokens = getattr(usage, "completion_tokens", 0) or 0
-        if budget is not None:
-            budget.charge(prompt_tokens, answer_tokens)
-        spend.add_hop(elapsed, prompt_tokens + answer_tokens)
-        parsed = _parse(response.choices[0].message.content or "")
-        if parsed is None:
-            return None, "unparsed", prompt_hash, spend
-        return parsed[0], parsed[1], prompt_hash, spend
+        # A reply cut off at the token cap loses its VERDICT line and parses to
+        # nothing — a PAID pair thrown away (249 of them, once). The provider
+        # says so via finish_reason, so detect it and retry with room rather
+        # than raising the cap and hoping the next corpus is not longer.
+        cap = self.config.max_answer_tokens
+        attempt, tries = 0, 0
+        while attempt < 2:
+            try:
+                start = time.monotonic()
+                response = completion(
+                    model=self.model, messages=messages, max_tokens=cap,
+                    temperature=0.0, **extra,
+                )
+            except BudgetExceeded:
+                # the ceiling is the ONE error that must stop the run
+                raise
+            except Exception as error:  # noqa: BLE001 - one bad pair cannot end a paid run
+                # Deliberately broad: a non-transient provider error (a rejected
+                # param, a filtered document, a malformed row) used to propagate
+                # out of windowed_map and abandon every remaining pair.
+                name = type(error).__name__
+                # A refused/reset connection completed no call, so it cost nothing
+                # and the work is simply lost — measured at 2,115 of 3,600 pairs in
+                # one run ("[Errno 61] Connection refused" under sustained load).
+                # Retrying with backoff recovers them; a provider that rejects the
+                # request itself will reject it again, so only connection-level
+                # faults are worth a second attempt.
+                if _is_connection_fault(error) and tries < self.config.connect_retries:
+                    tries += 1
+                    self.dropped["connection_retried"] += 1
+                    time.sleep(self.config.connect_backoff_s * tries)
+                    continue
+                self.dropped[name] += 1
+                self.dropped_detail.setdefault(name, str(error)[:300])
+                return Verdict(None, "", prompt_hash, spend)
+
+            usage = getattr(response, "usage", None)
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            answer_tokens = getattr(usage, "completion_tokens", 0) or 0
+            if budget is not None:
+                budget.charge(prompt_tokens, answer_tokens)
+            spend.add_hop(time.monotonic() - start, prompt_tokens + answer_tokens)
+
+            reply = response.choices[0].message.content or ""
+            parsed = _parse(reply)
+            if parsed is not None:
+                return Verdict(parsed[0], parsed[1], prompt_hash, spend,
+                               parse_fields(reply))
+
+            truncated = getattr(response.choices[0], "finish_reason", None) == "length"
+            if truncated and attempt == 0:
+                self.dropped["truncated_retried"] += 1
+                cap *= 2
+                attempt += 1
+                continue
+            self.dropped["truncated" if truncated else "unparsed"] += 1
+            if len(self.unreadable) < self.config.unreadable_samples:
+                self.unreadable.append(f"[finish={'length' if truncated else 'other'}] {reply[:360]}")
+            return Verdict(None, "unparsed", prompt_hash, spend)
+        return Verdict(None, "unparsed", prompt_hash, spend)
 
     def judge_pairs(
         self,
@@ -181,41 +333,54 @@ class RelevanceJudge:
         spend = Spend()
 
         def attempt(row):
-            relevant, reason, prompt_hash, hop = self.judge_one(
-                str(row.query), str(row.doc_text), budget=budget
-            )
-            return relevant, reason, prompt_hash, hop
+            return self.judge_one(str(row.query), str(row.doc_text),
+                                  dataset=str(row.dataset), budget=budget)
 
         buffer: list[dict] = []
         bar = tqdm(total=len(todo), desc="relevance", unit="pair")
-        for row, (relevant, reason, prompt_hash, hop) in windowed_map(
-            attempt, todo.itertuples(index=False), self.config.llm_workers
-        ):
-            bar.update(1)
-            spend.add(hop)
-            if relevant is None:
-                counts["unreadable"] += 1
-                continue
-            counts["judged"] += 1
-            counts["relevant"] += int(relevant)
-            buffer.append({
-                "dataset": str(row.dataset),
-                "query_id": str(row.query_id),
-                "doc_id": str(row.doc_id),
-                "relevance": int(relevant),
-                "source": "llm",
-                "reason": reason,
-                "prompt_hash": prompt_hash,
-                "judged_at": datetime.now(UTC).isoformat(timespec="seconds"),
-                "judge_run_id": run_id,
-            })
-            if len(buffer) >= 100:
+        # `finally`, because a budget stop (or any error) reaches us through
+        # windowed_map's future.result(): without it the partial buffer of
+        # already-PAID verdicts would be dropped on the way out.
+        try:
+            for row, verdict in windowed_map(
+                attempt, todo.itertuples(index=False), self.config.llm_workers
+            ):
+                bar.update(1)
+                relevant, reason = verdict.relevant, verdict.reason
+                spend.add(verdict.spend)
+                if self.dropped:
+                    bar.set_postfix_str(f"drop={sum(self.dropped.values())}")
+                if relevant is None:
+                    counts["unreadable"] += 1
+                    continue
+                counts["judged"] += 1
+                counts["relevant"] += int(relevant)
+                buffer.append({
+                    "dataset": str(row.dataset),
+                    "query_id": str(row.query_id),
+                    "doc_id": str(row.doc_id),
+                    "relevance": int(relevant),
+                    "source": "llm",
+                    "reason": reason,
+                    **{f: verdict.fields.get(f, "") for f in RATIONALE_FIELDS},
+                    "prompt_hash": verdict.prompt_hash,
+                    "judged_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "judge_run_id": run_id,
+                })
+                if len(buffer) >= 100:
+                    self._append(buffer)
+                    buffer = []
+        finally:
+            if buffer:
                 self._append(buffer)
-                buffer = []
-        if buffer:
-            self._append(buffer)
-        bar.close()
+            bar.close()
         print(f"  {spend.summary(counts['judged'])}")
+        if self.dropped:
+            print(f"  dropped: {dict(self.dropped)}")
+            for name, message in self.dropped_detail.items():
+                print(f"    {name}: {message}")
+        for reply in self.unreadable:
+            print(f"    unparsed reply: {reply!r}")
         return counts
 
     def as_qrelstore(self):

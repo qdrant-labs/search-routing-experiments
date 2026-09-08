@@ -7,8 +7,8 @@
     poetry run python src/scripts/run_relevance_judge.py --validate
 
     # §1.2 sub-1.0-tie pilot (spends ~$0.5) — needs a passed validation run
-    poetry run python src/scripts/run_relevance_judge.py --pilot-sub1
-    poetry run python src/scripts/run_relevance_judge.py --pilot-sub1 --dry-run
+    poetry run python src/scripts/run_relevance_judge.py --judge-ties
+    poetry run python src/scripts/run_relevance_judge.py --judge-ties --dry-run
 
     # read what the atoms bought (no spend)
     poetry run python src/scripts/run_relevance_judge.py --score
@@ -51,7 +51,8 @@ def main() -> None:
     parser.add_argument("--validate", action="store_true", help="§1.1 accuracy gate")
     parser.add_argument("--rescore", action="store_true",
                         help="re-score banked predictions under current gate logic — NO LLM spend")
-    parser.add_argument("--pilot-sub1", action="store_true", help="§1.2 sub-1.0-tie pilot")
+    parser.add_argument("--judge-ties", action="store_true",
+                        help="judge every tied row's tail docs (qrels depth)")
     parser.add_argument("--score", action="store_true", help="report what the atoms bought")
     parser.add_argument("--per-lane", type=int, default=200, help="validation pairs per lane")
     parser.add_argument("--limit", type=int, default=None, help="cap pilot rows")
@@ -85,14 +86,16 @@ def main() -> None:
         referees = Sources(config).lanes_with_negatives()
         lanes = sorted(set(residual) | set(referees))
         report = ValidationHarness(config).run(
-            lanes=lanes, per_lane=args.per_lane, budget=_budget(config, args.max_spend_usd)
+            lanes=lanes, per_lane=args.per_lane,
+            budget=_budget(config, args.max_spend_usd),
+            deploy_lanes=residual,
         )
         print(json.dumps({k: v for k, v in report.items() if k != "agreement_by_lane"}, indent=2))
         print("GATE:", "PASS" if report.get("passed") else "FAIL", "->", config.validation_report)
 
-    if args.pilot_sub1:
+    if args.judge_ties:
         queue = JudgeQueue(config)
-        pairs = queue.sub1_pairs(limit=args.limit)
+        pairs = queue.tie_pairs(limit=args.limit)
         if args.dry_run:
             print(f"--dry-run: {len(pairs)} pairs, nothing spent")
             return

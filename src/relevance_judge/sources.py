@@ -89,6 +89,25 @@ class Sources:
             out[str(row.doc_id)] = f"{title}\n\n{text}".strip() if title else text.strip()
         return out
 
+    def query_ids(self, dataset: str) -> set[str]:
+        """Query ids the lane ships text for — one column read. A lane's
+        queries.parquet is natural-only, so synthetic and augmented ids are
+        absent and any caller needing text must intersect against this."""
+        path = self.config.lanes.lane_queries(dataset)
+        if not path.exists():
+            return set()
+        return set(pd.read_parquet(path, columns=["query_id"])["query_id"].astype(str))
+
+    def sample_doc_ids(self, dataset: str, n: int, *, seed: int = 0) -> list[str]:
+        """`n` doc_ids drawn uniformly from the lane — one column read, so the
+        corpus text never loads. Random corpus docs are the only negatives a
+        positive-only lane can offer."""
+        path = self.config.lanes.lane_corpus(dataset)
+        if not path.exists() or n <= 0:
+            return []
+        ids = pd.read_parquet(path, columns=["doc_id"])["doc_id"].astype(str)
+        return ids.sample(min(n, len(ids)), random_state=seed).tolist()
+
     def query_text(self, dataset: str, query_ids: set[str]) -> dict[str, str]:
         """`{query_id: text}` for the wanted queries — a filtered read."""
         path = self.config.lanes.lane_queries(dataset)

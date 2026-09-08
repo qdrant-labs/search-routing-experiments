@@ -10,6 +10,7 @@ from relevance_judge.residual import (
     V2Labels,
     above_gold,
     regime,
+    tail_docs,
 )
 from relevance_judge.scoring import PilotScorer
 from relevance_judge.sources import Sources
@@ -23,6 +24,7 @@ __all__ = [
     "Arch5kDraw",
     "V2Labels",
     "above_gold",
+    "tail_docs",
     "regime",
     "PilotScorer",
     "Sources",

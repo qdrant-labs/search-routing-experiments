@@ -158,14 +158,6 @@ class JudgeQueue:
             "no_rankings": len(res) - have,
         }
 
-    def _above_gold(self, dataset: str, query_id: str) -> set[str] | None:
-        """`above_gold` over the persisted rankings. None when rankings are
-        missing — precondition fail, drop the row."""
-        orders = self.sources.rankings(dataset).get(query_id)
-        if orders is None:
-            return None
-        return above_gold(orders, self.sources.manifest_gold(dataset).get(query_id, set()))
-
     def _tail_docs(self, dataset: str, query_id: str) -> dict[str, int] | None:
         """`tail_docs` over the persisted rankings. None when rankings are
         missing — precondition fail, drop the row."""
@@ -205,9 +197,7 @@ class JudgeQueue:
                 no_tail += 1
                 continue
             texts = self.sources.corpus_text(row.dataset, set(spreads))
-            for doc_id, spread in sorted(
-                spreads.items(), key=lambda kv: (-kv[1], kv[0])
-            ):
+            for doc_id, spread in spreads.items():
                 text = texts.get(doc_id)
                 if not text:
                     dropped_notext += 1
@@ -222,9 +212,16 @@ class JudgeQueue:
             f"{no_tail} identical-lists, {dropped_notext} no-text; "
             f"{len(rows)} pairs to judge"
         )
-        return pd.DataFrame(
+        frame = pd.DataFrame(
             rows,
             columns=["dataset", "query_id", "doc_id", "query", "doc_text",
                      "rank_spread"],
         )
+        # Widest disagreement first ACROSS rows, not within: one relevant tail
+        # doc is enough to break a row, so a truncated budget should touch many
+        # rows once rather than exhaust one. Identity columns make it total.
+        return frame.sort_values(
+            ["rank_spread", "dataset", "query_id", "doc_id"],
+            ascending=[False, True, True, True],
+        ).reset_index(drop=True)
 
