@@ -40,7 +40,7 @@ class SavedRouter:
         self._sstat = sstat
 
     @classmethod
-    def load(cls, arm_dir: str | Path) -> "SavedRouter":
+    def load(cls, arm_dir: str | Path) -> SavedRouter:
         from sentence_transformers import SentenceTransformer
 
         p = Path(arm_dir)
@@ -54,9 +54,11 @@ class SavedRouter:
         thresholds = np.load(p / "thresholds.npy")
         if meta["learner"] == "lgbm":
             models = joblib.load(p / "lgbm.joblib")
-            prob = lambda x: pd.DataFrame(  # noqa: E731
-                np.column_stack([m.predict_proba(x)[:, 1] for m in models]), columns=HEAD_ROUTES
-            )
+
+            def prob(x):
+                return pd.DataFrame(
+                    np.column_stack([m.predict_proba(x)[:, 1] for m in models]), columns=HEAD_ROUTES
+                )
         else:
             prob = EncoderRouter.load(p / "router.pt").probabilities
         encoder = SentenceTransformer(meta["embedding_model"])

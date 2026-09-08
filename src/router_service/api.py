@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -29,7 +29,7 @@ def _weights_mtime(router_dir: str) -> str | None:
     for name in ("router.pt", "lgbm.joblib"):
         f = Path(router_dir) / name
         if f.exists():
-            return datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+            return datetime.fromtimestamp(f.stat().st_mtime, UTC).isoformat(timespec="seconds")
     return None
 
 
