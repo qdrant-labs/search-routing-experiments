@@ -1,0 +1,484 @@
+{
+  "fixture_sha256": "cf9e17b02b2b0e55a9bb1a4204218e60ff7c95acb62d3254b38a6fa0cd560dd5",
+  "checkpoint_hashes": {
+    "no_branches": {
+      "meta.json": "8e16d3d03ada9d5b3b0264aacae1d9fa9cb3e0f018ac56c8e1a8b2c1b358ea03",
+      "router.pt": "6d762c36d771c731442018bce62df9a82459ebfbd4a1bec276431475fc49a350",
+      "svd.joblib": "7c698f47af60349b197b9f3a6897458387d75c4370d490e8314292902db6294f",
+      "thresholds.npy": "e66c326a6465ffd2e3b6a810cd1a5f15e328714de2b5f94d2f681be4c59fb408"
+    },
+    "zipf_input_nocorpus": {
+      "meta.json": "25bb3cdfb27ccd6ead7a95b05a41eafb146e814d0ea8d670c7686af245073c08",
+      "router.pt": "59e6a51418b9e042e30bf2881a17e8cf04eed9406a9030ff6fcad6896fbb8672",
+      "svd.joblib": "7c698f47af60349b197b9f3a6897458387d75c4370d490e8314292902db6294f",
+      "thresholds.npy": "39d08a07a2c20e6ceef76787e761945dc4276d6f8cc985e157733fd8b81b7117",
+      "zipf_mean.npy": "1256287faa65f5b05ef9bca67d69f761ae27c869c6600711d9c2dbd93e29a824",
+      "zipf_std.npy": "3ec50a571fe0745c2aa98f343810cc3261f7c5f147e4938c9dc9afc6e7f26cb2"
+    }
+  },
+  "metadata": {
+    "no_branches": {
+      "arm": "no_branches",
+      "learner": "mlp",
+      "embedding_model": "BAAI/bge-small-en-v1.5",
+      "prefix": "Represent this sentence for searching relevant passages: ",
+      "feature_inputs": false,
+      "zipf_inputs": false,
+      "serve_safe": true,
+      "holdout_lane": "trec-dl-2022",
+      "trained_at": "2026-09-08 11:45:31",
+      "train_version": "2026-09-08-untied::20:18"
+    },
+    "zipf_input_nocorpus": {
+      "arm": "zipf_input_nocorpus",
+      "learner": "mlp",
+      "embedding_model": "BAAI/bge-small-en-v1.5",
+      "prefix": "Represent this sentence for searching relevant passages: ",
+      "feature_inputs": false,
+      "zipf_inputs": true,
+      "serve_safe": true,
+      "holdout_lane": "trec-dl-2022",
+      "trained_at": "2026-09-08 11:51:43",
+      "train_version": "2026-09-08-untied::20:18"
+    }
+  },
+  "union_rows": 233247,
+  "holdout": "trec-dl-2022",
+  "fresh_total": 108,
+  "fresh_unseen": 108,
+  "behavior": [
+    {
+      "arm": "no_branches",
+      "category": "concept",
+      "n": 36,
+      "accepted": 0.6111111111111112,
+      "preferred": 0.6111111111111112,
+      "paraphrase_same_route": 0.5,
+      "all_family_variants_accepted": 0.25,
+      "routes": {
+        "dense_only": 22,
+        "sparse_only": 13,
+        "pure_rrf": 1
+      }
+    },
+    {
+      "arm": "no_branches",
+      "category": "exact_lookup",
+      "n": 36,
+      "accepted": 0.8333333333333334,
+      "preferred": 0.8333333333333334,
+      "paraphrase_same_route": 0.6666666666666666,
+      "all_family_variants_accepted": 0.5,
+      "routes": {
+        "sparse_only": 30,
+        "dense_only": 4,
+        "pure_rrf": 2
+      }
+    },
+    {
+      "arm": "no_branches",
+      "category": "identifier_in_prose",
+      "n": 36,
+      "accepted": 0.9444444444444444,
+      "preferred": 0.7777777777777778,
+      "paraphrase_same_route": 0.7083333333333334,
+      "all_family_variants_accepted": 0.8333333333333334,
+      "routes": {
+        "sparse_only": 28,
+        "pure_rrf": 6,
+        "dense_only": 2
+      }
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "category": "concept",
+      "n": 36,
+      "accepted": 0.4444444444444444,
+      "preferred": 0.4444444444444444,
+      "paraphrase_same_route": 0.6666666666666666,
+      "all_family_variants_accepted": 0.25,
+      "routes": {
+        "sparse_only": 20,
+        "dense_only": 16
+      }
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "category": "exact_lookup",
+      "n": 36,
+      "accepted": 0.7777777777777778,
+      "preferred": 0.6944444444444444,
+      "paraphrase_same_route": 0.75,
+      "all_family_variants_accepted": 0.5833333333333334,
+      "routes": {
+        "sparse_only": 25,
+        "pure_rrf": 10,
+        "dense_only": 1
+      }
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "category": "identifier_in_prose",
+      "n": 36,
+      "accepted": 1.0,
+      "preferred": 0.8888888888888888,
+      "paraphrase_same_route": 0.7916666666666666,
+      "all_family_variants_accepted": 1.0,
+      "routes": {
+        "sparse_only": 32,
+        "pure_rrf": 4
+      }
+    }
+  ],
+  "fresh_acceptance": {
+    "no_branches": 0.7962962962962963,
+    "zipf_input_nocorpus": 0.7407407407407407
+  },
+  "behavioral_zipf_minus_base_family_bootstrap": {
+    "n": 36,
+    "mean": -0.05555555555555555,
+    "ci95": [
+      -0.14814814814814814,
+      0.037037037037037035
+    ]
+  },
+  "constant_behavioral_acceptance": {
+    "dense_only": 0.3333333333333333,
+    "pure_rrf": 0.3611111111111111,
+    "sparse_only": 0.6666666666666666
+  },
+  "formatting": [
+    {
+      "arm": "no_branches",
+      "style": "lower",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "no_branches",
+      "style": "padding",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "no_branches",
+      "style": "spacing",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "no_branches",
+      "style": "upper",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "style": "lower",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "style": "padding",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "style": "spacing",
+      "n": 36,
+      "changes": 0
+    },
+    {
+      "arm": "zipf_input_nocorpus",
+      "style": "upper",
+      "n": 36,
+      "changes": 0
+    }
+  ],
+  "posthoc_hybrid_allowed_for_all_identifiers": {
+    "no_branches": 0.8148148148148148,
+    "zipf_input_nocorpus": 0.8055555555555556
+  },
+  "retrieval": [
+    {
+      "slice": "all",
+      "n": 1185,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.5886967240214077,
+        "zipf_input_nocorpus": 0.5869167855790448
+      },
+      "constants": {
+        "dense_only": 0.5514352120875463,
+        "pure_rrf": 0.5868237897348162,
+        "sparse_only": 0.5942053218582412
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.7119103931934139,
+      "disagreements": 398,
+      "zipf_minus_base": {
+        "n": 1185,
+        "mean": -0.0017799384423629193,
+        "ci95": [
+          -0.01658812678604556,
+          0.013435452113568074
+        ]
+      }
+    },
+    {
+      "slice": "routes_differ",
+      "n": 524,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.4196436307783215,
+        "zipf_input_nocorpus": 0.41561838830847403
+      },
+      "constants": {
+        "dense_only": 0.3353785703935396,
+        "pure_rrf": 0.4154080828210486,
+        "sparse_only": 0.43210105145894656
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.6982852299554727,
+      "disagreements": 176,
+      "zipf_minus_base": {
+        "n": 524,
+        "mean": -0.004025242469847441,
+        "ci95": [
+          -0.03758479609353954,
+          0.02922047779145666
+        ]
+      }
+    },
+    {
+      "slice": "natural",
+      "n": 75,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.3601855447943535,
+        "zipf_input_nocorpus": 0.2826917097964404
+      },
+      "constants": {
+        "dense_only": 0.5054987805315158,
+        "pure_rrf": 0.3805338470054675,
+        "sparse_only": 0.16977748503716533
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.5521829382722,
+      "disagreements": 24,
+      "zipf_minus_base": {
+        "n": 75,
+        "mean": -0.07749383499791303,
+        "ci95": [
+          -0.14594170370972587,
+          -0.013609967932728914
+        ]
+      }
+    },
+    {
+      "slice": "natural_routes_differ",
+      "n": 72,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.3751932758274516,
+        "zipf_input_nocorpus": 0.2944705310379588
+      },
+      "constants": {
+        "dense_only": 0.5265612297203288,
+        "pure_rrf": 0.39638942396402854,
+        "sparse_only": 0.1768515469137139
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.5751905607002084,
+      "disagreements": 23,
+      "zipf_minus_base": {
+        "n": 72,
+        "mean": -0.08072274478949275,
+        "ci95": [
+          -0.15299267272241218,
+          -0.01430667030982708
+        ]
+      }
+    },
+    {
+      "slice": "natural_unseen_text",
+      "n": 75,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.3601855447943535,
+        "zipf_input_nocorpus": 0.2826917097964404
+      },
+      "constants": {
+        "dense_only": 0.5054987805315158,
+        "pure_rrf": 0.3805338470054675,
+        "sparse_only": 0.16977748503716533
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.5521829382722,
+      "disagreements": 24,
+      "zipf_minus_base": {
+        "n": 75,
+        "mean": -0.07749383499791303,
+        "ci95": [
+          -0.14594170370972587,
+          -0.013609967932728914
+        ]
+      }
+    },
+    {
+      "slice": "synthetic_routes_differ",
+      "n": 436,
+      "overlap": 0,
+      "captured": {
+        "no_branches": 0.43107604664567406,
+        "zipf_input_nocorpus": 0.4396546354528689
+      },
+      "constants": {
+        "dense_only": 0.29928040420375857,
+        "pure_rrf": 0.42053952142766027,
+        "sparse_only": 0.48459192327983813
+      },
+      "global_route": "pure_rrf",
+      "oracle": 0.7252002006299044,
+      "disagreements": 147,
+      "zipf_minus_base": {
+        "n": 436,
+        "mean": 0.008578588807194802,
+        "ci95": [
+          -0.027849803721832225,
+          0.04672154975931561
+        ]
+      }
+    }
+  ],
+  "policy_swaps": [
+    {
+      "model": "no_branches",
+      "thresholds_from": "no_branches",
+      "fresh_accepted": 0.7962962962962963,
+      "heldout_differ_capture": 0.4196436307783215,
+      "heldout_natural_capture": 0.3601855447943535
+    },
+    {
+      "model": "no_branches",
+      "thresholds_from": "zipf_input_nocorpus",
+      "fresh_accepted": 0.8148148148148148,
+      "heldout_differ_capture": 0.4139836306771256,
+      "heldout_natural_capture": 0.31071599026091923
+    },
+    {
+      "model": "zipf_input_nocorpus",
+      "thresholds_from": "no_branches",
+      "fresh_accepted": 0.8333333333333334,
+      "heldout_differ_capture": 0.39933483628713806,
+      "heldout_natural_capture": 0.32173615323904836
+    },
+    {
+      "model": "zipf_input_nocorpus",
+      "thresholds_from": "zipf_input_nocorpus",
+      "fresh_accepted": 0.7407407407407407,
+      "heldout_differ_capture": 0.41561838830847403,
+      "heldout_natural_capture": 0.2826917097964404
+    }
+  ],
+  "training_exposure": {
+    "Who likes ": {
+      "n": 1309,
+      "lanes": {
+        "limit": 1301,
+        "crumb-code-retrieval": 5,
+        "antique": 1,
+        "quest": 1,
+        "rarb-math": 1
+      },
+      "examples": [
+        {
+          "dataset": "antique",
+          "query": "What's a good birthday gift for a guy who likes music?"
+        },
+        {
+          "dataset": "limit",
+          "query": "Who likes Icebergs?"
+        },
+        {
+          "dataset": "limit",
+          "query": "Who likes Knot Tying?"
+        },
+        {
+          "dataset": "limit",
+          "query": "Who likes Spinning?"
+        },
+        {
+          "dataset": "limit",
+          "query": "Who likes Tulips?"
+        }
+      ]
+    },
+    "curling": {
+      "n": 4,
+      "lanes": {
+        "msmarco-passage-dev": 1,
+        "crumb-code-retrieval": 1,
+        "limit": 1,
+        "rarb-math": 1
+      },
+      "examples": [
+        {
+          "dataset": "msmarco-passage-dev",
+          "query": "how does curling even work"
+        },
+        {
+          "dataset": "crumb-code-retrieval",
+          "query": "Carol is currently curling.\n\nShe has n disks each with radius r on the 2D plane. \n\nInitially she has all these disks above the line y = 10^100.\n\nShe then will slide the disks towards the line y = 0 one by one in order from 1 to n. \n\nWhen she slides the i-th disk, she will place its center at the point (x_{i}, 10^100). She will then push it so the disk\u2019s y coordinate continuously decreases, and x coordinate stays constant. The disk stops once it touches the line y = 0 or it touches any previous disk. Note that once a disk stops moving, it will not move again, even if hit by another disk. \n\nCompute the y-coordinates of centers of all the disks after all disks have been pushed."
+        },
+        {
+          "dataset": "limit",
+          "query": "Who likes Curling?"
+        },
+        {
+          "dataset": "rarb-math",
+          "query": "Problem: At the national curling championships, there are three teams of four players each. After the championships are over, the very courteous participants each shake hands three times with every member of the opposing teams, and once with each member of their own team.\n\nHow many handshakes are there in total?"
+        }
+      ]
+    },
+    "DHA": {
+      "n": 6,
+      "lanes": {
+        "crumb-clinical-trial": 2,
+        "msmarco-passage-dev": 1,
+        "freshstack-langchain": 1,
+        "beir-nfcorpus": 1,
+        "webfaq-eng": 1
+      },
+      "examples": [
+        {
+          "dataset": "msmarco-passage-dev",
+          "query": "how much dha should pregnant women get"
+        },
+        {
+          "dataset": "freshstack-langchain",
+          "query": "how much square footage is the property rented by DHA Group"
+        },
+        {
+          "dataset": "crumb-clinical-trial",
+          "query": "omega-3 DHA supplement tardive dyskinesia schizophrenia treatment"
+        },
+        {
+          "dataset": "crumb-clinical-trial",
+          "query": "does DHA improve bioavailability in toddlers with different formulation methods"
+        },
+        {
+          "dataset": "beir-nfcorpus",
+          "query": "DHA"
+        }
+      ]
+    },
+    "CVE-2021-44228": {
+      "n": 0,
+      "lanes": {},
+      "examples": []
+    }
+  }
+}
