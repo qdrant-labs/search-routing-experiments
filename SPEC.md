@@ -1057,6 +1057,53 @@ is at commit 26b9a93.
     a real corpus document and their route labels were earned by retrieval";
     and a boolean would have been wrong, since LIMIT has no author at all.
 
+71. **Per-lane card generator (`CardGenerator`) validated on 6 negative-bearing
+    lanes; the binding constraint on further recall is definitional, not
+    technical (2026-09-07).** `scripts/card_transfer.py` runs paired A/B
+    (arm A: universal INSTRUCTION only; arm B: universal + `G(lane)` card) on
+    crumb-clinical-trial, wands, dbpedia-entity, freshstack-{langchain,laravel},
+    miracl-en-dev — the six referee lanes with both human positives AND
+    negatives, so precision and recall are simultaneously measurable. On the
+    two task-family twins for deploy lanes (dbpedia ~ quest, crumb-clinical ~
+    crumb-legal-qa) G delivered **Δrecall +0.180 and +0.110 with zero
+    card-caused false positives** — matching hand-card effectiveness (+13.0%
+    mean on the 5 deploy lanes per d69). Aggregate across all 6 test lanes was
+    only +5.3%, dragged down by 3 lanes where cards were structurally inert.
+
+    Three-agent triangulation (fable, opus×2) on why the 3 lanes were inert:
+    **~57% of the residual false-negative gap is definitional** (partial-grade
+    matches the strict standard correctly rejects; loosening trades precision
+    blind), plus ~13% judge literalism on numeric equivalence (miracl), plus
+    ~5% lanes where the graded-relevance boundary is invisible to any
+    metadata bundle (wands, freshstack-laravel gold is nugget-based). Only
+    ~25–35% of the remaining gap on the twin lanes is bundle-addressable —
+    and even a hand-tuned card cannot exceed what a strict, gate-safe rule
+    can encode. Model upgrades are the wrong lever: G's cards already fire
+    correctly per their input; the ceiling is what a strict card CAN say, not
+    how well it's written.
+
+    Bundle-content fix APPLIED (`card_generator._lane_metadata`): stratified
+    query sampling across short/long × set-cue/no-cue buckets (dbpedia's
+    "list of X" queries now surface), and up to 3 grade-0 negatives per query
+    with a fallback that keeps trying candidates when the first doc_ids don't
+    resolve to loaded corpus text (a silent zero-snippet bug the first pass
+    hit on dbpedia). Post-fix per-lane negative snippet counts: wands 15,
+    freshstack-{laravel,langchain} 15/13, crumb-clinical 11, dbpedia 1,
+    miracl 0 (last two data-bound — grade-0 doc_ids point outside the loaded
+    corpus). Expected additional lift on twin lanes: +5–8pp; the definitional
+    residue remains unaddressed and is CORRECT-per-standard, not a defect.
+
+    STANDING: the generator mechanism is safe on all 6 lanes (Δfpr ≤ +0.01,
+    max 1 fp on 100 negatives); useful where a card is warranted; and its
+    average lift across a mixed lane population is modest by construction
+    because most lanes don't need cards. Deploy G on deploy lanes with this
+    caveat: the aggregate lift claim is misleading — quote per-lane twin
+    numbers instead. `wands`/`freshstack` recall gap is a strict-vs-topical
+    definitional gap; do not "fix" it by loosening cards without changing
+    what min_relevance selects. Artifacts:
+    `src/data/relevance_judge/card_transfer/{predictions_{baseline,carded},summary}.parquet`
+    and `generated_cards.parquet`.
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log

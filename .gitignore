@@ -14,3 +14,4 @@ docs/adr
 *.log
 .agents
 docs/superpowers
+/models
