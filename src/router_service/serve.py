@@ -25,6 +25,32 @@ DEFAULT_RRF_DELTA = 0.15
 
 DEFAULT_ARM_DIR = MODELS_DIR / "classifiers_union_200k" / "zipf_shape_nocorpus"
 
+ZIPF_RARE_SHARE = 0.30
+ZIPF_OOV_SHARE = 0.20
+ZIPF_COMMON_MEAN = 4.50
+ZIPF_BASE = "sparse_only"
+
+
+def zipf_classify(queries: str | list[str]) -> list[dict]:
+    """Direct heuristic route from query text alone, no model: >=30% rare or >=20% OOV tokens
+    -> sparse, mean zipf >= 4.5 -> dense, else the sparse base. wordfreq only, always available;
+    p_dense/p_sparse are one-hot because this is a hard rule, not a probability."""
+    qs = [queries] if isinstance(queries, str) else list(queries)
+    if not qs:
+        return []
+    zf = ZipfStats().frame(pd.Series(qs))
+    rare = zf["zipf.rare_share"].to_numpy()
+    oov = zf["zipf.oov_share"].to_numpy()
+    mean = zf["zipf.mean"].to_numpy()
+    route = np.full(len(qs), ZIPF_BASE, dtype=object)
+    route = np.where(mean >= ZIPF_COMMON_MEAN, "dense_only", route)
+    route = np.where((rare >= ZIPF_RARE_SHARE) | (oov >= ZIPF_OOV_SHARE), "sparse_only", route)
+    return [
+        {"query": q, "route": str(route[i]),
+         "p_dense": float(route[i] == "dense_only"), "p_sparse": float(route[i] == "sparse_only")}
+        for i, q in enumerate(qs)
+    ]
+
 
 class SavedRouter:
     """A loaded arm: raw query text -> route. The exact serving path the notebook uses."""
@@ -112,3 +138,7 @@ if __name__ == "__main__":  # runnable check against a saved arm
     assert {o["route"] for o in out} <= {"dense_only", "sparse_only", "pure_rrf"}
     assert all(0.0 <= o["p_dense"] <= 1.0 for o in out)
     print(f"[{r.meta['arm']}] ok:", out)
+
+    direct = zipf_classify(["CVE-2021-44228 log4j remote code execution", "why do cats purr"])
+    assert [o["route"] for o in direct] == ["sparse_only", "dense_only"], direct
+    print("[zipf_direct] ok:", direct)

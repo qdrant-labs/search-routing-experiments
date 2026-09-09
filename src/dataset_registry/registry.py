@@ -42,6 +42,7 @@ from dataset_registry.wave3 import (
     AmazonEsci,
     BeirTouche2020,
     Finder,
+    HomeDepot,
     TechQa,
     TrecCast2020History,
     Wands,
@@ -76,6 +77,7 @@ DATASETS: tuple[RegistryDataset, ...] = (
     TrecCast2020History(),
     TechQa(),
     BeirTouche2020(),
+    HomeDepot(),
 )
 
 

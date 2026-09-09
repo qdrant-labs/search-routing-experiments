@@ -22,6 +22,7 @@ from hybrid_search_rrf_dataset.retrieval import (
     FreshStackLane,
     FinderLane,
     GooaqLane,
+    HomeDepotLane,
     LotteLane,
     MiraclLane,
     MSMarcoDev,
@@ -129,6 +130,14 @@ LANES: dict[str, Lane] = {
     # 5-lane paired A/B saw a card TRY to loosen for them and go UNSAFE.
     "wands": Lane(WandsLane(), corpus_target=42_994, min_relevance=2),
     "finder": Lane(FinderLane()),
+    # out-of-lane calibration corpus (twice-calibration experiment): pin the
+    # full catalog — the cloud collection is already indexed with all 124,428
+    # products, and the recipe would drop ~24K of them. min_relevance=2:
+    # Kaggle grades 1.0-3.0, grade <2 is "irrelevant/partial" per the rater
+    # instructions and the bakeoff's REL_THRESHOLD.
+    "home-depot": Lane(
+        HomeDepotLane(), corpus_target=124_428, min_relevance=2
+    ),
     # conversational multi-turn: query = prior turns + [CURRENT] + utterance
     "trec-cast-2020-history": Lane(TrecCast2020HistoryLane()),
     # pilot substrate: rojagtap/tech-qa carries the 1,400 questions with

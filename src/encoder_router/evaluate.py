@@ -32,6 +32,7 @@ from hybrid_search_rrf_dataset.objective import RouterObjective
 
 THRESHOLD_GRID = np.arange(0.30, 0.91, 0.05)
 TIE_WEIGHT = 0.25
+VAL_LANE_SHARE = 0.1
 COST_STEP = RouterObjective().ndcg_weight
 """Placeholder serving-cost exchange rate, pending a real number from
 production economics: the serve rule's own tolerance says a route up to
@@ -73,6 +74,9 @@ def tuned_thresholds(
 
 BGE = "BAAI/bge-small-en-v1.5"
 E5 = "intfloat/multilingual-e5-small"
+GEMINI = "openrouter/google/gemini-embedding-001"
+"""Hosted (dim 3072) via OpenRouter — QueryEmbeddings gates the paid call behind
+ROUTER_EMBED_LIVE=1. The complement matching the cascade's l2 dense leg."""
 
 
 @dataclass(frozen=True)
@@ -88,8 +92,13 @@ class Arm:
     corpus_branch: bool = True
     feature_branch: bool = False
     shuffle_targets: bool = False
+    decisive_only: bool = False
     learner: str = "mlp"
     embedding_model: str = BGE
+    aux_embedding_model: str | None = None
+    """A second, complementary query encoder concatenated onto the primary —
+    off when None. `[bge ; aux]`, not a swap: the router keeps bge and gains a
+    view where bge is weak."""
 
 
 ARMS: tuple[Arm, ...] = (
@@ -107,6 +116,12 @@ ARMS: tuple[Arm, ...] = (
     Arm("zipf_input_nocorpus", zipf_inputs=True,
         cell_branch=False, corpus_branch=False),
     Arm("zipf_shape_nocorpus", zipf_inputs=True, shape_inputs=True,
+        cell_branch=False, corpus_branch=False),
+    # complementary second encoder (free to test: e5 is already cached). Gemini
+    # plugs into the same aux slot once QueryEmbeddings speaks it.
+    Arm("bge_plus_e5_nocorpus", aux_embedding_model=E5,
+        cell_branch=False, corpus_branch=False),
+    Arm("bge_plus_gemini_nocorpus", aux_embedding_model=GEMINI,
         cell_branch=False, corpus_branch=False),
     Arm("feature_branch", feature_branch=True),
 )
@@ -133,9 +148,25 @@ class LaneCV:
         self.seed = seed
         self.tie_weight = tie_weight
 
+    def row_weights(self, arm: Arm) -> np.ndarray:
+        """Per-row route-loss weight. `decisive_only` zeroes every
+        non-decisive row rather than dropping it: the route loss normalizes by
+        the weight sum, so a zero row is absent from the objective while the
+        matrices stay aligned to the frame."""
+        frame = self.table.frame
+        if arm.decisive_only:
+            decisive = (frame["shape"] == "routes_differ") & frame["serve"].notna()
+            return decisive.to_numpy().astype(np.float32)
+        return np.where(
+            frame["shape"].to_numpy() == "all_tied", self.tie_weight, 1.0
+        ).astype(np.float32)
+
     def run(self, arm: Arm, *, lanes: tuple[str, ...] | None = None) -> pd.DataFrame:
         frame = self.table.frame
         embeddings = QueryEmbeddings(arm.embedding_model).matrix(frame)
+        if arm.aux_embedding_model:
+            aux = QueryEmbeddings(arm.aux_embedding_model).matrix(frame)
+            embeddings = np.concatenate([embeddings, aux], axis=1)
         held = lanes or tuple(sorted(frame["dataset"].unique()))
         rows = [
             self._fold(arm, lane, frame, embeddings)
@@ -207,9 +238,7 @@ class LaneCV:
     def _served(
         self, arm, x, route, train, frame
     ) -> tuple[list[str], np.ndarray, dict[str, float]]:
-        weights = np.where(
-            frame["shape"].to_numpy() == "all_tied", self.tie_weight, 1.0
-        ).astype(np.float32)
+        weights = self.row_weights(arm)
         probe = self._lgbm_probs if arm.learner == "lgbm" else self._mlp_probs
         probs_train, probs_test, fit_info = probe(arm, x, route, train, weights)
         thresholds = tuned_thresholds(probs_train, frame[train])
@@ -222,12 +251,18 @@ class LaneCV:
     def _fit_val_split(
         self, train: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """A within-train slice for early stopping — never the held lane."""
-        index = np.flatnonzero(train)
+        """Whole LANES held out of the train pool for early stopping — never
+        the held lane, and never a random row slice: outcome shape is
+        lane-bound, so a within-lane slice stops the fit on an axis the
+        readout does not measure."""
+        lanes = self.table.frame["dataset"].to_numpy()
+        pool = np.unique(lanes[train])
         rng = np.random.default_rng(self.seed)
-        shuffled = index[rng.permutation(len(index))]
-        cut = max(len(index) // 10, 1)
-        return shuffled[cut:], shuffled[:cut]
+        held = rng.choice(
+            pool, max(int(len(pool) * VAL_LANE_SHARE), 1), replace=False
+        )
+        val = train & np.isin(lanes, held)
+        return np.flatnonzero(train & ~val), np.flatnonzero(val)
 
     def _mlp_probs(
         self, arm, x, route, train, weights

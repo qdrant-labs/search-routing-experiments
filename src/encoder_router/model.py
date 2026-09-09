@@ -127,7 +127,10 @@ class EncoderRouter:
     lambda_cell: float = 0.5
     lambda_corpus: float = 0.5
     lambda_feature: float = 0.5
-    anneal_share: float = 0.7
+    # Epochs over which the branch losses decay to zero. An `epochs`-relative
+    # share never fired: early stopping ends the run ~25 epochs in, leaving the
+    # branches at ~97% weight for their whole life.
+    anneal_epochs: int = 20
     threshold: float = 0.5
     seed: int = 0
     net: RouterNet | None = field(default=None, repr=False)
@@ -145,17 +148,29 @@ class EncoderRouter:
         x_val: np.ndarray | None = None,
         val_route_targets: np.ndarray | None = None,
         val_route_weights: np.ndarray | None = None,
+        warm_start: bool = False,
     ) -> "EncoderRouter":
         torch.manual_seed(self.seed)
-        cell_dim = 0 if cell_targets is None else cell_targets.shape[1]
-        corpus_dim = 0 if corpus_targets is None else corpus_targets.shape[1]
-        feature_dim = (
-            0 if feature_targets is None else feature_targets.shape[1]
-        )
-        self.net = RouterNet(
-            x.shape[1], cell_dim, corpus_dim, feature_dim,
-            latent=self.latent, hidden=self.hidden, dropout=self.dropout,
-        )
+        if warm_start:
+            if self.net is None:
+                raise ValueError("warm_start=True requires a loaded net")
+            in_dim = self.net.encoder[0].in_features
+            if x.shape[1] != in_dim:
+                raise ValueError(
+                    f"warm_start input width {x.shape[1]} != net's {in_dim}"
+                )
+        else:
+            cell_dim = 0 if cell_targets is None else cell_targets.shape[1]
+            corpus_dim = (
+                0 if corpus_targets is None else corpus_targets.shape[1]
+            )
+            feature_dim = (
+                0 if feature_targets is None else feature_targets.shape[1]
+            )
+            self.net = RouterNet(
+                x.shape[1], cell_dim, corpus_dim, feature_dim,
+                latent=self.latent, hidden=self.hidden, dropout=self.dropout,
+            )
         optimizer = torch.optim.AdamW(
             self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
@@ -169,9 +184,7 @@ class EncoderRouter:
         self.history = []
         progress = tqdm(range(self.epochs), desc="fit", leave=False)
         for epoch in progress:
-            anneal = max(
-                0.0, 1.0 - epoch / max(self.anneal_share * self.epochs, 1)
-            )
+            anneal = max(0.0, 1.0 - epoch / max(self.anneal_epochs, 1))
             train_loss = self._run_epoch(
                 tensors, optimizer, pos_weight, anneal, epoch
             )
@@ -350,7 +363,10 @@ class EncoderRouter:
     @classmethod
     def load(cls, path: str | Path) -> "EncoderRouter":
         blob = torch.load(path, map_location="cpu", weights_only=True)
-        router = cls(**blob["params"])
+        known = {f.name for f in fields(cls)}
+        router = cls(**{
+            k: v for k, v in blob["params"].items() if k in known
+        })
         dims = blob["dims"]
         router.net = RouterNet(
             dims["in_dim"], dims["cell_dim"], dims["corpus_dim"],

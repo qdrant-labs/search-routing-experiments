@@ -111,7 +111,9 @@ class FusionStrategy(ABC):
                 self.sparse_cfg.model_id, providers=self.sparse_cfg.providers,
                 **(self.sparse_cfg.model_options or {}),
             )
-        s = next(iter(self._sparse_model.embed([text])))
+        # query_embed, not embed: fastembed's embed() is the doc side (BM25 TF
+        # saturation + length norm); the query side must stay unweighted
+        s = next(iter(self._sparse_model.query_embed([text])))
         return SparseVector(indices=s.indices.tolist(), values=s.values.tolist())
 
     def _query_with_retry(self, **kwargs: Any) -> list[ScoredPoint]:

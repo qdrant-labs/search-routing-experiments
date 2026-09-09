@@ -75,6 +75,8 @@ class DatasetName(StrEnum):
     TREC_CAST_2020_HISTORY = "trec-cast-2020-history"
     TECHQA = "techqa"
     BEIR_TOUCHE_2020 = "beir-touche-2020"
+    # out-of-lane calibration corpus (local Kaggle CSVs, nothing fetched)
+    HOME_DEPOT = "home-depot"
 
 
 class Grounding(StrEnum):

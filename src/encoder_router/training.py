@@ -170,6 +170,8 @@ class QueryEmbeddings:
         return merged
 
     def _encode(self, texts: list[str], batch_size: int) -> np.ndarray:
+        if self.model.startswith("openrouter/"):
+            return self._encode_hosted(texts, batch_size)
         from sentence_transformers import SentenceTransformer
 
         encoder = SentenceTransformer(self.model)
@@ -179,3 +181,43 @@ class QueryEmbeddings:
             normalize_embeddings=True,
             show_progress_bar=True,
         )
+
+    def _encode_hosted(self, texts: list[str], batch_size: int) -> np.ndarray:
+        """OpenRouter embeddings for a hosted encoder (e.g. gemini), reusing the
+        legb `openrouter/<model>` id and `OPEN_ROUTER_API_KEY`. Gated: an explicit
+        opt-in is required so a cache miss cannot silently spend. Cached like any
+        other encoder, so the paid call happens once per query."""
+        import os
+        import time
+
+        import requests
+        from tqdm.auto import tqdm
+
+        if os.environ.get("ROUTER_EMBED_LIVE") != "1":
+            raise RuntimeError(
+                f"{self.model} is a paid hosted encoder; set ROUTER_EMBED_LIVE=1 "
+                "to allow the API call (each query embeds once, then caches)."
+            )
+        key = os.environ.get("OPEN_ROUTER_API_KEY")
+        if not key:
+            raise RuntimeError("OPEN_ROUTER_API_KEY is not set — add it to .env")
+        model = self.model.split("openrouter/", 1)[1]
+        step = min(batch_size, 100)
+        vectors: list[list[float]] = []
+        for start in tqdm(range(0, len(texts), step), desc=f"embed {model}"):
+            batch = [self._prefix + t for t in texts[start:start + step]]
+            for attempt in range(5):
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/embeddings",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": model, "input": batch}, timeout=60,
+                )
+                if resp.status_code == 200:
+                    break
+                if attempt == 4:
+                    resp.raise_for_status()
+                time.sleep(2 ** attempt)
+            vectors.extend(d["embedding"] for d in resp.json()["data"])
+        vecs = np.asarray(vectors, dtype=np.float32)
+        norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+        return vecs / np.clip(norms, 1e-8, None)   # L2-norm -> matches bge/e5 (cosine)

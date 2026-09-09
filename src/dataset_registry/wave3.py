@@ -1,7 +1,10 @@
 """Wave-3 query sources: commerce, finance, conversational, enterprise
 support and argument retrieval distributions."""
 
+import csv
+import hashlib
 from collections.abc import Iterator
+from pathlib import Path
 
 import ir_datasets
 from datasets import load_dataset
@@ -227,3 +230,53 @@ class BeirTouche2020(IRDatasetsBacked):
             availability=Availability.OPEN,
             homepage="https://ir-datasets.com/beir.html#beir/webis-touche2020",
         )
+
+
+HOME_DEPOT_TRAIN = (
+    Path(__file__).resolve().parent.parent / "data" / "home-depot" / "train.csv"
+)
+"""Where the user places the Kaggle train.csv — nothing is fetched."""
+
+
+class HomeDepot(RegistryDataset):
+    """Authentic Home Depot product-search queries from the local Kaggle CSVs."""
+
+    @property
+    def card(self) -> DatasetCard:
+        return DatasetCard(
+            name=DatasetName.HOME_DEPOT,
+            source=SourceKind.URL,
+            grounding=Grounding.QQ,
+            llm_target=False,
+            query_provenance=QueryProvenance.HUMAN,
+            scope=Scope.SPECIFIC,
+            non_trivial=True,
+            multilingual=False,
+            multimodal=False,
+            availability=Availability.GATED,
+            homepage="https://www.kaggle.com/c/home-depot-product-search-relevance",
+        )
+
+    def describe_source(self) -> str:
+        return str(HOME_DEPOT_TRAIN)
+
+    def _fetch_queries(self) -> Iterator[Query]:
+        if not HOME_DEPOT_TRAIN.exists():
+            raise FileNotFoundError(
+                f"home-depot: {HOME_DEPOT_TRAIN} missing. Download the Kaggle "
+                "'Home Depot Product Search Relevance' dataset and place "
+                "train.csv there."
+            )
+        seen: set[str] = set()
+        with HOME_DEPOT_TRAIN.open(encoding="latin-1", newline="") as handle:
+            for row in csv.DictReader(handle):
+                term = str(row["search_term"])
+                # same id rule as HomeDepotLane._query_id, so lane artifacts
+                # and registry profiles join on query_id
+                query_id = hashlib.sha1(
+                    term.strip().lower().encode()
+                ).hexdigest()[:16]
+                if query_id in seen:
+                    continue
+                seen.add(query_id)
+                yield Query(query_id, term)

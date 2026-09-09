@@ -23,6 +23,48 @@ def test_a_cloud_dense_slot_embeds_the_query_as_a_document():
     assert result.options == {"openrouter-api-key": "k"}
 
 
+class _RecordingSparseModel:
+    """Records which fastembed method the query path calls."""
+
+    def __init__(self):
+        self.calls = []
+
+    def _vector(self):
+        class _V:
+            class indices:
+                @staticmethod
+                def tolist():
+                    return [1]
+
+            class values:
+                @staticmethod
+                def tolist():
+                    return [1.0]
+        return _V()
+
+    def embed(self, texts):
+        self.calls.append("embed")
+        return iter([self._vector()])
+
+    def query_embed(self, texts):
+        self.calls.append("query_embed")
+        return iter([self._vector()])
+
+
+def test_local_sparse_query_uses_query_embed_not_doc_embed():
+    """The regression this exists for: the query side called embed(), which is
+    fastembed's DOC side — BM25 TF saturation + length norm on the query
+    up-weighted repeated/stem-colliding terms instead of the unweighted 1.0s
+    query_embed produces."""
+    from hybrid_search_rrf_dataset.fusion import SparseOnlyStrategy
+
+    strategy = SparseOnlyStrategy(None, "collection", CLOUD_DENSE, SPARSE)
+    fake = _RecordingSparseModel()
+    strategy._sparse_model = fake  # pre-empt lazy SparseTextEmbedding build
+    strategy._sparse("husky 52 in. tool chest")
+    assert fake.calls == ["query_embed"]
+
+
 class _FlakyClient:
     """query_points fails with the given exceptions, then succeeds."""
 
