@@ -32,7 +32,10 @@ from hybrid_search_rrf_dataset.fusion import (
     PureRRFStrategy,
     SparseOnlyStrategy,
 )
-from scripts.index_home_depot import DENSE, SPARSE
+from hybrid_search_rrf_dataset.retrieval.wave3 import (
+    HOME_DEPOT_DENSE as DENSE,
+    HOME_DEPOT_SPARSE as SPARSE,
+)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_QUERIES = DATA / "home-depot" / "queries.parquet"

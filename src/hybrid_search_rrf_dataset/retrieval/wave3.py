@@ -18,6 +18,7 @@ from dataset_registry.wave3 import (
     serialize_cast_history,
 )
 
+from hybrid_search_rrf_dataset.indexer import EmbeddingConfig
 from hybrid_search_rrf_dataset.retrieval.base import (
     QREL_COLUMNS,
     QUERY_COLUMNS,
@@ -344,6 +345,20 @@ class TechQaLane(MaterializedDataset):
 HOME_DEPOT_DIR = Path(__file__).resolve().parents[2] / "data" / "home-depot"
 """Where the user places the Kaggle CSVs (train.csv, product_descriptions.csv,
 optional attributes.csv) — nothing is fetched."""
+
+HOME_DEPOT_DENSE = EmbeddingConfig(
+    name="dense_base",
+    model_id="sentence-transformers/all-MiniLM-L6-v2",
+    kind="dense",
+    size=384,
+    cloud=True,
+)
+HOME_DEPOT_SPARSE = EmbeddingConfig(name="sparse_base", model_id="Qdrant/bm25", kind="sparse")
+"""The cloud collection's vector slots, beside the lane that owns them:
+dense embeds server-side via Cloud Inference (all-MiniLM-L6-v2 — bge-small has
+no endpoint on that cluster), bm25 tokenizes locally. Both the indexing script
+and every retriever of this collection read these; respelling them anywhere
+else means querying a slot that may not exist."""
 
 
 class HomeDepotLane(MaterializedDataset):

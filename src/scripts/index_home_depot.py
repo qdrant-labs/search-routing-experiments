@@ -17,21 +17,14 @@ from tqdm.auto import tqdm
 from hybrid_search_rrf_dataset.indexer import (
     CorpusDocument,
     CorpusIndexer,
-    EmbeddingConfig,
 )
-from hybrid_search_rrf_dataset.retrieval.wave3 import HOME_DEPOT_DIR, HomeDepotLane
+from hybrid_search_rrf_dataset.retrieval.wave3 import (
+    HOME_DEPOT_DIR,
+    HOME_DEPOT_DENSE as DENSE,
+    HOME_DEPOT_SPARSE as SPARSE,
+    HomeDepotLane,
+)
 
-# Vector-slot names the bakeoff's fusion strategies will query under. Dense embeds
-# server-side (cloud=True); bm25 is a local, unpaid tokenization pass. all-MiniLM-L6-v2
-# (384d, symmetric): bge-small has no endpoint on the cloud cluster.
-DENSE = EmbeddingConfig(
-    name="dense_base",
-    model_id="sentence-transformers/all-MiniLM-L6-v2",
-    kind="dense",
-    size=384,
-    cloud=True,
-)
-SPARSE = EmbeddingConfig(name="sparse_base", model_id="Qdrant/bm25", kind="sparse")
 
 
 def _batches(items: Iterator[CorpusDocument], size: int) -> Iterator[list[CorpusDocument]]:
