@@ -45,17 +45,35 @@ ambiguity tier. Those names are the valid `feature` values everywhere else.
 ```bash
 curl -s -X POST localhost:8000/generate/generate_surface \
   -H 'content-type: application/json' \
-  -d '{"feature": "structured_identifiers:uuid", "n": 2, "seed": 7}'
+  -d '{"feature": "structured_identifiers:sku", "n": 2, "seed": 3}'
 ```
 
 ```json
-{"feature": "structured_identifiers:uuid",
- "surfaces": ["bDfEC2D0-8B76-BBfc-7E4A-0F25C1908fDc", "Ce4b314f68FdE9dAcCbBCdC7aF08DF5a"]}
+{"feature": "structured_identifiers:sku",
+ "surfaces": ["SRE-919079O", "WPR-23286"]}
 ```
 
 Surfaces are **grounding-blind**: they are snippets exhibiting one feature, not
 queries. You weave them in yourself and then verify the result. `seed` makes them
 reproducible.
+
+That last part is not a formality — try it on `WPR-23286`:
+
+```bash
+curl -s -X POST localhost:8000/generate/verify -H 'content-type: application/json' -d '{
+  "text": "cordless drill WPR-23286 20v",
+  "targets": {"spans": [{"feature": "sku", "min_count": 1}], "stats": []}
+}'
+# {"passed": false, "checks": [{"target": "sku: at least 1 span(s)", "measured": 0.0, "passed": false}]}
+```
+
+It fails. `sku` is `AMBIGUOUS` tier; `ticket_like` (PREFIX-digits refs like
+`TCK-84721`, `banks/finance.py`) is `MODERATE` and shares its group, so it claims
+`WPR-23286` first in resolution — the query reads as a ticket reference, not a
+SKU. The generator wasn't wrong, and neither is the resolver: a generated
+surface's feature identity is only decided once it's re-measured in the group's
+claim order, which is exactly why this loop ends at `verify`, not at
+`generate_surface`.
 
 ### 2 · What is my query set missing?
 
