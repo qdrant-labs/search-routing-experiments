@@ -37,6 +37,7 @@ from dataset_registry.core import (
     Query,
     RegistryDataset,
 )
+from composition.catalog_axes import catalog_row
 from dataset_registry.registry import DatasetRegistry
 from query_taxonomy.features import FeatureExtractor, QueryFeatures
 
@@ -161,19 +162,7 @@ class FeatureTable:
         query: Query,
         features: QueryFeatures,
     ) -> dict[str, object]:
-        row: dict[str, object] = {
-            "dataset": name.value,
-            "query_id": query.query_id,
-            "checkable": checkable,
-        }
-        for group, counts_by_type in features.tfs.items():
-            for type_, count in counts_by_type.items():
-                row[f"{group.value}.{type_}"] = count
-        for stats_by_bank in features.stats.values():
-            for bank_name, stats in stats_by_bank.items():
-                for stat in stats:
-                    row[f"{bank_name}.{stat.name}"] = stat.value
-        return row
+        return catalog_row(name.value, query.query_id, checkable, features)
 
     def _ordered(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Identity columns first, feature columns sorted — one stable

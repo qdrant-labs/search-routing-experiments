@@ -11,10 +11,36 @@ GRADE, not a word count — never draw length bands as router bands."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from query_taxonomy.taxonomy import FeatureGroup
+
+if TYPE_CHECKING:  # a type only — keeps the extractor off composition's graph
+    from query_taxonomy.features import QueryFeatures
+
+ID_COLUMNS: tuple[str, ...] = ("dataset", "query_id", "checkable")
+"""Identity columns every catalog row carries, ahead of the feature columns."""
+
+
+def catalog_row(
+    dataset: str, query_id: str, checkable: bool, features: QueryFeatures
+) -> dict[str, object]:
+    """One catalog row from one query's resolved features: `<group>.<type>`
+    span counts and `<bank>.<stat>` values — the spelling `stat_column` reads
+    back. Absent span columns mean the bank did not fire, so callers fill 0."""
+    row: dict[str, object] = {
+        "dataset": dataset, "query_id": query_id, "checkable": checkable,
+    }
+    for group, counts_by_type in features.tfs.items():
+        for type_, count in counts_by_type.items():
+            row[f"{group.value}.{type_}"] = count
+    for stats_by_bank in features.stats.values():
+        for bank_name, stats in stats_by_bank.items():
+            for stat in stats:
+                row[f"{bank_name}.{stat.name}"] = stat.value
+    return row
 
 
 def stat_column(catalog: pd.DataFrame, stat: str) -> str:
