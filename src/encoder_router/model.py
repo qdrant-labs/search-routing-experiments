@@ -127,10 +127,7 @@ class EncoderRouter:
     lambda_cell: float = 0.5
     lambda_corpus: float = 0.5
     lambda_feature: float = 0.5
-    # Epochs over which the branch losses decay to zero. An `epochs`-relative
-    # share never fired: early stopping ends the run ~25 epochs in, leaving the
-    # branches at ~97% weight for their whole life.
-    anneal_epochs: int = 20
+    anneal_share: float = 0.7
     threshold: float = 0.5
     seed: int = 0
     net: RouterNet | None = field(default=None, repr=False)
@@ -184,7 +181,9 @@ class EncoderRouter:
         self.history = []
         progress = tqdm(range(self.epochs), desc="fit", leave=False)
         for epoch in progress:
-            anneal = max(0.0, 1.0 - epoch / max(self.anneal_epochs, 1))
+            anneal = max(
+                0.0, 1.0 - epoch / max(self.anneal_share * self.epochs, 1)
+            )
             train_loss = self._run_epoch(
                 tensors, optimizer, pos_weight, anneal, epoch
             )

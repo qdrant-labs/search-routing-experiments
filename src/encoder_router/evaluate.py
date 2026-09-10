@@ -30,9 +30,12 @@ from encoder_router.training import QueryEmbeddings, TrainingTable
 from encoder_router.targets import OUT_DIR
 from hybrid_search_rrf_dataset.objective import RouterObjective
 
-THRESHOLD_GRID = np.arange(0.30, 0.91, 0.05)
+THRESHOLD_GRID = np.arange(0.05, 0.96, 0.05)
+"""Spans the probability range: a head must be able to express both "fires for
+everything" and "never fires". A grid that stops short reports its own boundary
+as the tuner's choice — the old 0.30 floor pinned sparse and the 0.90 ceiling
+pinned dense on 10 of 17 saved arms."""
 TIE_WEIGHT = 0.25
-VAL_LANE_SHARE = 0.1
 COST_STEP = RouterObjective().ndcg_weight
 """Placeholder serving-cost exchange rate, pending a real number from
 production economics: the serve rule's own tolerance says a route up to
@@ -251,18 +254,12 @@ class LaneCV:
     def _fit_val_split(
         self, train: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Whole LANES held out of the train pool for early stopping — never
-        the held lane, and never a random row slice: outcome shape is
-        lane-bound, so a within-lane slice stops the fit on an axis the
-        readout does not measure."""
-        lanes = self.table.frame["dataset"].to_numpy()
-        pool = np.unique(lanes[train])
+        """A within-train slice for early stopping — never the held lane."""
+        index = np.flatnonzero(train)
         rng = np.random.default_rng(self.seed)
-        held = rng.choice(
-            pool, max(int(len(pool) * VAL_LANE_SHARE), 1), replace=False
-        )
-        val = train & np.isin(lanes, held)
-        return np.flatnonzero(train & ~val), np.flatnonzero(val)
+        shuffled = index[rng.permutation(len(index))]
+        cut = max(len(index) // 10, 1)
+        return shuffled[cut:], shuffled[:cut]
 
     def _mlp_probs(
         self, arm, x, route, train, weights
