@@ -6,6 +6,16 @@ This repository brings together query profiling, dataset composition, verified a
 
 The work follows four stages: **understand queries → select and generate data → train and measure routers → test on an unseen collection**.
 
+## Start with these notebooks
+
+These three notebooks live directly in `src/` and are the main entry points into the deployed datasets and router. Supporting experiments live under `notebooks/`:
+
+| Notebook | What it covers |
+| --- | --- |
+| [Home Depot top-1 bakeoff](src/home_depot_top1_bakeoff.ipynb) | How the router is evaluated: retrieval quality on Home Depot and comparisons against alternative strategies. |
+| [Encoder router volume probe](src/encoder_router_volume_probe.ipynb) | How the router is trained: constructing the combined training population and comparing model variants. |
+| [230K union deep dive](src/union_230k_deepdive.ipynb) | Statistics and detailed analysis of the deployed datasets, including composition and query-feature coverage. |
+
 ## Why route hybrid search?
 
 Sparse search rewards lexical overlap. Dense search can retrieve semantically related documents even when the wording differs. Reciprocal Rank Fusion (RRF) combines their rankings, but it does not know whether both retrievers are useful for a particular query. When one ranking is misleading, blending it into the other can make the results worse.
@@ -82,7 +92,7 @@ The September 2026 presentation and volume-probe notebook distinguish two popula
 
 Both cover 46 lanes. The union contains the 91K population and is not an independent control. Its composition also changes substantially: approximately 34.1% natural, 57.1% synthetic, and 8.6% augmented queries, compared with 81.7%, 16.8%, and 1.6% in the 91K version. More rows therefore do not isolate the effect of dataset size.
 
-The [volume-probe notebook](notebooks/router/encoder_router_volume_probe.ipynb) constructs the union at runtime. The older 46,142-query, 42-collection dataset belongs to the earlier viability study.
+The [volume-probe notebook](src/encoder_router_volume_probe.ipynb) constructs the union at runtime. The older 46,142-query, 42-collection dataset belongs to the earlier viability study.
 
 ## 3. Train and measure routers
 
@@ -163,18 +173,18 @@ Data artifacts live under `src/data/`. Notebook path setup varies; read each not
 
 ## Repository map
 
-| Location | Responsibility |
-| --- | --- |
-| `src/query-taxonomy/` | Query vocabulary, feature banks, and extraction |
-| `src/dataset_registry/` | Source dataset discovery and profiling |
-| `src/composition/` | Recipes, archetype cells, quotas, and selection |
-| `src/taxonomy_generators/`, `src/augmentation/` | Feature surfaces and query transformations |
-| `src/hybrid_search_rrf_dataset/` | Retrieval lanes, indexing, objectives, labels, and baseline evaluation |
-| `src/relevance_judge/`, `src/rungs/` | Judgment expansion, labeling cascades, and spend controls |
-| `src/encoder_router/`, `src/router_service/` | Router training, evaluation, and inference API |
-| `src/pipeline_service/`, `src/demo_service/` | Dataset tools and the collection-to-search-tests demo |
-| `src/scripts/`, `notebooks/` | Build entry points, experiments, and recorded analyses |
-| `tests/` | Automated checks |
+| Location                                        | Responsibility                                                         |
+| -------------------------------------------------| ------------------------------------------------------------------------|
+| `src/query-taxonomy/`                           | Query vocabulary, feature banks, and extraction                        |
+| `src/dataset_registry/`                         | Source dataset discovery and profiling                                 |
+| `src/composition/`                              | Recipes, archetype cells, quotas, and selection                        |
+| `src/taxonomy_generators/`, `src/augmentation/` | Feature surfaces and query transformations                             |
+| `src/hybrid_search_rrf_dataset/`                | Retrieval lanes, indexing, objectives, labels, and baseline evaluation |
+| `src/relevance_judge/`, `src/rungs/`            | Judgment expansion, labeling cascades, and spend controls              |
+| `src/encoder_router/`, `src/router_service/`    | Router training, evaluation, and inference API                         |
+| `src/pipeline_service/`, `src/demo_service/`    | Dataset tools and the collection-to-search-tests demo                  |
+| `src/scripts/`, `notebooks/`                    | Build entry points, experiments, and recorded analyses                 |
+| `tests/`                                        | Automated checks                                                       |
 
 For terminology and design history, read [CONTEXT.md](CONTEXT.md) and [SPEC.md](SPEC.md). For experimental limitations and directions considered after the first router, read [VERDICT.md](VERDICT.md) and [SCOPE_DECISION.md](SCOPE_DECISION.md). These are historical records; individual decisions describe the stage at which they were made.
 
