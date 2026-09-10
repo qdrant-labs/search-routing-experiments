@@ -532,9 +532,10 @@ Also non-copyright: ORCAS and msmarco-passage-dev query text is real user
 search traffic. Republishing raw user-log text is a privacy question
 independent of licensing — a second reason those two stay pointer-only.
 
-### Proposed release shape — NOT ratified
+### Release shape — RATIFIED 2026-09-10
 
-A proposal in the sense of the header above: a human ratifies before release.
+Ratified with two amendments, recorded below the original proposal. The
+partition itself is unchanged.
 
 - **Pointer artifact, the 42 verified pre-Wave-3 lanes** — `selected.parquet`,
   `eval_reserve.parquet`, numeric feature columns, our annotations under
@@ -551,6 +552,46 @@ Cheap because the artifact is already ID-keyed: the partition is a filter on
 `dataset` at write time. The eval reserve stays 42-lane complete either way
 — reserves are IDs — so ablations and later versions remain comparable even
 for lanes whose text we cannot ship.
+
+#### Amendment 1 — the four lanes outside the verified matrix
+
+The shipping artifact
+(`src/data/rungs/100k-v2/labeling/labels.parquet`, 91,093 rows) contains 46
+lanes. Forty-two are covered by the verified matrix above. The other four,
+with their row counts and initial standing:
+
+| lane | rows | initial standing | disposition |
+| -----| -----| -----------------| ------------|
+| finder | 5,703 | CC-BY-NC-4.0 | pointer-only; standing already `query: no` |
+| techqa | 621 | repo Apache-2.0, forum/Technote content needs review | pointer-only until verified |
+| wands | 479 | MIT | text ships; fold into `queries_permissive.parquet` |
+| beir-touche-2020 | 49 | redistribution terms not verified, `ids: check` | **excluded from the release** |
+
+`beir-touche-2020` is dropped rather than verified: 49 rows out of 91,093 do
+not justify a licence review, and its pointer standing is itself unresolved.
+Excluding it is the cheaper resolution and removes the only lane whose *ids*
+column is unverified.
+
+Release therefore covers **45 lanes**: the 42 verified, plus finder and techqa
+as pointer-only and wands as permissive text.
+
+#### Amendment 2 — minted rows inherit their parent lane's standing
+
+The matrix says nothing about rows this pipeline generated. The artifact holds
+74,417 `natural`, 15,256 `synthetic`, 1,177 `augmented` and 243 `doc_grounded`
+rows.
+
+**Rule: a minted row carries the publication standing of the lane it was
+minted from.** Conservative, and cheap here because generation concentrated on
+a permissive parent — 15,327 of the 16,676 minted rows derive from `quest`
+(apache-2.0, `ok/ok/ok`), so their text ships. The remainder derives from
+restrictive parents (rarb-math 357, crumb-legal-qa 246, crumb-code-retrieval
+233, orcas 64, rarb-code 61) and stays pointer-only.
+
+This rule is deliberately stricter than necessary for a paraphrase that shares
+no text with its parent. Do not loosen it without a per-operator analysis of
+how much parent text survives the transformation — that analysis has not been
+done.
 
 ### Open items
 

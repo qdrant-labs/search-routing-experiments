@@ -116,17 +116,8 @@ which route looks right.
 
 ```bash
 poetry install
-dvc pull                # fetches src/data — labels, corpus snapshots, caches
+dvc pull -r public      # fetches src/data — labels, corpus snapshots, caches
 ```
-
-Two entry points, both in `src/`:
-
-- **[src/dataset_showcase.ipynb](src/dataset_showcase.ipynb)** — the dataset
-  in four stops: what's in it, the decisive core (~5K clear wins), the
-  acceptability labels that turn ties into training signal (~38K rows,
-  SPEC d60), and how augmentation grows the thin archetypes.
-- **[src/route_experiments.ipynb](src/route_experiments.ipynb)** — train,
-  validate and probe routers on it. Edit the config cell, Run All.
 
 Design decisions for LLM live in [SPEC.md](SPEC.md), vocabulary in
 [CONTEXT.md](CONTEXT.md). Working and archive notebooks are under

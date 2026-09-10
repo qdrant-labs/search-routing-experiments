@@ -313,6 +313,24 @@ _Avoid_: "natural" or "real user query" for published rows (ScIRGen-Geo is
 LLM-written, LIMIT is template-constructed), reading `llm_target` as
 provenance, defaulting an unknown source to `human`
 
+**Publication standing**:
+What we may redistribute from a registered source, recorded per upstream family
+*and per artifact shape* in `docs/datasets.md` — `ok`, `attrib` (attribution
+required), `SA` (share-alike propagates to whatever file it ships in), `terms`
+(permitted, but upstream terms restrict *our* use), `no`, `check` (unresolved).
+Standing attaches to the source family, not the row; a minted row inherits its
+parent lane's standing.
+_Avoid_: reading `AccessTier.GATED` as publication standing — that records how
+we obtained the data, not what we may pass on; quoting one standing per lane
+when the shape differs (ids often ship where query text may not)
+
+**Pointer artifact**:
+A release carrying `(dataset, query_id)` plus our own measurements and no
+upstream text — the TREC-qrels / `ir_datasets` shape. Ships under our own
+licence because IDs are facts and the route label is ours.
+_Avoid_: "ids-only" (the repo term is pointer artifact); assuming pointer shape
+clears every source — `terms` lanes restrict our use, not only redistribution
+
 **Profiling**:
 Running feature extractors over a query sample from a registered dataset
 (`DatasetRegistry.profile`) to estimate its feature distribution.

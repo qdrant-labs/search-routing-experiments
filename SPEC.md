@@ -1104,6 +1104,54 @@ is at commit 26b9a93.
     `src/data/relevance_judge/card_transfer/{predictions_{baseline,carded},summary}.parquet`
     and `generated_cards.parquet`.
 
+72. **Dataset release shape — licence-conditional partition** (2026-09-10).
+    The project ships deliverables beside the router. The first is the route-label
+    dataset, released from `src/data/rungs/100k-v2/labeling/labels.parquet`
+    (91,093 rows, 46 lanes). The release shape proposed in `docs/datasets.md`
+    "Licensing and publication standing" is RATIFIED, with two amendments.
+
+    What ships, partitioned by publication standing rather than concatenated —
+    share-alike text in the same file as CC-BY material would relicense our own
+    labels, which is the binding reason to partition:
+    - **pointer artifact**, all shipped lanes — `(dataset, query_id)` plus our
+      route measurements, our annotations under CC-BY-4.0, a per-lane
+      attribution table, and a loader that rebuilds text upstream;
+    - **`queries_permissive.parquet`** — text for the CC-BY / apache lanes,
+      plus `wands` (MIT) from amendment 1;
+    - **`queries_sharealike.parquet`** — the 9 SA lanes, marked CC-BY-SA-4.0;
+    - **pointer-only** — the non-commercial and unlicensed lanes.
+
+    *Amendment 1 — lanes outside the verified 42-lane matrix.* The artifact holds
+    46 lanes; four were never verified. `wands` (479 rows, MIT) ships text;
+    `finder` (5,703, CC-BY-NC-4.0) and `techqa` (621, content review pending) are
+    pointer-only; `beir-touche-2020` (49) is EXCLUDED — its `ids` standing is
+    itself unresolved and 49 rows do not justify a licence review.
+
+    *Amendment 2 — minted rows inherit their parent lane's standing.* The matrix
+    covered only sourced rows. Of 16,676 minted rows (15,256 synthetic, 1,177
+    augmented, 243 doc_grounded), 15,327 derive from `quest` (apache-2.0) and
+    ship with text; ~961 from restrictive parents stay pointer-only. Deliberately
+    stricter than a paraphrase sharing no parent text requires — do not loosen
+    without a per-operator analysis of surviving parent text, which has not been
+    done.
+
+    *Non-commercial lanes ship as pointers* — see `docs/adr/0003`. 12 lanes /
+    22,346 rows (24.5%) carry non-commercial terms, and `docs/datasets.md` warned
+    those terms reach our own use, not only redistribution. Resolved in favour of
+    publication: a free HuggingFace research dataset, for a routing capability
+    that is not a premium Qdrant feature, is non-commercial research use, and the
+    pointer shape is the TREC-qrels pattern BEIR and MTEB already follow over
+    these corpora. Dropping them would have cost 24.5% of the rows and biased
+    what remained — the NC set holds nearly all the real user query traffic,
+    leaving ~51% LLM-authored or minted-here. `antique` (222 rows) is the one
+    exclusion: the Yahoo Webscope DUA forbids reposting, a prohibition rather
+    than an absence.
+
+    Net: **44 lanes** (46 − `beir-touche-2020` − `antique`). Publishing is
+    one-way; a check with whoever owns OSS/legal precedes upload but blocks
+    neither spec nor build. Card must disclose RAR-b's unlicensed upstream
+    repackaging and the LLM-authored share.
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log

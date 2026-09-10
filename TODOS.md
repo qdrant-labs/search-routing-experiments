@@ -211,12 +211,15 @@ This session, in order:
       rebuilt catalog — `CellFill(...).build(force=True)` — cell_selection.parquet
       and every selection_audit number are stale (built from the old 380K
       catalog). Then re-run `src/selection_audit.ipynb`.
-- [ ] FOLLOW-UP: the round-trip gate `tests/test_taxonomy_generators.py` is RED
-      independent of d50b (92 failed / 3 passed on clean baseline). Cause is the
+- [x] FOLLOW-UP: the round-trip gate `tests/test_taxonomy_generators.py` was RED
+      independent of d50b (92 failed / 3 passed on clean baseline). Cause was the
       key-dialect skew already logged under the taxonomy-generators grill:
       `BANKS_BY_FEATURE` keys on bare `str(bank.name)`, `generator.feature`
-      returns `"{group}:{name}"` → KeyError. The gate is meaningless until fixed;
-      d50b's banks were verified by 50-surface self-heal sampling instead.
+      returns `"{group}:{name}"` → KeyError. d50b's banks were verified by
+      50-surface self-heal sampling instead. **RESOLVED — verified green
+      2026-09-10:** the full suite is 900 passed / 17 xfailed / 0 failed, and all
+      17 xfails are in `tests/test_cell_membership.py`, none in this file. The
+      gate is live again; it was fixed and never checked off.
 - [ ] Two cells.json guards (SPEC d50c), no re-extraction: `uri_in_query`
       + `length_words below 15`; `opaque_token_any_domain` drops
       `http_status_code` from its `any_of`.
@@ -691,3 +694,51 @@ Lane cards shipped: deploy recall **0.292 -> 0.427 (+46% rel)**, precision
       connections, which turned out to be transport faults now retried. If
       `drop=` stays near zero at 12, raise it back toward 32 — the full tie run
       is ~10h at 12 workers versus ~4h at 32.
+
+## Dataset release shape (2026-09-10, SPEC decision 72)
+
+- [ ] **Legal sanity-check before upload, not before build.** d72 and
+      `docs/adr/0003` resolve the non-commercial `terms` flag in favour of
+      publication on the reading that a free HuggingFace research dataset, for a
+      routing capability that is not a premium Qdrant feature, is non-commercial
+      research use. That reasoning is structural, not legal advice. Ten minutes
+      with whoever owns OSS/legal at Qdrant before the actual upload. Publishing
+      is one-way — a dataset is mirrored and cited within days.
+- [ ] **Re-verify the publication-standing matrix before release.**
+      `docs/datasets.md:444` states it was verified 2026-08-20 and that upstream
+      cards get retagged. Anything shipping text (`queries_permissive`,
+      `queries_sharealike`) needs its lane re-checked at release time, not at
+      spec time.
+- [ ] **`techqa` (621 rows) is pointer-only until its content review lands.**
+      Repository is Apache-2.0, but forum/Technote content standing is `check`.
+      Either verify and promote it into `queries_permissive.parquet`, or leave it
+      pointer-only and say so in the card.
+- [ ] **Three open items already named in `docs/datasets.md:555`** — CLERC shows
+      no licence tag (CC0 inferred from the Caselaw Access Project upstream);
+      whether NIST asserts terms over the TREC-DL-2022 qrels; and BRIGHT's
+      leetcode/aops splits carrying third-party problem statements the authors
+      cannot license. Only the third affects text shipping, and only for
+      documents.
+- [ ] **Per-operator analysis of surviving parent text**, if amendment 2's
+      inheritance rule is ever to be loosened. The rule makes a minted row carry
+      its parent lane's standing, which is stricter than a paraphrase sharing no
+      parent text requires. 15,327 of 16,676 minted rows derive from `quest`
+      (apache-2.0) and ship text anyway, so the rule costs ~961 rows — loosening
+      it is low-value until that changes.
+- [ ] **Dangling SPEC reference.** `src/relevance_judge/lane_context.py:144`
+      says "See SPEC d70", but no decision 70 exists in SPEC.md (65 and 71 do).
+      Likely meant 69 (per-lane task context for the judge) or 71 (the card
+      generator). Fix the citation or restore the decision.
+- [ ] **README adjustment, deferred 2026-09-10.** The two phantom entry-point
+      links (`src/dataset_showcase.ipynb`, `src/route_experiments.ipynb` — never
+      committed, no deletion commit) are REMOVED. Still stale: "Current state of
+      the dataset" claims "~46K queries across 42 corpora" against today's 91,093
+      rows over 46 lanes, and links `docs/research/qpp-retrieval-routing.md`,
+      which is gitignored and so dead for anyone who clones. Fix when the
+      dataset card lands — the card is the better front door and the README
+      should point at it.
+- [ ] **Card must disclose two things** the numbers do not show on their own:
+      RAR-b's upstream pooled repositories carry no licence at all (8,221 rows),
+      and the LLM-authored/minted-here share of the release is substantial
+      (`scirgen-geo-en` is LLM-written per CONTEXT.md; 15,327 `quest` rows are
+      minted here).
