@@ -42,6 +42,10 @@ packages = [
     {include = "taxonomy_generators", from = "src"},
     {include = "encoder_router", from = "src"},
     {include = "router_service", from = "src"},
+    # A single module, not a package: the three lazy __init__ files share it,
+    # and it belongs to none of them (dataset_registry is imported BY
+    # hybrid_search_rrf_dataset.lanes, so either home inverts a dependency).
+    {include = "lazy_exports.py", from = "src"},
 ]
 
 [tool.poetry.dependencies]

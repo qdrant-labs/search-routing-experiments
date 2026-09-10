@@ -217,7 +217,7 @@ class Operator(ABC):
         an explicit `return []` and its reason — never inherits silence."""
 
     def candidate(
-        self, parent: pd.Series, floor: str, outcome: "AugmentationOutcome"
+        self, parent: pd.Series, floor: str, outcome: AugmentationOutcome
     ) -> AugmentedCandidate:
         """Assemble the pool row for inherit-path operators. Minted-path
         operators (Inject) override to attach the surface_origin doc. Takes

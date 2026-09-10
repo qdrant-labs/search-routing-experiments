@@ -216,7 +216,7 @@ class Spend:
     def wall_s(self) -> float:
         return time.monotonic() - self._started
 
-    def add(self, spent: "Spend | AugmentationOutcome") -> None:
+    def add(self, spent: Spend | AugmentationOutcome) -> None:
         """Fold in anything shaped like a spend — an outcome or another
         `Spend` both expose the same three fields, so one method covers
         merging two running totals and crediting a finished outcome alike."""
