@@ -1,125 +1,181 @@
-# Dynamic Router for the Hybrid Search 
+# Hybrid Search Router Dataset
 
-This repository contains the work for the routing problem between sparse and dense during search. 
+Build a dataset that captures when sparse, dense, or hybrid retrieval works best—and use it to train and evaluate a query router.
 
-## Why a router
+This repository brings together query profiling, dataset composition, verified augmentation, retrieval-based labeling, and router experiments for Qdrant. The central artifact is the dataset: queries connected to a corpus, relevance judgments, and measured retrieval outcomes. The classifiers test whether those outcomes can be predicted from query text alone.
 
-Reciprocal Rank Fusion merges result lists by position and nothing else: a
-document scores `1/(k + rank)` in each list, and the two are added (Cormack et
-al., SIGIR 2009, `k = 60`). Dropping the scores is deliberate, since cosine and
-BM25 are not comparable while ranks always are.
+The work follows four stages: **understand queries → select and generate data → train and measure routers → test on an unseen collection**.
 
-The bill arrives at the top. A document dense ranks first and sparse never
-returns scores `1/61`. A document both retrievers rank 62nd scores `2/122`, the
-same number. Break-even is rank `k+2`, so weak agreement beats a confident first
-place, and the score that proved it was confident is already gone.
+## Why route hybrid search?
 
-That hurts when one retriever is plain wrong about a query, which happens by
-family: dense collapses on simple entity questions (Sciavolino et al., EMNLP
-2021), BM25 leads on most out-of-domain BEIR sets after losing 7 to 18 points
-in-domain (Thakur et al., NeurIPS 2021). Weighting per query recovers up to 7.5%
-Precision@1 over fixed-weight hybrid (Hsu and Tzeng, 2025).
+Sparse search rewards lexical overlap. Dense search can retrieve semantically related documents even when the wording differs. Reciprocal Rank Fusion (RRF) combines their rankings, but it does not know whether both retrievers are useful for a particular query. When one ranking is misleading, blending it into the other can make the results worse.
 
-The catch: nobody has done this well from query text alone. A trained selector
-moved NDCG 0.5106 to 0.5121 (Chifu et al., 2025), and predictors fail hardest
-exactly where dense and lexical disagree (Faggioli et al., ECIR 2023). Both
-studies ran on hundreds of TREC queries. This repo bets that tens of thousands,
-labelled by running all three strategies, close that gap.
+The September 2026 project presentation illustrates this with `wood garage door`: sparse retrieval scores 0.631 NDCG@10, while fixed hybrid RRF scores 0.061 on the example collection. That motivates a routing decision, but does not establish a universal rule about short queries or product searches. Which strategy works depends on the query, the documents, and the retrieval stack.
 
-Survey and full citations:
-[docs/research/qpp-retrieval-routing.md](docs/research/qpp-retrieval-routing.md).
+The router chooses among three routes:
 
-The approach we are taking it is: create a classifier that will be able to determine which strategy is better: sparse / dense or returning to the hybrid. For having a good classifier the first task is creating a dataset that will represent the complexity of the decision between the dense vs sparse vector searches. 
+| Route | Retrieval strategy |
+| --- | --- |
+| `sparse_only` | Sparse retrieval with BM25 |
+| `dense_only` | Dense vector retrieval |
+| `pure_rrf` | Hybrid retrieval with Reciprocal Rank Fusion |
 
-Current repository went through a series of improvements and is currently on a way of delivering a third version of the dataset. Each version tries to improve on its predecessor by providing a better and more comprehansive look of the dataset generation. **This means that the central target of this repository is dataset creation, not classification. Classification used more as a tool for the evaluation, than actual result query (through that is the final goal)**   
+The research question is whether a cheap, query-only classifier can make that choice reliably enough to improve on a fixed strategy—and on an LLM-based selector.
 
-## Project modules 
+## 1. Understand queries: a shared taxonomy
 
-This project has multiple modules each having its area of responsibility. We will go from the simplest and most fundamental ones to the most recent ones. 
+[Query Taxonomy](src/query-taxonomy/README.md) provides the measurable vocabulary used throughout the pipeline. It detects structured identifiers, sentence markers, logical structures, corruption, language, and statistical properties such as query length, natural-language share, and syntactic depth. Corpus-relative features add measurements such as term rarity and vocabulary overlap against a collection.
 
-### Query Taxonomy
+A **bank** measures a feature and returns either character spans or scalar statistics. Span banks resolve overlapping claims within their group; different groups can describe the same text independently. This lets a query contain an identifier, negation, and a typo without collapsing those properties into one query category.
 
-Fundamental module of the project. The basic premise starts from the assumptions - we need to capture diverse queries in our dataset. For that reason we have to know which types of queries exist. The taxonomy is split into several ways, which could be summarized as: structural vs implementational. Structral details is the actual taxonomy - it shows which types of queries exist, while implementational - how to achieve their implementation to happen.  
+The same features serve several purposes: profile source datasets, identify missing query behaviors, select diverse rows, verify generated queries, and diagnose model behavior. **A query's shape is never its retrieval label.** An identifier may suggest that exact matching matters; only retrieval against relevance judgments establishes which route succeeded.
 
-**A bank is one detector for one feature.** It declares which taxonomy member it
-detects, an ambiguity tier saying how precise its pattern is, and the pattern
-itself. It returns spans, `(start, end, feature)`. `HTTPStatusCodeBank` claims
-`500` in "error 500" and `201` in "HTTP/1.1 201", and nothing else. Adding a
-feature means adding a bank, and each one ships about two positive and two
-negative test cases, with a test that fails when a bank has none.
+## 2. Build the dataset
 
-Banks that return a number instead of a span are stat banks: stopword ratio,
-syntactic depth, term rarity. A number has no character range, so they skip the
-resolution step below.
+### Acquire queries, judgments, and documents
 
-**The engine is the machinery a bank runs on**: `regex`, `spacy_model`,
-`wordfreq`, `tokenizer`, `langid_model`. It is declared on the class and
-readable before any bank is instantiated, so `FeatureExtractor()` on its regex
-default never imports spaCy or torch. Asking for more engines costs
-dependencies and time per query, so the cheap path stays the default.
+A **lane** is a dataset-specific retrieval and evaluation unit: queries, relevance judgments (*qrels*), and a corpus indexed in Qdrant with dense and sparse representations. The presentation reports 46 indexed lanes acquired across three waves, including ORCAS, MS MARCO, BEIR, BRIGHT, QUEST, CRUMB, RAR-b, FreshStack, LoTTE, CLERC, Amazon ESCI, WANDS, FINDER, TREC CAST, and ToCQA.
 
-**The taxonomy is six groups**, each a vocabulary enum plus a package of banks:
+Acquisition includes adapting formats, materializing corpora, and establishing what relevance evidence each source actually provides. Official qrels, click-derived signals, answer passages, and generated judgments have different strengths; their provenance matters to the resulting labels. See [the dataset guide](docs/datasets.md).
 
-| Group | Banks | Detects |
-|---|---|---|
-| `structured_identifiers` | 79, over 8 domains | `192.168.0.0/16`, `sk-live-…`, `Q3 2026`, ISBNs, case numbers |
-| `statistical_metrics` | 8 | length, stopword ratio, syntactic depth, term rarity, subword fragmentation |
-| `sentence_markers` | 6 | negation, greeting, politeness, interjection, comparative, acronym |
-| `corruption` | 5 | encoding artifacts, truncation, paste residue, typos |
-| `logical_structures` | 4 | operator syntax, temporal, code fragments, math expressions |
-| `semantical` | 3 | language set, code-switching |
+### Compose for coverage
 
-Inside a group, banks compete for the same characters and the tier settles it:
-the version-string bank claims `v1.0.0` first, so the number bank cannot come
-back for the `1.0` inside it. Groups never compete with each other, so one query
-can carry an identifier span and a corruption span over the same text. A seventh
-group, `query_corpus`, scores a query against a specific collection, so it needs
-an index and stays out of the default registry.
+`composition/` selects queries using **archetype cells**: named combinations of taxonomy features, such as a short identifier lookup or a long conversational request. Recipes control quotas and source contributions so a large corpus cannot silently define the entire dataset.
 
-### Other important modules
+Cells describe the query behaviors we want to cover. A cell with too few matching queries becomes a generation target. Each row retains its source and the cells it satisfies, making coverage and source imbalance inspectable.
 
-**`composition/`** decides which queries enter the dataset. An archetype cell is
-a query type written as bands over taxonomy features, say "short, one opaque
-identifier, no natural-language signal". `cells.yaml` holds the cells and
-`CellFill` fills a quota for each one from the feature catalog, capping how much
-any single corpus may contribute so one dataset cannot own a cell. Cells are
-written up front from retrieval mechanics and never read off what the catalog
-happens to contain, so a cell nobody can fill is a generation target instead of
-a mistake. Every number lives in `Recipe`, which is frozen: changing a value
-means a new build.
+### Generate, verify, and judge
 
-**`augmentation/`** grows the cells that came up short. An order sheet says how
-many rows each thin cell still needs, operators pick real parent queries and
-transform them (decorate, rewrite into operator syntax, inject an identifier,
-corrupt the text), and the result goes back through the taxonomy extractor to
-confirm it hits the bands it was ordered to hit. Selection is deterministic and
-the LLM only writes surface text. Anything that fails re-measurement never
-reaches the pool.
+The augmentation loop turns coverage deficits into concrete orders:
 
-**`hybrid_search_rrf_dataset/`** produces the labels. It indexes each corpus in
-Qdrant, runs all three strategies over the same queries, scores every ranking
-against that corpus's relevance judgments, and records which strategy won.
-`lanes.py` tracks which datasets carry a usable relevance signal at all: qrels,
-ORCAS clicks, or a GooAQ answer passage standing in for the gold document.
-`router.py` holds the baseline classifier, kept beside the labels so evaluation
-runs against the data it was trained on.
+1. Measure which cells are underfilled.
+2. Select a parent query or a supporting document.
+3. Generate or transform a query to meet the requested features.
+4. Re-run the taxonomy and reject candidates that fail their targets.
+5. Establish relevance support and measure retrieval outcomes.
+6. Return accepted rows to the pool and recompose the dataset.
 
-### Current state of the dataset
+Passing a taxonomy check establishes the requested query shape. Answerability and retrieval quality need separate evidence. When a transformation changes what a query asks for, its original qrels cannot simply be assumed to remain valid.
 
-A golden routing dataset for a dense/sparse/hybrid Strategy Router: ~46K
-queries across 42 corpora, each labelled with which retrieval route
-(`dense_only` / `pure_rrf` / `sparse_only`) actually retrieved best, measured
-by running all three against an indexed corpus — never by asking a model
-which route looks right.
+The [pipeline service](src/pipeline_service/README.md) exposes coverage analysis, generation instructions, verification, augmentation, and qrels expansion over HTTP. Model-backed generation is orchestrated by callers; the service supplies prompts and checks. Its qrels-expansion endpoint can call a paid judge under an explicit spend ceiling.
 
-## How to use it
+### Label from retrieval outcomes
 
-```bash
-poetry install
-dvc pull -r public      # fetches src/data — labels, corpus snapshots, caches
+The labeling harness runs all three routes against the same corpus and scores them against the query's qrels. The main objective is:
+
+```text
+O(route, query) = 0.7 × HitRate@1 + 0.3 × NDCG@10
 ```
 
-Design decisions for LLM live in [SPEC.md](SPEC.md), vocabulary in
-[CONTEXT.md](CONTEXT.md). Working and archive notebooks are under
-[notebooks/](notebooks/); they read `data/` relatively, so run them with
-`src/` as the working directory.
+It emphasizes finding a relevant document first while retaining a measure of top-ten ranking quality. Stored rankings and scores support re-evaluation, tie analysis, and comparisons between serving policies.
+
+The later dataset builds use a cascade that adds judgment and retrieval evidence to recover more decisive rows. **Unresolved rows stay unresolved.** A tie-breaking serving policy is not evidence that one retriever is better.
+
+### Dataset snapshots
+
+The September 2026 presentation and volume-probe notebook distinguish two populations:
+
+| Snapshot | Rows | Rows with a stored route | Role |
+| --- | ---: | ---: | --- |
+| 91K final version | 91,080 | 56,047 (61.5%) | Cascaded and relabeled artifact from the 100K-v2 build |
+| 233K combined union | 233,247 | 166,188 (71.2%) | Union of v2, v3, v3-augmented, and 100K-v2, deduplicated by `(dataset, query_id)` |
+
+Both cover 46 lanes. The union contains the 91K population and is not an independent control. Its composition also changes substantially: approximately 34.1% natural, 57.1% synthetic, and 8.6% augmented queries, compared with 81.7%, 16.8%, and 1.6% in the 91K version. More rows therefore do not isolate the effect of dataset size.
+
+The [volume-probe notebook](notebooks/router/encoder_router_volume_probe.ipynb) constructs the union at runtime. The older 46,142-query, 42-collection dataset belongs to the earlier viability study.
+
+## 3. Train and measure routers
+
+The repository contains the original logistic-regression baseline, encoder-router experiments, feature and branch ablations, and a model-free word-rarity rule.
+
+The default serving arm, `zipf_shape_nocorpus`, uses a BGE query embedding, character n-gram features, and word-frequency/query-shape statistics with an MLP. It requires query text at inference time and makes no LLM call. Two heads estimate whether sparse and dense retrieval are acceptable; thresholds convert those scores into a route, with an RRF hedge when the scores are close.
+
+The [router service](src/router_service/api.py) exposes route predictions and the `p_dense` and `p_sparse` scores. These are separate model outputs, not a three-class probability distribution. Its health endpoint identifies the loaded model and serving configuration.
+
+Evaluation asks more than whether a classifier matches stored labels: does its chosen route improve retrieval over a train-selected constant, fixed RRF, a rarity rule, or the LLM selector? Does the result survive holding out a collection? Do hand-authored probes reveal failures hidden by an aggregate score?
+
+## 4. Test on an unseen collection
+
+The Home Depot bakeoff evaluates the routers on 11,795 real queries and roughly 124K products. The September 2026 presentation reports these relevance-at-one results:
+
+| Strategy | Relevance@1 |
+| --- | ---: |
+| Deployed encoder router, 233K training pipeline | 0.585 |
+| Fixed hybrid RRF | 0.552 |
+| Auto-fusion LLM, 3,000-query run | 0.550 |
+| Weighted RRF, router probabilities | 0.544 |
+| Word-rarity rule | 0.540 |
+| Dense-only constant | 0.371 |
+
+The presentation's paired per-query comparisons report gains of **0.033 over fixed RRF** and **0.049 over auto-fusion**. These use matched queries, so the paired auto-fusion gain differs from subtracting the aggregate rows above. The router was statistically indistinguishable from the two strongest small-model contenders in that bakeoff.
+
+The same presentation reports about **15 ms for the MLP routing step**, and **34 ms end to end**, versus 379 ms for the LLM-based route. Its roughly 10× cost reduction uses assumed rates; timing and cost describe that measured setup.
+
+These results support the later encoder router on this collection. The earlier logistic-regression router received a scoped **NO-GO** against its precommitted evaluation bar; [VERDICT.md](VERDICT.md) preserves that result and its limitations. Neither result establishes that routing wins on every collection.
+
+The [collection-to-search-tests demo](src/demo_service/README.md) closes the loop for a collection without an answer key: select a document, request a query behavior, generate and verify a query, compare retrieval routes, and retain an inspectable test with provenance.
+
+## Get started
+
+Use Python 3.11–3.14 and Poetry. From the repository root:
+
+```bash
+git submodule update --init --recursive
+poetry install
+```
+
+Query Taxonomy is a local submodule dependency. To fetch versioned data and trained model artifacts, install DVC with its GCS support separately—DVC is not a project dependency—and run:
+
+```bash
+pipx install 'dvc[gs]'
+dvc pull -r public src/data.dvc models.dvc
+```
+
+The configured public remote uses anonymous GCS access. Data and model artifacts are separate from the Git checkout; source datasets also retain their own access and licensing requirements.
+
+### Run the router
+
+After fetching model artifacts:
+
+```bash
+poetry run uvicorn router_service.api:app --host 127.0.0.1 --port 8001
+```
+
+Open `http://127.0.0.1:8001/docs`, or classify a batch:
+
+```bash
+curl -s http://127.0.0.1:8001/classify \
+  -H 'Content-Type: application/json' \
+  -d '{"queries": ["wood garage door", "why do cats purr", "CVE-2021-44228"]}'
+```
+
+`ROUTER_DIR` selects the saved model directory. `RRF_DELTA` controls the near-tie hedge and defaults to `0.15`. The default arm lives under `models/classifiers_union_200k/zipf_shape_nocorpus/`; the directory name is historical. The sentence encoder may need to download its weights on first use.
+
+### Explore or build data
+
+```bash
+poetry run uvicorn pipeline_service.api:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000/docs` and follow the [pipeline walkthrough](src/pipeline_service/README.md). For retrieval and indexing work, start local Qdrant with `docker compose up -d` and configure the relevant variables listed in [.example.env](.example.env). Full taxonomy extraction also needs the language/model dependencies described in the [taxonomy README](src/query-taxonomy/README.md).
+
+Data artifacts live under `src/data/`. Notebook path setup varies; read each notebook's setup cell before running it. Generation, judging, indexing, and some comparison notebooks require external services or paid calls.
+
+## Repository map
+
+| Location | Responsibility |
+| --- | --- |
+| `src/query-taxonomy/` | Query vocabulary, feature banks, and extraction |
+| `src/dataset_registry/` | Source dataset discovery and profiling |
+| `src/composition/` | Recipes, archetype cells, quotas, and selection |
+| `src/taxonomy_generators/`, `src/augmentation/` | Feature surfaces and query transformations |
+| `src/hybrid_search_rrf_dataset/` | Retrieval lanes, indexing, objectives, labels, and baseline evaluation |
+| `src/relevance_judge/`, `src/rungs/` | Judgment expansion, labeling cascades, and spend controls |
+| `src/encoder_router/`, `src/router_service/` | Router training, evaluation, and inference API |
+| `src/pipeline_service/`, `src/demo_service/` | Dataset tools and the collection-to-search-tests demo |
+| `src/scripts/`, `notebooks/` | Build entry points, experiments, and recorded analyses |
+| `tests/` | Automated checks |
+
+For terminology and design history, read [CONTEXT.md](CONTEXT.md) and [SPEC.md](SPEC.md). For experimental limitations and directions considered after the first router, read [VERDICT.md](VERDICT.md) and [SCOPE_DECISION.md](SCOPE_DECISION.md). These are historical records; individual decisions describe the stage at which they were made.
+
+The recurring lesson is that **dataset construction is part of the experiment**. Query diversity, source balance, judgment depth, and the retrieval stack all affect what a router can learn. More generated queries or more stored route decisions only help when their evidence supports the decision being taught.
