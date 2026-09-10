@@ -1,0 +1,32 @@
+# What the pipeline service reaches — narrower than the project's full set, the
+# same way requirements-serve.txt narrows it for the router. The `pipeline-deps`
+# CI job installs this list and imports the app, so a missing dependency fails
+# CI rather than the container.
+#
+# NOT here, deliberately: torch, sentence-transformers, fastembed, qdrant-client,
+# scikit-learn, lightgbm. None is reachable from this app since composition's
+# __init__ became lazy — see src/composition/__init__.py.
+fastapi>=0.141.1,<0.142.0
+uvicorn[standard]>=0.52.4,<0.53.0
+pydantic>=2.13.4,<3.0.0
+# /examine/archive parses a multipart upload.
+python-multipart>=0.0.32,<0.1.0
+pandas>=3.0.3,<4.0.0
+pyarrow>=24.0.0,<25.0.0
+# cells.yaml is read at import by composition.cells.
+pyyaml>=6.0.3,<7.0.0
+# rstr backs the pattern generators; wordfreq backs the term-rarity banks.
+rstr>=3.2.2
+wordfreq>=3.1.1,<4.0.0
+# litellm ships Budget's module (augmentation.engine) and the judge's client.
+litellm>=1.93.0,<2.0.0
+# ranx backs RouterObjective, reached via relevance_judge.scoring on the judge
+# path. That path is LAZY, so importing the app alone does not prove it -- the
+# CI check imports relevance_judge.judge explicitly for this reason.
+ranx>=0.3.21,<0.4.0
+# Genuinely reached on the judge path, NOT an eager-__init__ artifact:
+# lanes.py imports concrete lane classes that live in retrieval.hf/.wave3, and
+# ranx pulls ir_datasets itself. Lazy __init__ files cannot remove these.
+datasets>=4.0.0
+ir-datasets>=0.6.1,<0.7.0
+tqdm>=4.68.3,<5.0.0

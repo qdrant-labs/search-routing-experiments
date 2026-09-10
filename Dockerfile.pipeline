@@ -1,0 +1,48 @@
+# The generation / augmentation / examination / qrels service.
+#
+# Separate from the router's Dockerfile on purpose: serving must stay lean and
+# taxonomy-free (see requirements-serve.txt and the serve_safe assertion in the
+# deploy workflow), while this image DOES carry the query-taxonomy submodule.
+# Neither image installs the other's dependency set.
+#
+# Build from the repo root, with the submodule checked out. BuildKit is
+# REQUIRED: the root .dockerignore excludes src/query-taxonomy so the serving
+# image cannot carry it, and only BuildKit honours the per-Dockerfile
+# `Dockerfile.pipeline.dockerignore` that puts it back for this build.
+#   git submodule update --init src/query-taxonomy
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.pipeline -t pipeline-service .
+#   docker run --rm -p 8000:8000 pipeline-service
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HF_HOME=/app/.hf
+
+WORKDIR /app
+
+COPY requirements-pipeline.txt ./
+RUN pip install -r requirements-pipeline.txt
+
+# The submodule is a real dependency here (query_taxonomy, edify), unlike the
+# serving image which never reads it.
+COPY src/query-taxonomy ./src/query-taxonomy
+# WITH its dependencies: query-taxonomy declares exactly what it needs (edify,
+# rstr, ...). Only the ROOT wheel gets --no-deps, because its declaration is the
+# whole research set that requirements-pipeline.txt exists to narrow.
+RUN pip install ./src/query-taxonomy
+
+# --no-deps: the wheel declares the whole research set (torch, sentence-
+# transformers, fastembed, scikit-learn, qdrant-client). requirements-pipeline.txt
+# is the narrowed set this app actually reaches; installing the wheel's
+# dependencies would undo that.
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --no-deps .
+
+# Fail the build rather than the first request if the narrowed set is short.
+RUN python -c "import pipeline_service.api, relevance_judge.judge; \
+    print('pipeline imports resolve')"
+
+EXPOSE 8000
+CMD uvicorn pipeline_service.api:app --host 0.0.0.0 --port ${PORT:-8000}

@@ -12,8 +12,10 @@ on:
       - src/**
       - pyproject.toml
       - requirements-serve.txt
+      - requirements-pipeline.txt
       - models.dvc
       - Dockerfile
+      - Dockerfile.pipeline
       - .dockerignore
       - railway.toml
       - .github/workflows/router-service.yml
@@ -22,8 +24,10 @@ on:
       - src/**
       - pyproject.toml
       - requirements-serve.txt
+      - requirements-pipeline.txt
       - models.dvc
       - Dockerfile
+      - Dockerfile.pipeline
       - .dockerignore
       - railway.toml
       - .github/workflows/router-service.yml
@@ -75,6 +79,32 @@ jobs:
       - run: pip install --no-deps .
       - run: python -c "import router_service.api; print('serving imports resolve')"
       - run: pytest tests/test_router_service.py -q
+
+  pipeline-deps:
+    # Mirrors serve-deps for the pipeline image: install the narrowed set, install
+    # the wheel without its dependencies, then import the app. A dependency the
+    # list cannot satisfy fails here instead of in the container. This is how the
+    # missing python-multipart (needed by /examine/archive) was found.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out query-taxonomy (non-recursive)
+        run: |
+          git -c 'url.https://github.com/.insteadOf=git@github.com:' \
+            submodule update --init src/query-taxonomy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-pipeline.txt
+      - run: pip install ./src/query-taxonomy
+      - run: pip install --no-deps .
+      - run: |
+          python -c "
+          import pipeline_service.api
+          import relevance_judge.judge   # lazy at runtime; still must resolve
+          print('pipeline imports resolve')
+          "
 
   deploy:
     needs: [test, serve-deps]

@@ -30,7 +30,9 @@ dependencies = [
     "torch (>=2.6.0,<3.0.0)",
     "lightgbm (>=4.5.0,<5.0.0)",
     "fastapi (>=0.141.1,<0.142.0)",
-    "uvicorn[standard] (>=0.52.4,<0.53.0)"
+    "uvicorn[standard] (>=0.52.4,<0.53.0)",
+    # /examine/archive takes an UploadFile; starlette needs this to parse it.
+    "python-multipart (>=0.0.32,<0.1.0)"
 ]
 
 
@@ -42,6 +44,12 @@ packages = [
     {include = "taxonomy_generators", from = "src"},
     {include = "encoder_router", from = "src"},
     {include = "router_service", from = "src"},
+    # pipeline_service imports augmentation; a wheel with one and not the
+    # other installs cleanly and fails at import.
+    {include = "pipeline_service", from = "src"},
+    {include = "augmentation", from = "src"},
+    {include = "relevance_judge", from = "src"},
+    {include = "rungs", from = "src"},
     # A single module, not a package: the three lazy __init__ files share it,
     # and it belongs to none of them (dataset_registry is imported BY
     # hybrid_search_rrf_dataset.lanes, so either home inverts a dependency).
