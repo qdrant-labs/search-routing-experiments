@@ -47,6 +47,7 @@ packages = [
     # pipeline_service imports augmentation; a wheel with one and not the
     # other installs cleanly and fails at import.
     {include = "pipeline_service", from = "src"},
+    {include = "demo_service", from = "src"},
     {include = "augmentation", from = "src"},
     {include = "relevance_judge", from = "src"},
     {include = "rungs", from = "src"},

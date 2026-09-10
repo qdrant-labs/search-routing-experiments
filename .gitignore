@@ -15,3 +15,7 @@ docs/adr
 .agents
 docs/superpowers
 /models
+# Rehearsal-recorded live runs — contain Home Depot text (internal-only, Kaggle terms).
+src/demo_service/replays/*.json
+src/demo_service/frontend/node_modules
+src/demo_service/frontend/dist
