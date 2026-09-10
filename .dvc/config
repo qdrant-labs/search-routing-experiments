@@ -2,3 +2,6 @@
     remote = storage
 ['remote "storage"']
     url = gs://qdrant-hybrid-search-rrf/data
+['remote "public"']
+    url = gs://qdrant-hybrid-search-rrf/data
+    allow_anonymous_login = true
