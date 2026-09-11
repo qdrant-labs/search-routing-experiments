@@ -10,11 +10,11 @@ The work follows four stages: **understand queries → select and generate data 
 
 These three notebooks live directly in `src/` and are the main entry points into the deployed datasets and router. Supporting experiments live under `notebooks/`:
 
-| Notebook | What it covers |
-| --- | --- |
-| [Home Depot top-1 bakeoff](src/home_depot_top1_bakeoff.ipynb) | How the router is evaluated: retrieval quality on Home Depot and comparisons against alternative strategies. |
-| [Encoder router volume probe](src/encoder_router_volume_probe.ipynb) | How the router is trained: constructing the combined training population and comparing model variants. |
-| [230K union deep dive](src/union_230k_deepdive.ipynb) | Statistics and detailed analysis of the deployed datasets, including composition and query-feature coverage. |
+| Notebook                                                             | What it covers                                                                                               |
+| ----------------------------------------------------------------------| --------------------------------------------------------------------------------------------------------------|
+| [Home Depot top-1 bakeoff](src/home_depot_top1_bakeoff.ipynb)        | How the router is evaluated: retrieval quality on Home Depot and comparisons against alternative strategies. |
+| [Encoder router volume probe](src/encoder_router_volume_probe.ipynb) | How the router is trained: constructing the combined training population and comparing model variants.       |
+| [230K union deep dive](src/union_230k_deepdive.ipynb)                | Statistics and detailed analysis of the deployed datasets, including composition and query-feature coverage. |
 
 ## Why route hybrid search?
 
@@ -123,7 +123,7 @@ The same presentation reports about **15 ms for the MLP routing step**, and **34
 
 These results support the later encoder router on this collection. The earlier logistic-regression router received a scoped **NO-GO** against its precommitted evaluation bar; [VERDICT.md](VERDICT.md) preserves that result and its limitations. Neither result establishes that routing wins on every collection.
 
-The [collection-to-search-tests demo](src/demo_service/README.md) closes the loop for a collection without an answer key: select a document, request a query behavior, generate and verify a query, compare retrieval routes, and retain an inspectable test with provenance.
+The [demo service](src/demo_service/README.md) turns a collection without an answer key into inspectable search tests: select a document, generate and verify a query, compare retrieval routes, and retain the test with provenance. It currently lives in this repository, with the direction of becoming a separate project for building and evaluating search tests on your own collections.
 
 ## Get started
 
