@@ -2,7 +2,7 @@
 
 `src/data` is one 10 GB directory out, and DVC cannot check a single file out of
 a directory out — so Colab either pulls everything or nothing. This publishes the
-seven artifacts that notebook reads as a ~53 MB out of their own.
+small analysis inputs needed by the Colab notebooks as a separate DVC out.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ INPUTS = (
     "v3/augmented/labels.parquet",
     "v3/dataset_v3.parquet",
     "feature_table/catalog.parquet",
+    "home-depot/queries.parquet",
+    "home-depot/qrels.parquet",
 )
 
 
