@@ -17,6 +17,7 @@ COLAB_OUT = Path(__file__).resolve().parents[1] / "data_colab"
 INPUTS = (
     "legb_pilot/os_distill_relabel/cascade_labels.parquet",
     "rungs/100k-v2/planned_set.parquet",
+    "rungs/100k-v2/labeling/labels.parquet",
     "route_labels/labels.parquet",
     "v3/labels.parquet",
     "v3/augmented/labels.parquet",
