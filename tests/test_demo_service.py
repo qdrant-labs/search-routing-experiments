@@ -15,7 +15,6 @@ import demo_service.runner as runner_mod
 from augmentation.config import EngineSettings
 from demo_service.config import DemoConfig, SourceDoc
 from demo_service.runner import (
-    CallLimitExceeded,
     DeadlineExceeded,
     DeadlineGate,
     DemoUnavailable,
@@ -128,13 +127,18 @@ def test_budget_refuses_before_the_call_is_made(demo, monkeypatch):
         demo.generate("identifier", feature="exact_id")
 
 
-def test_two_calls_is_a_hard_ceiling(demo, monkeypatch):
+def test_budget_is_the_only_call_cap(demo, monkeypatch):
+    """SPEC d73a: no call-count ceiling — the budget alone stops runaway calls.
+    Generate + repair + repair all succeed under a comfortable budget; a
+    depleted budget refuses the next call via reserve()."""
     _stub_model(monkeypatch, ["diamond cup wheel PC5000C grinder"])
     demo.generate("identifier", feature="exact_id")
     demo.check()
-    demo.repair()  # call 2 — allowed
-    with pytest.raises(CallLimitExceeded):
-        demo.repair()  # call 3 — never
+    demo.repair()   # no 2-call ceiling any more
+    demo.repair()   # would have raised CallLimitExceeded before d73
+    demo._budget.max_usd = 1e-9
+    with pytest.raises(DemoUnavailable):
+        demo.repair()  # budget, not a call count, is the cap
 
 
 def test_repair_draws_from_the_same_budget(demo, monkeypatch):

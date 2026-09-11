@@ -13,6 +13,7 @@ really was spent) but can never touch the run state a caller already read.
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -78,10 +79,6 @@ class DemoUnavailable(RuntimeError):
 
 
 class DeadlineExceeded(DemoUnavailable):
-    pass
-
-
-class CallLimitExceeded(DemoUnavailable):
     pass
 
 
@@ -290,16 +287,28 @@ class SearchTestDemo:
 
     # ---- session -------------------------------------------------------
 
-    def reset(self) -> None:
-        """A fresh demo/rehearsal session: new budget, new call count, no
-        in-progress candidate. Does not re-run preflight."""
+    def reset(self, budget_usd: float | None = None) -> None:
+        """A fresh demo/rehearsal session: new budget, no in-progress
+        candidate. Does not re-run preflight. `budget_usd` overrides the
+        config default (the welcome step supplies it); None keeps the current
+        session budget if one was set, else the config default."""
+        cap = budget_usd or getattr(self, "_budget_cap", self.config.engine.max_spend_usd)
+        self._budget_cap = cap
         self._budget = Budget(
-            self.config.engine.max_spend_usd,
+            cap,
             usd_per_mtok_in=self.config.engine.usd_per_mtok_in,
             usd_per_mtok_out=self.config.engine.usd_per_mtok_out,
         )
+        self._budget_lock = threading.Lock()
         self._llm_calls = 0
         self._current: dict[str, Any] = {}
+
+    def set_budget(self, budget_usd: float) -> dict:
+        """Welcome step: fix the session spend cap and start fresh (SPEC d73a)."""
+        if budget_usd <= 0:
+            raise ValueError("budget must be positive")
+        self.reset(budget_usd)
+        return {"budget_usd": self._budget_cap, "remaining_usd": self._budget_cap}
 
     def _default_qdrant_factory(self) -> QdrantClient:
         return QdrantClient(
@@ -367,6 +376,8 @@ class SearchTestDemo:
             "checks": checks.model_dump() if checks is not None else None,
             "retrieval": [s.model_dump() for s in retrieval] if retrieval is not None else None,
             "spent_usd": round(self._budget.spent_usd, 4),
+            "remaining_usd": round(self._budget_cap - self._budget.spent_usd, 4),
+            "budget_usd": self._budget_cap,
             "calls_used": self._llm_calls,
         }
 
@@ -482,11 +493,13 @@ class SearchTestDemo:
     # ---- generate ----------------------------------------------------------
 
     def _call_model(self, prompt: str, gate: DeadlineGate) -> tuple[str, int, int]:
-        if self._llm_calls >= self.config.max_llm_calls:
-            raise CallLimitExceeded(f"{self.config.max_llm_calls} calls already used")
+        # Budget is the only cap (SPEC d73a): reserve refuses a call the session
+        # budget cannot cover before it runs, which is the runaway guard the old
+        # max_llm_calls ceiling used to be.
         messages = [{"role": "user", "content": prompt}]
         try:
-            self._budget.reserve(messages, max_tokens=64)
+            with self._budget_lock:
+                self._budget.reserve(messages, max_tokens=64)
         except BudgetExceeded as exc:
             raise DemoUnavailable(str(exc)) from exc
 
@@ -502,7 +515,8 @@ class SearchTestDemo:
         prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0
         try:
-            self._budget.charge(prompt_tokens, completion_tokens)
+            with self._budget_lock:
+                self._budget.charge(prompt_tokens, completion_tokens)
         except BudgetExceeded as exc:
             raise DemoUnavailable(str(exc)) from exc
         self._llm_calls += 1

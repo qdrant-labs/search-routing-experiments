@@ -151,15 +151,26 @@ class DemoConfig(BaseModel):
     """Matches the twice-calibration retrieval pass, not fusion.py's default of 50."""
 
     engine: EngineSettings = Field(
-        default_factory=lambda: EngineSettings(max_spend_usd=1.0)
+        default_factory=lambda: EngineSettings(max_spend_usd=2.0)
     )
-    """Haiku-4-5 at $1/$5 per Mtok (the augmentation default) with the demo's
-    own $1.00 total ceiling, shared by every call in one run."""
-    max_llm_calls: int = 2
-    """One generate + at most one repair. Enforced as a hard count, not just
-    the dollar ceiling — a very cheap runaway loop must not slip through."""
+    """Haiku-4-5 at $1/$5 per Mtok. `max_spend_usd` is the DEFAULT session
+    budget; the welcome step overrides it per session via `set_budget()`. The
+    budget is the only spend cap — a runaway loop is stopped by `Budget.reserve`
+    before it can overspend (SPEC d73a; the old `max_llm_calls` ceiling is gone).
+    """
+    budget_presets: tuple[float, ...] = (0.5, 2.0, 5.0)
+    """Welcome-screen chips; the middle one is the default (SPEC d73a)."""
     generate_deadline_s: float = 20.0
     retrieve_deadline_s: float = 15.0
+    judge_deadline_s: float = 25.0
+    """Pooled judging is one batched call under its own deadline (SPEC d73b)."""
+    judge_allowance_usd: float = 0.05
+    """Conservative hold: deducted from the session budget before the judge
+    call, settled to actual spend on response, forfeited on a lost response
+    (SPEC d73e). Comfortably covers a ~30-pair pool at measured prices."""
+    pool_depth: int = 10
+    """Judge the union of each strategy's top-N. 10, not 5: NDCG@10 is blind at
+    ranks 6-10 with a top-5 pool (SPEC d73b)."""
 
     messy_max_words: int = 15
     """Real traffic skews far shorter (median 3), but the distribution has a

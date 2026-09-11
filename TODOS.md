@@ -742,3 +742,25 @@ Lane cards shipped: deploy recall **0.292 -> 0.427 (+46% rel)**, precision
       and the LLM-authored/minted-here share of the release is substantial
       (`scirgen-geo-en` is LLM-written per CONTEXT.md; 15,327 `quest` rows are
       minted here).
+
+## Demo v3 / eval bootstrap (2026-09-11, SPEC decision 73)
+
+- [ ] **Phase 4 gate: per-collection judge referee sample.** The judge's
+      0.987/0.308 operating point was measured on this project's lanes; a BYO
+      collection inherits it on faith. Before trusting a seed benchmark's
+      grades on a new collection: small referee pass, hardest checkable
+      stratum first (instrument-validation checklist applies verbatim).
+- [ ] **Phase 5: cold-start seed generation targets cells, not the order
+      sheet** — /examine measures deficits of an existing query set; state the
+      mintable ceiling (~11/62 cells + the three demo behaviors) in the
+      artifact.
+- [ ] **Phase 5: comparison harness** — suite-level rerun vs a changed
+      retrieval_config with paired per-query Δ report; reuse twice-calibration
+      readout patterns (pre-committed rules, paired Wilcoxon, same-sign
+      counts); below threshold say "directional", never print a winner.
+- [ ] **Phase 4: benchmark manifest** — append-only suite manifest carrying
+      version, per-qrel-row provenance (seed-judge|seed-human|real),
+      timestamps, and the SEED caveat in the artifact itself.
+- [ ] **Phase 5: real-traffic blending** — segment by origin (mint bias is
+      measured: 5.7 vs 3.3 words), dedup via lane_synthetic.normalized(),
+      batch spend ledger (judge cache makes reruns nearly free).

@@ -324,6 +324,25 @@ _Avoid_: reading `AccessTier.GATED` as publication standing — that records how
 we obtained the data, not what we may pass on; quoting one standing per lane
 when the shape differs (ids often ship where query text may not)
 
+**Seed benchmark**:
+An evaluation set minted from a collection's own documents when no real
+queries or qrels exist yet — queries generated in ordered shapes, graded by
+pooled judging (human depth + judge breadth). Always labeled seed; segmented
+apart from real traffic when it arrives, never pooled with it (mint bias is
+measured: minted queries run longer and less rare than real ones). The S≈R
+twice-calibration result (transfer 1.12) is the warrant that a seed benchmark
+is usable.
+_Avoid_: presenting seed metrics as user-traffic metrics; pooling seed and
+real rows in one aggregate
+
+**Retrieval config**:
+The identity of a scored retrieval run — collection, dense/sparse model ids,
+vector slot names, fetch depth, fusion — recorded on every score block so runs
+are comparable after the fact. NOT "fingerprint", which this glossary already
+uses for the catalog heatmap view.
+_Avoid_: scores stored without their retrieval config; overwriting a prior
+run's scores instead of appending a new run
+
 **Pointer artifact**:
 A release carrying `(dataset, query_id)` plus our own measurements and no
 upstream text — the TREC-qrels / `ir_datasets` shape. Ships under our own

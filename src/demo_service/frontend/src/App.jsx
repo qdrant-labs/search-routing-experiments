@@ -9,11 +9,12 @@ import {
 } from "./screens.jsx";
 
 const STEPS = [
-  { id: "collection", label: "01 Collection" },
-  { id: "setup", label: "02 Test setup" },
-  { id: "candidate", label: "03 Candidate" },
-  { id: "retrieval", label: "04 Retrieval" },
-  { id: "suite", label: "05 Suite" },
+  { id: "welcome", label: "01 Budget" },
+  { id: "collection", label: "02 Collection" },
+  { id: "setup", label: "03 Test setup" },
+  { id: "candidate", label: "04 Candidate" },
+  { id: "retrieval", label: "05 Retrieval" },
+  { id: "suite", label: "06 Suite" },
 ];
 
 const Logo = () => (
@@ -23,6 +24,49 @@ const Logo = () => (
     <path d="M11 9.1l2.6 1.5v3l-2.6 1.5-2.6-1.5v-3L11 9.1z" fill="#DC244C" />
   </svg>
 );
+
+function BurnDown({ run, budget }) {
+  const cap = run?.budget_usd ?? budget.budget_usd;
+  const remaining = run?.remaining_usd ?? budget.remaining_usd ?? cap;
+  const pct = Math.max(0, Math.min(100, (remaining / cap) * 100));
+  return (
+    <span className="burndown" title={`$${remaining.toFixed(4)} of $${cap} left`}>
+      <span className="burndown-bar">
+        <span className="burndown-fill" style={{ width: `${pct}%` }} />
+      </span>
+      ${remaining.toFixed(2)} left
+    </span>
+  );
+}
+
+function WelcomeScreen({ health, busy, onStart }) {
+  const presets = health?.budget_presets ?? [0.5, 2.0, 5.0];
+  const dflt = health?.default_budget ?? 2.0;
+  return (
+    <section className="welcome">
+      <div className="eyebrow">Before we start · set a spend cap</div>
+      <h1>How much is this session allowed to spend?</h1>
+      <p className="lede">
+        Generating a query costs about $0.0003; judging a pooled result set
+        about $0.008. This cap is the only limit — nothing in the session can
+        spend past it. $2 comfortably covers a full walk-through.
+      </p>
+      <div className="budget-chips">
+        {presets.map((p) => (
+          <button
+            key={p}
+            className={`btn budget-chip${p === dflt ? " primary" : ""}`}
+            disabled={busy}
+            onClick={() => onStart(p)}
+          >
+            ${p.toFixed(2)}
+            {p === dflt && <span className="chip-note">recommended</span>}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function ModeChip({ health }) {
   if (!health) return <span className="mode-chip down"><span className="dot" />SERVICE DOWN</span>;
@@ -42,7 +86,8 @@ export default function App() {
   const [saved, setSaved] = useState(null);
   const [saveError, setSaveError] = useState(null);
   const [suite, setSuite] = useState([]);
-  const [screen, setScreen] = useState("collection");
+  const [screen, setScreen] = useState("welcome");
+  const [budget, setBudget] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -96,6 +141,13 @@ export default function App() {
       return post("/run/check");
     }, "candidate");
 
+  const startSession = (budgetUsd) =>
+    act(async () => {
+      const s = await post("/session", { budget_usd: budgetUsd });
+      setBudget(s);
+      setScreen("collection");
+    });
+
   const repair = () => act(() => post("/run/repair"));
   const answerable = (status) => act(() => post("/run/answerable", { status }));
   const retrieve = () => act(() => post("/run/retrieve"), "retrieval");
@@ -119,7 +171,8 @@ export default function App() {
       setRun(null);
       setSaved(null);
       setSaveError(null);
-      setScreen("collection");
+      setBudget(null);
+      setScreen("welcome");
     });
 
   const stepIndex = STEPS.findIndex((s) => s.id === screen);
@@ -149,9 +202,7 @@ export default function App() {
         </nav>
         <div className="status">
           <ModeChip health={health} />
-          <span className="spend">
-            ${run?.spent_usd ?? "0.0000"} · {run?.calls_used ?? 0}/2 calls
-          </span>
+          {budget && <BurnDown run={run} budget={budget} />}
           <button className="btn" style={{ padding: "5px 12px", fontSize: 12 }} onClick={reset}>
             Start over
           </button>
@@ -159,6 +210,9 @@ export default function App() {
       </header>
       <main>
         {error && <div className="error">{error}</div>}
+        {screen === "welcome" && (
+          <WelcomeScreen health={health} busy={busy} onStart={startSession} />
+        )}
         {screen === "collection" && (
           <CollectionScreen
             source={source}

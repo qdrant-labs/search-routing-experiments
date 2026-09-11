@@ -1152,6 +1152,69 @@ is at commit 26b9a93.
     neither spec nor build. Card must disclose RAR-b's unlicensed upstream
     repackaging and the LLM-authored share.
 
+73. **Demo v3: live graded answer keys via micro-pooling; budget is the only
+    spend cap** (grill-me 2026-09-11, after three-way validation: Codex
+    implementation lens, forked-session coherence lens, Opus product lens; gap
+    analysis against the production goal "zero queries/qrels in, working eval
+    system out"). Plan of record:
+    `~/.claude/plans/cheeky-dreaming-alpaca.md`; the demo design doc gets a
+    dated v2 amendment section.
+
+    (a) *Welcome step:* the presenter sets a session budget — chips $0.50/$2/$5,
+    default $2 — and it is the ONLY spend cap; `max_llm_calls` is removed. Time
+    is guarded by deadlines (20s generate, 15s retrieve, 25s judge).
+
+    (b) *Pooled judging:* after retrieval, the union of each strategy's top-10
+    (metric validity over latency) is judged in ONE batched `/qrels/expand`
+    call, auto-fired concurrently with the results render, with a Skip.
+    Verdicts are namespaced `dataset=f"{collection}-demo"` — never the research
+    lane name, which would pollute the shared verdict bank. `/qrels/expand`
+    gains per-pair `verdicts` (aggregates cannot grade a pool).
+
+    (c) *Grades:* presenter's grounding click → source doc 2/0 (grade 2 is
+    human-only); judge positive → 1; judge negative renders "checked, no
+    support" and counts as UNJUDGED (recall 0.308 — absence of evidence).
+    Human–judge disagreement on the source: human grade stands, the judge's
+    note renders with the recall caveat — never silent, never blocking.
+
+    (d) *Scoring:* per-strategy Hit@1 / NDCG@10 / O (RouterObjective — the
+    definition of record; grade ≥1 is a hit, empty qrels scores 0) rendered
+    UNDER the three result columns; coverage as "N of 10 graded" (knowledge =
+    human-judged + judge-positive only; the rest count as zero — a floor, not
+    a score); divergence badge Δ = max(O) − min(O).
+
+    (e) *Cross-process budget = conservative hold:* deduct a fixed
+    `judge_allowance_usd` (0.05) before the judge call, settle to the actual
+    response spend, FORFEIT the hold on a lost response — overspend and
+    undercount impossible without receipt machinery; lock around session-budget
+    mutations. Judge failure degrades to source-only scoring under the LIVE
+    banner; a replay is never paired with live retrieval.
+
+    (f) *Comparability (the one-way door):* every scored block carries its
+    `retrieval_config` (collection, model ids, slot names, fetch depth,
+    fusion) and `rerun()` APPENDS runs — identity cannot be retrofitted onto
+    overwritten records. Named `retrieval_config`, not "fingerprint" (taken by
+    the catalog heatmap view). Suite UI shows latest run + an ×N chip.
+
+    (g) *Repair issues a new query_id* — text changed means cache identity
+    changed (`/qrels/expand` keys on (dataset, query_id, doc_id)).
+
+    (h) *Export:* `queries.jsonl` (minted text, ours) + `qrels.tsv`
+    (doc_id, grade, provenance) — corpus text never leaves.
+
+    (i) *Destination:* phase 4 = BYO collection (connect form, multi-session,
+    per-collection judge referee sample — the 0.987/0.308 operating point was
+    measured on OUR lanes and is inherited on faith until revalidated);
+    phase 5 = production eval system: cold-start SEED benchmark minted by
+    targeting CELLS directly (the /examine order sheet measures deficits of an
+    existing query set — cold start has none; mintable ceiling today ~11 of 62
+    cells), CLI batch runner over the importable runner with an explicit
+    human-gate policy, config-comparison harness reusing the twice-calibration
+    statistics, "directional, not a winner" reporting at N≈30–100, seed/real
+    segmentation with the measured mint bias. Positioning: "first eval
+    bootstrap for vector search configuration" — integration novelty backed by
+    the S≈R transfer result (1.12), never claimed as new methodology.
+
 ## Deferred questions
 
 - Register/box definitions for eval-time weighting + page-search log

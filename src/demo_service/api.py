@@ -98,7 +98,29 @@ def _respond(action: Callable[[SearchTestDemo], Any]) -> dict:
 @app.get("/health", tags=["ops"])
 def health() -> dict:
     demo = _demo()
-    return {"mode": demo.mode, "reason": demo.replay_reason}
+    return {
+        "mode": demo.mode,
+        "reason": demo.replay_reason,
+        "budget_presets": list(demo.config.budget_presets),
+        "default_budget": demo.config.engine.max_spend_usd,
+    }
+
+
+class SessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    budget_usd: float
+
+
+@app.post("/session", tags=["demo"])
+def start_session(req: SessionRequest) -> dict:
+    """Welcome step: set the session spend cap (the only cap) and start
+    fresh (SPEC d73a)."""
+    try:
+        result = _demo().set_budget(req.budget_usd)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    _state["active_behavior_id"] = None
+    return result
 
 
 @app.get("/source", tags=["demo"])
